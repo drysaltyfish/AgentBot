@@ -41,6 +41,8 @@ type Ctx struct {
 }
 
 // NewCtx 构造事件上下文；State 随事件开始为空。
+//
+//nolint:contextcheck // 仅在调用方传 nil 时兜底 Background；正常路径始终继承调用方 ctx
 func NewCtx(ctx context.Context, ev *event.Event, caller transport.Caller) *Ctx {
 	if ctx == nil {
 		ctx = context.Background()

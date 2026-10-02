@@ -237,7 +237,7 @@ func lineOf(src string, pos parse.Pos) int {
 func checkFields(name string, t *template.Template, src string, sample map[string]any) error {
 	var problems []string
 	for _, tt := range t.Templates() {
-		if tt.Tree == nil || tt.Tree.Root == nil {
+		if tt.Tree == nil || tt.Root == nil {
 			continue
 		}
 		var walk func(parse.Node)
@@ -291,7 +291,7 @@ func checkFields(name string, t *template.Template, src string, sample map[strin
 				walk(node.Pipe)
 			}
 		}
-		walk(tt.Tree.Root)
+		walk(tt.Root)
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("template %s: %s", name, strings.Join(problems, "; "))

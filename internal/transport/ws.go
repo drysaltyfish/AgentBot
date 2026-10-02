@@ -3,7 +3,6 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -265,5 +264,3 @@ var (
 	_ Caller = (*WSClient)(nil)
 	_ Closer = (*WSClient)(nil)
 )
-
-var errUnused = errors.New("")

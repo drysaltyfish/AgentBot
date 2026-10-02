@@ -57,8 +57,8 @@ func Test_F25_ValidateReportsAllProblemsAtOnce(t *testing.T) {
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("error does not wrap ErrInvalid: actual=%v", err)
 	}
-	ve, ok := err.(*ValidationError)
-	if !ok {
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
 		t.Fatalf("error type: actual=%T expected=*config.ValidationError", err)
 	}
 	for _, path := range []string{"transport.mode", "llm.provider", "llm.model", "log.level", "log.format"} {
@@ -81,7 +81,8 @@ func Test_F25_InboundAuthIsFailClosed(t *testing.T) {
 		if err == nil {
 			t.Fatalf("mode=%s without access_token: actual=nil expected=error", mode)
 		}
-		if ve, ok := err.(*ValidationError); !ok || !ve.Has("transport.access_token") {
+		var ve *ValidationError
+		if !errors.As(err, &ve) || !ve.Has("transport.access_token") {
 			t.Fatalf("mode=%s: actual=%v expected problem transport.access_token", mode, err)
 		}
 	}

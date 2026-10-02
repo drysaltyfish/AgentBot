@@ -261,6 +261,8 @@ func (m *Manager) Name() string { return "session-manager" }
 // KeyFor 按策略把事件字段折成会话键。
 func (m *Manager) KeyFor(selfID, groupID, userID int64) Key {
 	switch m.policy {
+	case PerGroup:
+		return Key{SelfID: selfID, GroupID: groupID}
 	case PerUser:
 		return Key{SelfID: selfID, UserID: userID}
 	case PerUserInGroup:

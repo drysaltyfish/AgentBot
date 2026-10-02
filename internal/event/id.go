@@ -35,6 +35,7 @@ func IDFromString(s string) ID {
 		u |= 1 << 32
 	}
 	u &^= 1 << 63 // 保持为正数，便于日志阅读
+	//nolint:gosec // u 的最高位刚被清除，转换到 int64 不会溢出
 	return ID{num: int64(u), raw: s}
 }
 

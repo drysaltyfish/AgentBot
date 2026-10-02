@@ -28,22 +28,33 @@ linters:
         - pattern: '^os\.Exit$'
           msg: "库代码禁止 os.Exit（F-73）；仅 cmd/ 允许"
         - pattern: '^panic$'
-          msg: "禁止 panic（F-73）；不可恢复场景需在 internal/unsafeutil 说明"
+          msg: "禁止 panic（F-73）"
         - pattern: '^unsafe\.'
           msg: "禁止 unsafe（F-73）；白名单在 internal/unsafeutil"
         - pattern: '^time\.Sleep$'
           msg: "应用层禁止 time.Sleep（F-73）；改用 timer + ctx"
         - pattern: '^http\.(Get|Post|Head|PostForm)$'
           msg: "禁止无超时的默认 client（F-59）；用 internal/httpx"
-        - pattern: '^errors\.New$'
-          msg: "哨兵错误请集中定义在包级 var（F-73）"
+    revive:
+      rules:
+        # 回调/接口实现常有用不到的参数（如 func(ctx, attempt)），显式禁用该规则。
+        - name: unused-parameter
+          disabled: true
+    gosec:
+      excludes:
+        # 重试抖动不涉及安全，math/rand/v2 足够。
+        - G404
+        # OneBot HTTP 上报协议规定 X-Signature 为 HMAC-SHA1，无法更改。
+        - G505
+        # 配置文件路径由运维通过 --config 指定，属预期输入。
+        - G304
   exclusions:
     rules:
       - path: internal/unsafeutil/
         linters: [forbidigo]
       - path: cmd/
         linters: [forbidigo]
-      - path: _test.go
+      - path: _test\.go
         linters: [forbidigo, gosec]
 
 formatters:

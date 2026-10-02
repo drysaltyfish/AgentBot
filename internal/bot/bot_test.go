@@ -141,14 +141,6 @@ func Test_F70_ShutdownTimeoutReportsUnfinished(t *testing.T) {
 		t.Fatalf("error should name unfinished components: actual=%v", err)
 	}
 	close(unblock)
-	// 等 wedged 真正退出，goleak 才不会误报。
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(b.ClosedComponents()) >= 0 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
 }
 
 func Test_F70_RegisterAfterRunningIsRejected(t *testing.T) {

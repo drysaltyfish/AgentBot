@@ -82,7 +82,7 @@ func (a *Auth) parse() {
 			}
 			_, n, err := net.ParseCIDR(e)
 			if err != nil {
-				a.parseErr = fmt.Errorf("%w: %q: %v", ErrBadAllowlistEntry, e, err)
+				a.parseErr = fmt.Errorf("%w: %q: %w", ErrBadAllowlistEntry, e, err)
 				return
 			}
 			a.nets = append(a.nets, n)

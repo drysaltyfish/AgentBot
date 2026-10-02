@@ -37,10 +37,7 @@ func DefaultRetryable(err error) bool {
 		return true
 	}
 	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return true
-	}
-	return false
+	return errors.As(err, &netErr)
 }
 
 // RetryLLM 是 LLM 的重试装饰器。

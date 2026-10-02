@@ -31,21 +31,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
 	if err := cfg.Validate(); err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
 
 	if *checkOnly {
 		out, err := cfg.RedactedYAML()
 		if err != nil {
-			fmt.Fprintln(stderr, err)
+			_, _ = fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprint(stdout, out)
+		_, _ = fmt.Fprint(stdout, out)
 		return 0
 	}
 
@@ -95,7 +95,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 
 	go func() {
 		<-sig
-		fmt.Fprintln(stderr, "second signal received: forcing exit")
+		_, _ = fmt.Fprintln(stderr, "second signal received: forcing exit")
 		os.Exit(1)
 	}()
 

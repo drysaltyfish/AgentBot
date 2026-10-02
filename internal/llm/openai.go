@@ -225,6 +225,7 @@ func (o *OpenAI) ChatStream(ctx context.Context, req *ChatRequest) (<-chan Chunk
 	if err != nil {
 		return nil, err
 	}
+	//nolint:bodyclose // resp.Body 由下面的 goroutine 负责关闭（pumpSSE 之后）
 	resp, err := o.cfg.Client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("llm stream request failed: %w", err)

@@ -10,7 +10,9 @@ permissions:
 
 env:
   GO_VERSION: "1.27.1"
-  GOLANGCI_LINT_VERSION: v2.5.0
+  # 必须选用"构建时 Go 版本 >= go.mod 目标版本"的 release，否则 golangci-lint 直接拒绝运行。
+  # v2.14.0 由 go1.27.0 构建，可覆盖 go.mod 的 1.27.1。
+  GOLANGCI_LINT_VERSION: v2.14.0
 
 jobs:
   build-test:

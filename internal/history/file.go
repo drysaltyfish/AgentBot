@@ -14,11 +14,11 @@ import (
 
 // File 是 JSONL 追加型历史存储，便于直接查看与排查（F-38 内置实现之一）。
 type File struct {
-	mu      sync.Mutex
-	path    string
-	max     int
-	trimmer Trimmer
-	now     func() time.Time
+	mu       sync.Mutex
+	path     string
+	maxItems int
+	trimmer  Trimmer
+	now      func() time.Time
 }
 
 type fileRecord struct {
@@ -26,12 +26,12 @@ type fileRecord struct {
 	Item Item   `json:"item"`
 }
 
-// NewFile 构造 JSONL 历史；max <= 0 时使用 DefaultMax。
-func NewFile(path string, max int) *File {
-	if max <= 0 {
-		max = DefaultMax
+// NewFile 构造 JSONL 历史；maxItems <= 0 时使用 DefaultMax。
+func NewFile(path string, maxItems int) *File {
+	if maxItems <= 0 {
+		maxItems = DefaultMax
 	}
-	return &File{path: path, max: max, trimmer: Window{N: max}, now: time.Now}
+	return &File{path: path, maxItems: maxItems, trimmer: Window{N: maxItems}, now: time.Now}
 }
 
 // Append 追加一行 JSON；超过上限时按策略裁剪并重写文件。
@@ -45,10 +45,10 @@ func (f *File) Append(ctx context.Context, key string, item Item) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if err := os.MkdirAll(filepath.Dir(f.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(f.path), 0o750); err != nil {
 		return fmt.Errorf("create history dir: %w", err)
 	}
-	fh, err := os.OpenFile(f.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	fh, err := os.OpenFile(f.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open history file: %w", err)
 	}
@@ -66,7 +66,7 @@ func (f *File) Append(ctx context.Context, key string, item Item) error {
 		return fmt.Errorf("close history file: %w", cerr)
 	}
 
-	if n := f.countLocked(key); n > f.max {
+	if n := f.countLocked(key); n > f.maxItems {
 		return f.rewriteLocked(key, f.trimmer.Apply)
 	}
 	return nil
@@ -147,7 +147,7 @@ func (f *File) rewriteLocked(key string, transform func([]Item) []Item) error {
 	kept := transform(target)
 
 	tmp := f.path + ".tmp"
-	fh, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	fh, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open temp history file: %w", err)
 	}
