@@ -1,0 +1,57 @@
+# 见 FEATURES.md F-73。golangci-lint v2 配置；版本在 CI 中固定。
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - gocritic
+    - bodyclose
+    - contextcheck
+    - errorlint
+    - exhaustive
+    - gosec
+    - revive
+    - forbidigo
+    - misspell
+    - unconvert
+    - copyloopvar
+  settings:
+    forbidigo:
+      forbid:
+        - pattern: '^log\.(Fatal|Fatalf|Fatalln)$'
+          msg: "库代码禁止 log.Fatal（F-73）"
+        - pattern: '^os\.Exit$'
+          msg: "库代码禁止 os.Exit（F-73）；仅 cmd/ 允许"
+        - pattern: '^panic$'
+          msg: "禁止 panic（F-73）；不可恢复场景需在 internal/unsafeutil 说明"
+        - pattern: '^unsafe\.'
+          msg: "禁止 unsafe（F-73）；白名单在 internal/unsafeutil"
+        - pattern: '^time\.Sleep$'
+          msg: "应用层禁止 time.Sleep（F-73）；改用 timer + ctx"
+        - pattern: '^http\.(Get|Post|Head|PostForm)$'
+          msg: "禁止无超时的默认 client（F-59）；用 internal/httpx"
+        - pattern: '^errors\.New$'
+          msg: "哨兵错误请集中定义在包级 var（F-73）"
+  exclusions:
+    rules:
+      - path: internal/unsafeutil/
+        linters: [forbidigo]
+      - path: cmd/
+        linters: [forbidigo]
+      - path: _test.go
+        linters: [forbidigo, gosec]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  fix: false
+  max-issues-per-linter: 0
+  max-same-issues: 0

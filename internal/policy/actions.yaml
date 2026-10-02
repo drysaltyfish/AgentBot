@@ -1,0 +1,45 @@
+# AgentBot 默认权限表（FEATURES.md F-53）。可用外部同名文件覆盖。
+actions:
+  send_msg:
+    desc: 发送消息
+    params: text
+    data: ""
+
+  delete_msg:
+    desc: 撤回消息
+    params: message_id
+    data: ""
+
+  set_group_ban:
+    desc: 禁言群成员
+    params: user_id, duration
+    data: ""
+
+  get_group_member_info:
+    desc: 查询群成员
+    params: user_id
+    data: ""
+
+config:
+  superuser:
+    - send_msg
+    - delete_msg
+    - set_group_ban
+    - get_group_member_info
+
+  owner:
+    - send_msg
+    - delete_msg
+    - set_group_ban
+    - get_group_member_info
+
+  admin:
+    - send_msg
+    - delete_msg
+    - get_group_member_info
+
+  member:
+    - send_msg
+
+  everyone:
+    - send_msg

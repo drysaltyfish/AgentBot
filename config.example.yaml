@@ -1,0 +1,32 @@
+# AgentBot 示例配置。复制为 config.yaml 后按需修改。
+# 校验：go run ./cmd/server --config config.example.yaml --check-config
+transport:
+  mode: wsclient
+  url: ws://127.0.0.1:3001
+  # 入站模式（wsserver / http）必须配置 access_token，否则启动失败（F-80）
+  self_id: 0
+
+llm:
+  provider: openai
+  model: gpt-4o-mini
+  base_url: https://api.openai.com/v1
+  # api_key 建议走环境变量；此处留空表示未设置
+  timeout: 30s
+  max_iterations: 10
+
+prompt:
+  dir: prompts
+
+policy:
+  file: actions.yaml
+
+log:
+  level: info
+  format: json
+  queue_size: 1024
+  debug_content: false
+  components:
+    llm: debug
+
+shutdown:
+  timeout: 10s

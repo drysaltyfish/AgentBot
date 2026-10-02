@@ -1,0 +1,30 @@
+# 本地参考资料：不纳入版本控制
+/参考项目/
+
+# 临时目录
+/.tmp-lic/
+
+# 构建产物
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试与覆盖率
+*.test
+*.out
+coverage.txt
+/coverage
+coverage.html
+
+# 运行时产物（config.yaml 可能含密钥，绝不入库）
+/data/
+/config.yaml
+*.log
+
+# 编辑器
+.idea/
+*.swp
+.DS_Store

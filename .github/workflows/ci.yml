@@ -1,0 +1,84 @@
+# 见 FEATURES.md F-78。Go 版本必须与 go.mod 一致（1.27.1）。
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.27.1"
+  GOLANGCI_LINT_VERSION: v2.5.0
+
+jobs:
+  build-test:
+    name: build / vet / lint / test -race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: 断言 go.mod 与 CI 的 Go 版本一致
+        run: |
+          set -euo pipefail
+          mod_version="$(go mod edit -json | python3 -c 'import json,sys;print(json.load(sys.stdin)["Go"])')"
+          if [ "$mod_version" != "$GO_VERSION" ]; then
+            echo "go.mod 声明 $mod_version，CI 使用 $GO_VERSION" >&2
+            exit 1
+          fi
+      - run: go build ./...
+      - run: go vet ./...
+      - name: golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" "$GOLANGCI_LINT_VERSION"
+          "$(go env GOPATH)/bin/golangci-lint" run
+      - run: go test -race ./...
+
+  golden-cross-platform:
+    name: golden (linux + windows)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go test ./... -run Golden
+      - name: 断言 -update 在 CI 中被拒绝
+        shell: bash
+        run: |
+          if go test ./... -run Golden -update 2>&1 | grep -q "CI"; then
+            echo "-update 在 CI 中未被拒绝" >&2
+            exit 1
+          fi
+
+  bench-coverage:
+    name: bench smoke + coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go test -run=XXX -bench=. -benchtime=1x ./...
+      - name: coverage
+        run: |
+          set -euo pipefail
+          go test -coverprofile=coverage.out ./...
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}' | tr -d '%')"
+          echo "coverage: $total%"
+          awk -v c="$total" 'BEGIN { if (c+0 < 60) { print "coverage below 60%" > "/dev/stderr"; exit 1 } }'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out

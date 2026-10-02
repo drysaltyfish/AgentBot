@@ -1,0 +1,199 @@
+package router
+
+import (
+	"context"
+	"errors"
+	"runtime/debug"
+	"sync"
+
+	"github.com/drysaltyfish/agentbot/internal/event"
+	"github.com/drysaltyfish/agentbot/internal/transport"
+)
+
+// ErrPanic 表示 Rule/Handler 发生 panic（已被调度层恢复）。
+var ErrPanic = errors.New("panic recovered in engine")
+
+// EngineOption 配置 Engine。
+type EngineOption func(*Engine)
+
+// WithPanicHandler 注入 panic 上报回调（例如写日志）。
+func WithPanicHandler(fn func(phase string, recovered any, stack []byte)) EngineOption {
+	return func(e *Engine) { e.onPanic = fn }
+}
+
+// WithRejectHandler 注入"被 pre/mid/规则拒绝"的回调，保证拒绝可观测。
+func WithRejectHandler(fn func(c *Ctx, phase string)) EngineOption {
+	return func(e *Engine) { e.onReject = fn }
+}
+
+// Engine 把三段钩子与路由表组合成一次事件的调度。
+//
+// 执行顺序（对每条可能匹配的路由）：
+//
+//	pre 钩子 -> 路由私有 pre -> 路由 Rules -> mid 钩子 -> Handlers -> post 钩子
+//
+// 任一 pre/mid/Rule 返回 false 表示"本条路由放弃"，继续尝试下一条路由。
+type Engine struct {
+	router *Router
+
+	mu       sync.RWMutex
+	pre      []Rule
+	mid      []Rule
+	post     []Handler
+	onPanic  func(phase string, recovered any, stack []byte)
+	onReject func(c *Ctx, phase string)
+}
+
+// NewEngine 构造调度器。
+func NewEngine(r *Router, opts ...EngineOption) *Engine {
+	e := &Engine{router: r}
+	for _, o := range opts {
+		o(e)
+	}
+	return e
+}
+
+// Router 返回底层路由表。
+func (e *Engine) Router() *Router { return e.router }
+
+// UsePre 注册全局 pre 钩子（黑白名单、功能开关、群组过滤）。
+func (e *Engine) UsePre(rules ...Rule) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pre = append(e.pre, rules...)
+}
+
+// UseMid 注册全局 mid 钩子（限速、单飞、并发闸门）。
+func (e *Engine) UseMid(rules ...Rule) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.mid = append(e.mid, rules...)
+}
+
+// UsePost 注册全局 post 钩子（统计、指标、清理）。
+func (e *Engine) UsePost(hs ...Handler) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.post = append(e.post, hs...)
+}
+
+func (e *Engine) preRules() []Rule {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return append([]Rule(nil), e.pre...)
+}
+
+func (e *Engine) midRules() []Rule {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return append([]Rule(nil), e.mid...)
+}
+
+func (e *Engine) postHandlers() []Handler {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return append([]Handler(nil), e.post...)
+}
+
+// Dispatch 按优先级依次尝试路由，返回被实际执行的路由数量。
+//
+// 单条路由的 panic 不会影响其它路由；post 钩子在 Handler panic 后仍会执行。
+func (e *Engine) Dispatch(ctx context.Context, ev *event.Event, caller transport.Caller) int {
+	c := NewCtx(ctx, ev, caller)
+	matched := 0
+	for _, rt := range e.router.Snapshot() {
+		if rt.removed.Load() {
+			continue
+		}
+		if !KindMatches(rt.Kind, ev) {
+			continue
+		}
+		c.ResetForNextRoute()
+
+		if !e.runRules(c, "pre", e.preRules()...) {
+			e.reject(c, "pre")
+			continue
+		}
+		if !e.runRules(c, "pre-route", rt.PreRules()...) {
+			e.reject(c, "pre-route")
+			continue
+		}
+		if !e.runRules(c, "rules", rt.Rules...) {
+			e.reject(c, "rules")
+			continue
+		}
+		if !e.runRules(c, "mid", e.midRules()...) {
+			e.reject(c, "mid")
+			continue
+		}
+
+		matched++
+		e.runRoute(c, rt)
+
+		if rt.IsOnce() {
+			e.router.Remove(rt)
+		}
+		if rt.Block || rt.Break {
+			break
+		}
+	}
+	return matched
+}
+
+func (e *Engine) runRoute(c *Ctx, rt *Route) {
+	// Block: 本条路由执行后停止尝试后续路由。
+	// Break: 同上，并且跳过 post 钩子（用于"已充分处理、无需统计"的场景）。
+	skipPost := rt.Break
+	defer func() {
+		if r := recover(); r != nil {
+			e.reportPanic("handler", r)
+		}
+		if !skipPost {
+			e.runPost(c)
+		}
+	}()
+	for _, h := range rt.Handlers {
+		h(c)
+	}
+}
+
+func (e *Engine) runPost(c *Ctx) {
+	for _, h := range e.postHandlers() {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					e.reportPanic("post", r)
+				}
+			}()
+			h(c)
+		}()
+	}
+}
+
+func (e *Engine) runRules(c *Ctx, phase string, rules ...Rule) (ok bool) {
+	ok = true
+	defer func() {
+		if r := recover(); r != nil {
+			e.reportPanic(phase, r)
+			ok = false
+		}
+	}()
+	for _, r := range rules {
+		if !r(c) {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *Engine) reportPanic(phase string, recovered any) {
+	if e.onPanic != nil {
+		e.onPanic(phase, recovered, debug.Stack())
+	}
+}
+
+func (e *Engine) reject(c *Ctx, phase string) {
+	if e.onReject != nil {
+		e.onReject(c, phase)
+	}
+}

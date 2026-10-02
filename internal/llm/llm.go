@@ -1,0 +1,142 @@
+// Package llm 实现统一 LLM 接口、流式契约与重试（FEATURES.md F-26 / F-28 / F-30）。
+//
+// 所有上层结构体字段必须是 LLM 接口类型，禁止出现具体实现类型。
+package llm
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+)
+
+var (
+	// ErrNoMessages 表示请求没有任何消息。
+	ErrNoMessages = errors.New("chat request has no messages")
+	// ErrNotImplemented 表示该实现不支持此能力。
+	ErrNotImplemented = errors.New("not implemented")
+)
+
+// Role 是消息角色。
+type Role string
+
+// 角色常量。
+const (
+	RoleSystem    Role = "system"
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool"
+)
+
+// ToolCall 是一次工具调用。
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments string
+}
+
+// Message 是发给模型的一条消息。
+type Message struct {
+	Role       Role
+	Content    string
+	Name       string
+	ToolCalls  []ToolCall
+	ToolCallID string
+}
+
+// ToolSpec 是导出给模型的工具 schema。
+type ToolSpec struct {
+	Name        string
+	Description string
+	Parameters  json.RawMessage
+}
+
+// ResponseFormat 控制结构化输出（F-31 的基础）。
+type ResponseFormat struct {
+	Type   string
+	Schema json.RawMessage
+	Strict bool
+}
+
+// Usage 是 token 计量。
+type Usage struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+}
+
+// ChatRequest 是一次对话请求。
+type ChatRequest struct {
+	Messages       []Message
+	Tools          []ToolSpec
+	Temperature    float64
+	MaxTokens      int
+	ResponseFormat *ResponseFormat
+	Metadata       map[string]string
+}
+
+// Validate 做最小合法性检查。
+func (r *ChatRequest) Validate() error {
+	if r == nil || len(r.Messages) == 0 {
+		return ErrNoMessages
+	}
+	return nil
+}
+
+// ChatResponse 是一次对话结果。
+type ChatResponse struct {
+	Content      string
+	ToolCalls    []ToolCall
+	FinishReason string
+	Usage        Usage
+}
+
+// Chunk 是流式分片；错误也走 channel（F-28）。
+type Chunk struct {
+	Content      string
+	ToolCalls    []ToolCall
+	FinishReason string
+	Done         bool
+	Err          error
+}
+
+// LLM 是统一的对话接口。
+type LLM interface {
+	Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error)
+	ChatStream(ctx context.Context, req *ChatRequest) (<-chan Chunk, error)
+}
+
+// StreamBuffer 是建议的流式 channel 缓冲大小。
+const StreamBuffer = 16
+
+// SendChunk 是所有流式生产者必须使用的发送函数：它监听 ctx，绝不阻塞泄漏。
+//
+// 返回 false 表示 ctx 已取消或 channel 已关闭，生产者应立即退出。
+func SendChunk(ctx context.Context, ch chan<- Chunk, c Chunk) bool {
+	select {
+	case ch <- c:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// DrainChunks 读取整个流并把分片（含最后的错误分片）交给 fn。
+func DrainChunks(ch <-chan Chunk, fn func(Chunk)) {
+	for c := range ch {
+		if fn != nil {
+			fn(c)
+		}
+	}
+}
+
+// FinishReasonToolCalls 是"模型要求调用工具"的终止原因。
+const FinishReasonToolCalls = "tool_calls"
+
+// Describe 返回便于日志的简短描述（不含消息全文）。
+func (r *ChatRequest) Describe() string {
+	if r == nil {
+		return "chat_request<nil>"
+	}
+	return fmt.Sprintf("chat_request{messages=%d,tools=%d,max_tokens=%d}", len(r.Messages), len(r.Tools), r.MaxTokens)
+}
