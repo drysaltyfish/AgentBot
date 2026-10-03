@@ -35,6 +35,8 @@ type Deps struct {
 	HTTP httpx.Config
 	// History 供 recall_history 读取当前会话的历史；为 nil 时该工具会明确报错。
 	History HistoryReader
+	// MemoryAdmin 供 forget_memory / list_memories 遗忘与检视记忆；为 nil 时这两个工具会明确报错。
+	MemoryAdmin MemoryAdmin
 	// Now 注入时间源（测试用）。
 	Now func() time.Time
 }
@@ -58,6 +60,8 @@ func Register(r *tool.Registry, deps Deps) error {
 		memorySave{deps: deps},
 		memoryRecall{deps: deps},
 		recallHistory{deps: deps},
+		forgetMemory{deps: deps},
+		listMemories{deps: deps},
 	} {
 		if err := r.Register(t); err != nil {
 			return err

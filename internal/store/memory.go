@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -439,4 +440,69 @@ func (s *Store) ImportMemoriesJSONL(ctx context.Context, path string) (imported,
 		return imported, skipped, fmt.Errorf("read memory import source: %w", err)
 	}
 	return imported, skipped, nil
+}
+
+// MemoryExportRecord 是导出的一行（字段与内部表一致，便于回读）。
+type MemoryExportRecord struct {
+	ScopeKey   string  `json:"scope_key"`
+	ID         int64   `json:"id"`
+	Kind       string  `json:"kind"`
+	Title      string  `json:"title"`
+	Text       string  `json:"text"`
+	SourceRefs string  `json:"source_refs"`
+	CreatedAt  int64   `json:"created_at"`
+	UpdatedAt  int64   `json:"updated_at"`
+	Score      float64 `json:"score"`
+}
+
+// ExportMemories 把**全部作用域**的记忆写成 JSONL（F-88 的导出）。
+//
+// 导出会跨作用域，因此它是维护命令而非会话内能力——会话内只能看到自己的作用域。
+func (s *Store) ExportMemories(ctx context.Context, w io.Writer) (int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+memoryCols+` FROM memories ORDER BY scope_key ASC, id ASC`)
+	if err != nil {
+		return 0, fmt.Errorf("export memories: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	enc := json.NewEncoder(w)
+	n := 0
+	for rows.Next() {
+		m, err := scanMemory(rows)
+		if err != nil {
+			return n, fmt.Errorf("scan memory for export: %w", err)
+		}
+		rec := MemoryExportRecord{
+			ScopeKey: m.ScopeKey, ID: m.ID, Kind: m.Kind, Title: m.Title, Text: m.Text,
+			SourceRefs: m.SourceRefs, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, Score: m.Score,
+		}
+		if err := enc.Encode(rec); err != nil {
+			return n, fmt.Errorf("encode memory: %w", err)
+		}
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		return n, fmt.Errorf("iterate memories for export: %w", err)
+	}
+	return n, nil
+}
+
+// MemoryScopes 返回存在记忆的全部作用域。
+func (s *Store) MemoryScopes(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT scope_key FROM memories ORDER BY scope_key ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list memory scopes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, fmt.Errorf("scan scope: %w", err)
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
 }
