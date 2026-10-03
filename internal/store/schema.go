@@ -137,3 +137,26 @@ var pendingSchema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_pending_status ON pending(status, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_pending_session ON pending(session_key)`,
 }
+
+var promptSnapshotSchema = []string{
+	// 提示词快照（F-89）。
+	//
+	// 存的是**消息指纹**而不是正文：正文可能含隐私，而前缀比较只需要判断
+	// "这一段是否逐字节相同"。逐条指纹还让"分歧发生在哪一条"可直接算出。
+	//
+	// relation 落库是必要的：只记录指纹而不记录"和上一条比怎么样了"，
+	// 事后就无法回答"前缀是从哪一轮开始不稳的"。
+	`CREATE TABLE IF NOT EXISTS prompt_snapshots (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_key   TEXT    NOT NULL,
+		seq           INTEGER NOT NULL,
+		digest        TEXT    NOT NULL,
+		message_count INTEGER NOT NULL DEFAULT 0,
+		relation      TEXT    NOT NULL DEFAULT '',
+		common_prefix INTEGER NOT NULL DEFAULT 0,
+		slid_by       INTEGER NOT NULL DEFAULT 0,
+		created_at    INTEGER NOT NULL
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_snapshots_session_seq
+		ON prompt_snapshots(session_key, seq)`,
+}

@@ -120,6 +120,7 @@ func (a *ReactAgent) Run(ctx context.Context, in Input) (*Output, error) {
 		}
 		out.Usage = addUsage(out.Usage, resp.Usage)
 		out.LLMCalls++
+		out.PromptDigest = llm.Digest(messages)
 
 		calls := resp.ToolCalls
 		if len(calls) == 0 {
