@@ -40,6 +40,10 @@ linters:
         # 回调/接口实现常有用不到的参数（如 func(ctx, attempt)），显式禁用该规则。
         - name: unused-parameter
           disabled: true
+    exhaustive:
+      # 默认 default 不算穷举；但 reflect.Kind 这类大枚举逐条列出只是噪音，
+      # 而且会与 staticcheck 的 QF1002（要求 tagged switch）互相夹击。
+      default-signifies-exhaustive: true
     gosec:
       excludes:
         # 重试抖动不涉及安全，math/rand/v2 足够。

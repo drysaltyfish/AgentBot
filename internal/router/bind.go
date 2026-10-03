@@ -105,15 +105,14 @@ func setBoundField(field reflect.Value, raw any) error {
 	if raw == nil {
 		return fmt.Errorf("期望 %s，实际为 nil", field.Type())
 	}
-	kind := field.Kind()
-	switch {
-	case kind == reflect.String:
+	switch field.Kind() {
+	case reflect.String:
 		s, ok := raw.(string)
 		if !ok {
 			return bindTypeErr(field.Type(), raw)
 		}
 		field.SetString(s)
-	case kind == reflect.Int || kind == reflect.Int64:
+	case reflect.Int, reflect.Int64:
 		switch n := raw.(type) {
 		case int:
 			field.SetInt(int64(n))
@@ -122,27 +121,28 @@ func setBoundField(field reflect.Value, raw any) error {
 		default:
 			return bindTypeErr(field.Type(), raw)
 		}
-	case kind == reflect.Bool:
+	case reflect.Bool:
 		b, ok := raw.(bool)
 		if !ok {
 			return bindTypeErr(field.Type(), raw)
 		}
 		field.SetBool(b)
-	case kind == reflect.Float64:
+	case reflect.Float64:
 		f, ok := raw.(float64)
 		if !ok {
 			return bindTypeErr(field.Type(), raw)
 		}
 		field.SetFloat(f)
-	case kind == reflect.Slice:
+	case reflect.Slice:
 		ss, ok := raw.([]string)
 		if !ok {
 			return bindTypeErr(field.Type(), raw)
 		}
 		field.Set(reflect.ValueOf(ss))
-	case kind == reflect.Interface:
+	case reflect.Interface:
 		field.Set(reflect.ValueOf(raw))
 	default:
+		// 其余 reflect.Kind（int8/uint/map/…）都不支持：跳过并报错，绝不 panic。
 		return bindTypeErr(field.Type(), raw)
 	}
 	return nil
