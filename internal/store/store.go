@@ -227,6 +227,23 @@ func (s *Store) writeOnce(ctx context.Context, fn func(context.Context, *sql.Tx)
 	return nil
 }
 
+// Read 在共享连接池上执行一次只读操作，供同进程内的其他持久化实现复用连接与配置。
+//
+// 暴露 *sql.DB 而不是逐域封装方法：表结构属于各自的领域包（例如分层记忆表），
+// 而连接池、WAL、busy_timeout 与单写者纪律属于本包。
+//
+// 调用方**只读**：写必须走 Write，否则单写者纪律会被绕过，
+// 那正是 F-83 要避免的"轮到执行到一半才发现锁冲突"。
+func (s *Store) Read(ctx context.Context, fn func(ctx context.Context, db *sql.DB) error) error {
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	return fn(ctx, s.db)
+}
+
 // afterWrite 计数并在够次数时做一次 PASSIVE checkpoint，避免 WAL 无限增长。
 func (s *Store) afterWrite(ctx context.Context) {
 	s.mu.Lock()
