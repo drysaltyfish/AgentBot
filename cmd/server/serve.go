@@ -19,6 +19,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/bot"
 	"github.com/drysaltyfish/agentbot/internal/config"
 	"github.com/drysaltyfish/agentbot/internal/conversation"
+	"github.com/drysaltyfish/agentbot/internal/cost"
 	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
@@ -97,7 +98,19 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		return 1
 	}
 	// F-68：用装饰器收集模型调用的状态、延迟与 token，不改 internal/llm。
-	model = &observedLLM{next: model, cat: catalog, provider: providerName(cfg), model: cfg.LLM.Model}
+	// F-66：成本统计（默认关闭）。计量挂在 LLM 装饰器上，按 provider 真实 usage 记账。
+	var costTracker *cost.Tracker
+	if cfg.Cost.EffectiveEnabled() {
+		t, cerr := buildCostTracker(cfg, lg, catalog)
+		if cerr != nil {
+			lifecycle.Error("cannot build cost tracker", "error", cerr)
+			return 1
+		}
+		costTracker = t
+		defer func() { _ = costTracker.Close() }()
+	}
+
+	model = &observedLLM{next: model, cat: catalog, provider: providerName(cfg), model: cfg.LLM.Model, cost: costTracker}
 
 	// 缓存优先（二）：历史裁剪交给存储层，且用高水位批量裁剪。
 	// 若由装配层每轮裁剪，前缀会逐轮变化，前缀缓存永远无法命中。

@@ -12,6 +12,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/audit"
 	"github.com/drysaltyfish/agentbot/internal/config"
 	"github.com/drysaltyfish/agentbot/internal/event"
+	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
@@ -293,4 +294,48 @@ func Test_F46_SandboxPolicyFromConfig(t *testing.T) {
 	if _, _, err := sandboxPolicyFromConfig(cfg); err == nil {
 		t.Fatalf("相对路径白名单应在启动期报错")
 	}
+}
+
+// Test_F66_ObservedLLMRecordsCost 覆盖 F-66 的接线：LLM 装饰器把真实 usage 记进成本器。
+// 注意 cat 传 nil——这同时验证"记账不依赖指标目录"，避免 cat 为空时静默丢账。
+func Test_F66_ObservedLLMRecordsCost(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Cost.Enabled = ptr(true)
+	cfg.Cost.Prices = map[string]config.CostPrice{
+		"test-model": {InputPer1K: 0.01, OutputPer1K: 0.02},
+	}
+	tracker, err := buildCostTracker(cfg, testLogger(t), nil)
+	if err != nil {
+		t.Fatalf("buildCostTracker: %v", err)
+	}
+	defer func() { _ = tracker.Close() }()
+
+	obs := &observedLLM{
+		next:     stubLLM{resp: &llm.ChatResponse{Usage: llm.Usage{PromptTokens: 1000, CompletionTokens: 500}}},
+		provider: "test",
+		model:    "test-model",
+		cost:     tracker,
+	}
+	if _, err := obs.Chat(context.Background(), &llm.ChatRequest{}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	agg := tracker.Global()
+	if agg.Calls != 1 {
+		t.Fatalf("应记录 1 次调用: %+v", agg)
+	}
+	if agg.Cost <= 0 {
+		t.Fatalf("应按价格表算出费用: %+v", agg)
+	}
+}
+
+type stubLLM struct{ resp *llm.ChatResponse }
+
+func (s stubLLM) Chat(context.Context, *llm.ChatRequest) (*llm.ChatResponse, error) {
+	return s.resp, nil
+}
+
+func (s stubLLM) ChatStream(context.Context, *llm.ChatRequest) (<-chan llm.Chunk, error) {
+	return nil, nil
 }

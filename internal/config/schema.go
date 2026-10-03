@@ -69,4 +69,5 @@ type Config struct {
 	Singleflight Singleflight `yaml:"singleflight"`
 	Moderation   Moderation   `yaml:"moderation"`
 	Sandbox      Sandbox      `yaml:"sandbox"`
+	Cost         Cost         `yaml:"cost"`
 }

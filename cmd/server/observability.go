@@ -12,6 +12,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/agent"
 	"github.com/drysaltyfish/agentbot/internal/audit"
 	"github.com/drysaltyfish/agentbot/internal/config"
+	"github.com/drysaltyfish/agentbot/internal/cost"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/moderation"
@@ -43,6 +44,8 @@ type observedLLM struct {
 	cat      *metrics.Catalog
 	provider string
 	model    string
+	// cost 是 F-66 的成本统计器；nil 表示未启用。
+	cost *cost.Tracker
 }
 
 var _ llm.LLM = (*observedLLM)(nil)
@@ -64,6 +67,20 @@ func (o *observedLLM) ChatStream(ctx context.Context, req *llm.ChatRequest) (<-c
 }
 
 func (o *observedLLM) observe(start time.Time, resp *llm.ChatResponse, err error) {
+	// F-66：按 provider 真实 usage 记账（不做估算）。
+	// 必须放在指标之前：否则 cat 为 nil 时会把成本一起吞掉（静默丢账比指标缺失严重）。
+	// 当前只带 provider/model/latency：会话键还没进到 LLM 调用链，
+	// 因此会话/用户维度配额暂时无法强制（配置里已如实说明）。
+	if o.cost != nil && resp != nil {
+		_, _ = o.cost.Record(cost.Call{
+			Provider:         o.provider,
+			Model:            o.model,
+			PromptTokens:     resp.Usage.PromptTokens,
+			CompletionTokens: resp.Usage.CompletionTokens,
+			Latency:          time.Since(start),
+			Timestamp:        time.Now(),
+		})
+	}
 	if o.cat == nil {
 		return
 	}
@@ -494,4 +511,40 @@ func compileWordsFile(path, replacement string) (*textguard.Matcher, error) {
 		rules = append(rules, textguard.Rule{Word: line})
 	}
 	return textguard.New(rules, textguard.Options{DefaultReplacement: replacement, Normalize: true})
+}
+
+// buildCostTracker 构造成本统计器（F-66）。
+func buildCostTracker(cfg *config.Config, lg *observe.Logger, cat *metrics.Catalog) (*cost.Tracker, error) {
+	_ = cat // 指标接缝预留给后续（当前由 metrics Catalog 之外的调用方使用）
+	prices := cost.PriceTable{Prices: map[string]cost.Price{}, Unknown: cost.UnknownWarnZero}
+	if cfg.Cost.EffectiveUnknownModel() == "reject" {
+		prices.Unknown = cost.UnknownReject
+	}
+	for model, p := range cfg.Cost.Prices {
+		prices.Prices[model] = cost.Price{InputPer1K: p.InputPer1K, OutputPer1K: p.OutputPer1K}
+	}
+	quotas := make([]cost.Quota, 0, len(cfg.Cost.Quotas))
+	for _, q := range cfg.Cost.Quotas {
+		quotas = append(quotas, cost.Quota{
+			Scope:          cost.Scope(q.Scope),
+			Period:         cost.Period(q.Period),
+			Limit:          q.Limit,
+			SoftLimit:      q.SoftLimit,
+			Action:         cost.Action(q.Action),
+			DowngradeModel: q.DowngradeModel,
+		})
+	}
+	t, err := cost.New(cost.Options{
+		Prices:    prices,
+		Quotas:    quotas,
+		QueueSize: cfg.Cost.EffectiveQueueSize(),
+		Warn:      func(msg string) { lg.Component("cost").Warn(msg) },
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build cost tracker: %w", err)
+	}
+	lg.Component("cost").Info("cost tracking enabled",
+		"models", len(prices.Prices), "quotas", len(quotas),
+		"unknown_model", cfg.Cost.EffectiveUnknownModel())
+	return t, nil
 }

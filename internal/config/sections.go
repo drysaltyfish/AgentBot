@@ -246,6 +246,54 @@ type Singleflight struct {
 	Notice *bool `yaml:"notice"`
 }
 
+// Cost 描述成本统计与配额（F-66）。默认关闭。
+type Cost struct {
+	Enabled *bool `yaml:"enabled"`
+	// UnknownModel 是未识别模型的计价策略：warn_zero（默认）或 reject。
+	UnknownModel string `yaml:"unknown_model"`
+	// QueueSize 是异步持久化队列长度；<=0 取 256。
+	QueueSize *int `yaml:"queue_size"`
+	// Prices 是"每模型每千 token 单价"表。
+	Prices map[string]CostPrice `yaml:"prices"`
+	// Quotas 是配额列表。
+	Quotas []CostQuota `yaml:"quotas"`
+}
+
+// CostPrice 是单个模型的价格（每千 token）。
+type CostPrice struct {
+	InputPer1K  float64 `yaml:"input_per_1k"`
+	OutputPer1K float64 `yaml:"output_per_1k"`
+}
+
+// CostQuota 是一条配额。
+type CostQuota struct {
+	Scope          string  `yaml:"scope"`  // global | session | user
+	Period         string  `yaml:"period"` // day | month | total
+	Limit          float64 `yaml:"limit"`
+	SoftLimit      float64 `yaml:"soft_limit"`
+	Action         string  `yaml:"action"` // deny | downgrade | warn
+	DowngradeModel string  `yaml:"downgrade_model"`
+}
+
+// EffectiveEnabled 返回是否启用成本统计；未配置时默认关闭。
+func (c Cost) EffectiveEnabled() bool { return orBool(c.Enabled, false) }
+
+// EffectiveQueueSize 返回异步持久化队列长度；未配置或非正时取 256。
+func (c Cost) EffectiveQueueSize() int {
+	if c.QueueSize == nil || *c.QueueSize <= 0 {
+		return 256
+	}
+	return *c.QueueSize
+}
+
+// EffectiveUnknownModel 返回未识别模型的计价策略；未配置时默认 warn_zero。
+func (c Cost) EffectiveUnknownModel() string {
+	if c.UnknownModel == "" {
+		return "warn_zero"
+	}
+	return c.UnknownModel
+}
+
 // Sandbox 描述工具执行沙箱（F-46）。
 //
 // 默认关闭：它会限制既有工具的能力，属于改变行为的开关。
