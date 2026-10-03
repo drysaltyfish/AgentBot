@@ -87,3 +87,31 @@ var sessionsColumns = []columnSpec{
 	{Table: "sessions", Name: "pricing_version", DDL: "pricing_version TEXT NOT NULL DEFAULT ''"},
 	{Table: "sessions", Name: "estimated_cost_usd", DDL: "estimated_cost_usd REAL NOT NULL DEFAULT 0"},
 }
+
+var memoriesSchema = []string{
+	// 长期记忆（F-87）。
+	//
+	// scope_key 参与**所有**读写路径：跨作用域串读是隐私缺陷，不是粒度选择。
+	// fingerprint 是"作用域 + 正文"的指纹，让重放天然幂等。
+	`CREATE TABLE IF NOT EXISTS memories (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		scope_key   TEXT    NOT NULL,
+		kind        TEXT    NOT NULL DEFAULT 'fact',
+		title       TEXT    NOT NULL DEFAULT '',
+		text        TEXT    NOT NULL,
+		source_refs TEXT    NOT NULL DEFAULT '[]',
+		created_at  INTEGER NOT NULL,
+		updated_at  INTEGER NOT NULL,
+		score       REAL    NOT NULL DEFAULT 0,
+		fingerprint TEXT    NOT NULL
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_scope_fingerprint
+		ON memories(scope_key, fingerprint)`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope_key, id)`,
+}
+
+var memoriesColumns = []columnSpec{
+	{Table: "memories", Name: "score", DDL: "score REAL NOT NULL DEFAULT 0"},
+	{Table: "memories", Name: "title", DDL: "title TEXT NOT NULL DEFAULT ''"},
+	{Table: "memories", Name: "source_refs", DDL: "source_refs TEXT NOT NULL DEFAULT '[]'"},
+}

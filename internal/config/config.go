@@ -121,6 +121,18 @@ type Agent struct {
 	AutoMemory AutoMemory `yaml:"auto_memory"`
 	// ProactiveMemory 让模型自己判断什么值得长期记住。
 	ProactiveMemory ProactiveMemory `yaml:"proactive_memory"`
+	// MemoryJudge 控制记忆写入的语义判官（F-87）。
+	MemoryJudge MemoryJudge `yaml:"memory_judge"`
+}
+
+// MemoryJudge 描述记忆写入的语义判官。
+//
+// 判官只在**相似度落在歧义带**时被问一次：字符相似度足以处理明显的情况，
+// 只有真正含糊的那一小撮（例如「旧的一条」与「新的一条」相似度正好 0.50）
+// 才值得花一次模型调用。判官不可用时退回确定性判据，写入照常成功。
+type MemoryJudge struct {
+	// Enabled 为 nil 时按启用处理。
+	Enabled *bool `yaml:"enabled"`
 }
 
 // AutoMemory 描述"记住：xxx"这类指令的自动写入。

@@ -281,3 +281,6 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 		return nil
 	}
 }
+
+// ErrImportSourceMissing 表示导入源文件不存在。
+var ErrImportSourceMissing = errors.New("import source does not exist")
