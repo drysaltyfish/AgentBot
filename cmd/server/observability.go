@@ -18,6 +18,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/ops"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
+	"github.com/drysaltyfish/agentbot/internal/reload"
 	"github.com/drysaltyfish/agentbot/internal/router"
 	"github.com/drysaltyfish/agentbot/internal/secrets"
 	"github.com/drysaltyfish/agentbot/internal/store"
@@ -445,4 +446,52 @@ func moderationPreHook(eng *moderation.Engine, cat *metrics.Catalog, alog *audit
 			"user_id", c.Event.UserID, "group_id", c.Event.GroupID)
 		return false
 	}
+}
+
+// watchSensitiveWords 热加载敏感词表（F-24 里点名的"敏感词表"一项）。
+//
+// 文件变化 -> 重新编译 AC 自动机 -> SwapMatcher 原子替换（不阻塞 Review）。
+// 编译失败时保留旧词表并告警：词表写错的代价不该是"审核失效"。
+func watchSensitiveWords(ctx context.Context, path string, replacement *string, eng *moderation.Engine, lg *observe.Logger) *reload.Watcher[*textguard.Matcher] {
+	if eng == nil || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	mlog := lg.Component("moderation")
+	rep := "***"
+	if replacement != nil {
+		rep = *replacement
+	}
+	build := func() (*textguard.Matcher, error) { return compileWordsFile(path, rep) }
+
+	var w *reload.Watcher[*textguard.Matcher]
+	w = reload.New([]string{path}, build, reload.Options{
+		OnSwap: func(version uint64, _ string) {
+			if m, ok := w.Current(); ok {
+				eng.SwapMatcher(m)
+				mlog.Info("sensitive words reloaded", "version", version)
+			}
+		},
+		Warn: func(err error) {
+			mlog.Warn("sensitive words reload failed; keeping the previous list", "error", err)
+		},
+	})
+	w.Start(ctx)
+	return w
+}
+
+// compileWordsFile 从词表文件编译自动机（忽略空行与 # 注释）。
+func compileWordsFile(path, replacement string) (*textguard.Matcher, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read sensitive words %s: %w", path, err)
+	}
+	var rules []textguard.Rule
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		rules = append(rules, textguard.Rule{Word: line})
+	}
+	return textguard.New(rules, textguard.Options{DefaultReplacement: replacement, Normalize: true})
 }
