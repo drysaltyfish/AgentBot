@@ -12,8 +12,9 @@
 ## 2. 当前状态（干净、已推送）
 
 - HEAD = 21059e7，已推送；工作区干净，本轮本地 build/vet/test/gofmt 全绿，CI 走 `gh run watch`。
-- **功能：86/89 完成**；剩 F-23（F-65 已于本轮完成三段式前缀与 `/prompt-hash`）。
-- **接线：10/15 完成**（含 F-36/F-37、F-71、F-66 计量与 /cost，以及本轮 F-65 + F-82）。这是最大的缺口：按仓库自己的 **F-79**，未接线 = 未交付。
+- **功能：87/89 完成**；剩下两条（F-07 多账号、F-27 多供应商）在目标范围之外。
+  范围内全部完成：F-65 三段式前缀（21059e7）、F-23 定期回收接线（本轮）。
+- **接线：11/15 完成**（含 F-36/F-37、F-71、F-66 计量与 /cost、F-65、F-82、F-23）。这是最大的缺口：按仓库自己的 **F-79**，未接线 = 未交付。
 
 ### 已完成的接线（7 处）
 
@@ -28,20 +29,20 @@
 | F-36 / F-37 | LLM Evaluator + `agent.paradigm`（reflexion / orchestrator） | Test_F36_ReflexionParadigmDrivesEvaluation（断言评估器被调用 2 次） |
 | F-65 | 三段式前缀（静态/半静态/动态）+ `/prompt-hash` 接线 | Test_F65_StaticSegmentIsByteStableAcrossDynamicInputs、Test_F65_HalfStaticTracksPersonaNotScope、Test_F65_PromptHashWithoutPersonaStillReportsStatic |
 | F-82（剩余） | SQLite 会话人格持久化 + `/persona` 切换 + RouteKey/Fingerprint 喂半静态段 | Test_F82_PersonaPersistsAcrossReopen、Test_F82_PersonaSwitchChangesPromptHash、Test_F82_DefaultPersonaDoesNotDuplicateTheStaticSegment |
+| F-23 | 定期回收接入 Bot 生命周期（`app.Go`，不再是没人启动的 `StartReclaimer`） | Test_F23_ReclaimerIsOwnedByBotLifecycle（100 会话回收 + Shutdown 后回收器确实停止） |
 
 ## 3. 剩余工作
 
-### 3.1 功能（2 条）
+### 3.1 功能（0 条）
 
-- **F-23 会话生命周期与回收**（FEATURES.md:713，属"验收"）。
-- ~~**F-65 提示词前缀稳定化**（FEATURES.md:1876，属"验收"）~~ **已完成**（21059e7）：
-  `conversation.Assembler` 支持半静态段与 `Segments` 哈希报告，`/prompt-hash` 已接线，
-  静态段 100 次渲染逐字节稳定有测试守住。
+- ~~**F-23 会话生命周期与回收**~~ **已接线并验收**：`startSessionReclaimer` 用 `app.Go`
+  把定期回收挂到 Bot 的生命周期上（此前 `Manager.StartReclaimer` 在组合根从未被调用，
+  等于定期回收在生产里不存在）。验收测试见 §2 表格。
+  "固化记忆"不需要额外钩子：记忆在写入时已落 SQLite（F-87），回收没有待刷的数据。
+- ~~**F-65 提示词前缀稳定化**~~ **已完成**（21059e7）。
 
-剩 F-23，建议做法：不要补单点测试，而应做**端到端验收**——
-多轮工具调用、人格切换后 ComparePrefix 的类别变化、会话回收后的内存/历史释放。
-internal/textsim 已有 ComparePrefix（RelationSlid / Diverged 等），
-F-82 的 RouteKey / Fingerprint 是 F-65 的输入。
+范围内的功能全部完成。剩余工作只有 §3.2 的接线；
+F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 
 ### 3.2 接线（剩 7 处，按建议顺序）
 
