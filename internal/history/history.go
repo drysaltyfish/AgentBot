@@ -7,6 +7,8 @@ package history
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -34,12 +36,19 @@ type ToolCall struct {
 
 // Item 是一条历史条目。
 type Item struct {
-	Kind       Kind
-	Content    string
+	Kind    Kind
+	Content string
+	// Name 是工具名（工具轮次用）。
 	Name       string
 	ToolCallID string
 	ToolCalls  []ToolCall
 	At         time.Time
+	// SpeakerID / SpeakerName 标识发言人（群聊才有；私聊为 0）。
+	//
+	// 发言人**不进 Content**：Content 保持干净，检索返回的正文才干净、
+	// 全文索引也不会被 "[QQ123]" 这种前缀污染。标签在渲染时生成。
+	SpeakerID   int64
+	SpeakerName string
 }
 
 // Clone 返回深拷贝，避免调用方改动内部状态（F-38 边界）。
@@ -208,4 +217,29 @@ func DanglingToolCalls(items []Item) int {
 		}
 	}
 	return n
+}
+
+// RenderText 返回给模型看的正文：发言人标签 + 时间 + 原内容。
+//
+// 为什么标签在**渲染时**生成，而不是写库时烤进 Content：
+//   - 检索（recall_history）返回的正文保持干净，用户看到的是原话
+//   - 全文索引不被 "[QQ123] (10-03 18:23)" 这类前缀污染
+//     （否则搜 "QQ" 会命中全部消息）
+//   - 格式演进不必重写历史——这是"只追加"纪律能继续成立的前提
+//
+// 标签同时给出**昵称与 QQ 号**：QQ 号是稳定锚点（昵称改了也认得出是同一个人），
+// 昵称让模型能自然称呼对方而不必每次去查。这也是调研推荐的形式
+// （who said what, and when）。
+func (i Item) RenderText() string {
+	if i.SpeakerID <= 0 {
+		return i.Content
+	}
+	label := fmt.Sprintf("[QQ%d]", i.SpeakerID)
+	if name := strings.TrimSpace(i.SpeakerName); name != "" {
+		label = fmt.Sprintf("%s[QQ%d]", name, i.SpeakerID)
+	}
+	if i.At.IsZero() {
+		return label + " " + i.Content
+	}
+	return fmt.Sprintf("%s (%s) %s", label, i.At.Format("01-02 15:04"), i.Content)
 }

@@ -32,6 +32,10 @@ type Message struct {
 	TokenCount  int64
 	CreatedAt   int64
 	Fingerprint string
+	// SpeakerID / SpeakerName 标识发言人（群聊才有）。
+	// 与正文分开存：正文保持干净，标签在渲染时拼。
+	SpeakerID   int64
+	SpeakerName string
 }
 
 // MessageHit 是一条检索命中：消息本体 + 片段 + 前后各一条。
@@ -43,7 +47,7 @@ type MessageHit struct {
 	After   *Message
 }
 
-const messageCols = "id, session_key, seq, role, kind, content, name, tool_call_id, tool_calls, token_count, created_at, fingerprint"
+const messageCols = "id, session_key, seq, role, kind, content, name, tool_call_id, tool_calls, token_count, created_at, fingerprint, speaker_id, speaker_name"
 
 // messageColsQ 是带表名前缀的列清单。
 //
@@ -51,12 +55,14 @@ const messageCols = "id, session_key, seq, role, kind, content, name, tool_call_
 // 不带前缀会直接报 "ambiguous column name: content"。
 const messageColsQ = "messages.id, messages.session_key, messages.seq, messages.role, messages.kind, " +
 	"messages.content, messages.name, messages.tool_call_id, messages.tool_calls, " +
-	"messages.token_count, messages.created_at, messages.fingerprint"
+	"messages.token_count, messages.created_at, messages.fingerprint, " +
+	"messages.speaker_id, messages.speaker_name"
 
 func scanMessage(sc interface{ Scan(...any) error }) (Message, error) {
 	var m Message
 	err := sc.Scan(&m.ID, &m.SessionKey, &m.Seq, &m.Role, &m.Kind, &m.Content,
-		&m.Name, &m.ToolCallID, &m.ToolCalls, &m.TokenCount, &m.CreatedAt, &m.Fingerprint)
+		&m.Name, &m.ToolCallID, &m.ToolCalls, &m.TokenCount, &m.CreatedAt, &m.Fingerprint,
+		&m.SpeakerID, &m.SpeakerName)
 	return m, err
 }
 
@@ -108,10 +114,10 @@ func (s *Store) AppendMessage(ctx context.Context, m Message) (int64, bool, erro
 
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO messages
-			 (session_key, seq, role, kind, content, name, tool_call_id, tool_calls, token_count, created_at, fingerprint)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 (session_key, seq, role, kind, content, name, tool_call_id, tool_calls, token_count, created_at, fingerprint, speaker_id, speaker_name)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			m.SessionKey, seq, m.Role, m.Kind, m.Content, m.Name, m.ToolCallID, m.ToolCalls,
-			m.TokenCount, m.CreatedAt, m.Fingerprint)
+			m.TokenCount, m.CreatedAt, m.Fingerprint, m.SpeakerID, m.SpeakerName)
 		if err != nil {
 			return fmt.Errorf("insert message: %w", err)
 		}
@@ -303,7 +309,7 @@ func (s *Store) searchFTS(ctx context.Context, sessionKey, needle string, limit 
 		)
 		if err := rows.Scan(&m.ID, &m.SessionKey, &m.Seq, &m.Role, &m.Kind, &m.Content,
 			&m.Name, &m.ToolCallID, &m.ToolCalls, &m.TokenCount, &m.CreatedAt, &m.Fingerprint,
-			&snippet); err != nil {
+			&m.SpeakerID, &m.SpeakerName, &snippet); err != nil {
 			return nil, fmt.Errorf("scan fts hit: %w", err)
 		}
 		out = append(out, MessageHit{Message: m, Snippet: snippet})

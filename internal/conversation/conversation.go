@@ -99,7 +99,9 @@ func ToMessages(items []history.Item) []llm.Message {
 func toMessage(it history.Item) (llm.Message, bool) {
 	switch it.Kind {
 	case history.KindUser:
-		return llm.Message{Role: llm.RoleUser, Content: it.Content}, true
+		// 发言人标签与时间在**这里**渲染，而不是写库时烤进正文：
+		// 检索返回的正文因此保持干净，全文索引也不被前缀污染。
+		return llm.Message{Role: llm.RoleUser, Content: it.RenderText()}, true
 	case history.KindAssistant:
 		m := llm.Message{Role: llm.RoleAssistant, Content: it.Content, Name: it.Name}
 		for _, tc := range it.ToolCalls {
