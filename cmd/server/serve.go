@@ -396,6 +396,10 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	if modEngine != nil {
 		engine.UsePre(moderationPreHook(modEngine, catalog, auditLog, lg))
 	}
+	// F-24：敏感词表热加载——改词表不必重启（编译失败保留旧表）。
+	if w := watchSensitiveWords(listenCtx, cfg.Moderation.SensitiveWordsFile, cfg.Moderation.MaskReplacement, modEngine, lg); w != nil {
+		defer w.Stop()
+	}
 
 	// F-18：令牌桶限速（默认关闭）。超限事件会被整条丢弃——这是刻意的：
 	// 限速的目的就是让刷屏不产生任何 LLM 调用，代价远低于额度被打爆。
