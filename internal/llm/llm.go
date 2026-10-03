@@ -37,11 +37,16 @@ type ToolCall struct {
 
 // Message 是发给模型的一条消息。
 type Message struct {
-	Role       Role
-	Content    string
-	Name       string
-	ToolCalls  []ToolCall
-	ToolCallID string
+	Role    Role
+	Content string
+	// ReasoningContent 是思考模式的思维链。
+	//
+	// DeepSeek 的规定：请求**携带 tools** 时，历史轮次的 reasoning_content 必须回传，
+	// 且会被拼进上下文；不携带 tools 时回传也会被忽略。这里一律透传，由服务端决定。
+	ReasoningContent string
+	Name             string
+	ToolCalls        []ToolCall
+	ToolCallID       string
 }
 
 // ToolSpec 是导出给模型的工具 schema。

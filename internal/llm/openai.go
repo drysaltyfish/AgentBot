@@ -178,7 +178,13 @@ func (o *OpenAI) toWire(req *ChatRequest, stream bool) wireRequest {
 			}
 		}
 		for _, m := range req.Messages {
-			wm := wireMessage{Role: string(m.Role), Content: m.Content, Name: m.Name, ToolCallID: m.ToolCallID}
+			wm := wireMessage{
+				Role:             string(m.Role),
+				Content:          m.Content,
+				ReasoningContent: m.ReasoningContent,
+				Name:             m.Name,
+				ToolCallID:       m.ToolCallID,
+			}
 			for _, tc := range m.ToolCalls {
 				wm.ToolCalls = append(wm.ToolCalls, wireToolCall{
 					ID:       tc.ID,
