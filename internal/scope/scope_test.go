@@ -18,7 +18,11 @@ func TestAbsentIsEmpty(t *testing.T) {
 	if got := ScopeFrom(context.Background()); got != "" {
 		t.Fatalf("ScopeFrom(empty) = %q, want empty", got)
 	}
-	if got := ScopeFrom(nil); got != "" {
+	// 刻意传 nil：ScopeFrom 的契约就是"nil ctx 也安全"。
+	// staticcheck 的 SA1012 防的是"该用 context.TODO() 却传了 nil"的误用，
+	// 而这里正是要断言 nil 的容错，因此显式豁免。
+	var nilCtx context.Context
+	if got := ScopeFrom(nilCtx); got != "" { //nolint:staticcheck // 见上：故意断言 nil ctx 的容错
 		t.Fatalf("ScopeFrom(nil) = %q, want empty", got)
 	}
 }
