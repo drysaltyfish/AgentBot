@@ -476,6 +476,12 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	}
 	// 呈现窗口交给装配层：窗口按批量滑动（见 conversation.trimHistory），
 	// 因此存储可以留得更多而不打碎前缀缓存。
+	// 让模型自己判断该记什么：把长期记忆指令并入系统提示词末尾。
+	// 追加在末尾且内容固定，因此不可变前缀的完整性不受影响。
+	if boolOr(cfg.Agent.ProactiveMemory.Enabled, true) {
+		sysPrompt = agent.ComposeSystemPrompt(sysPrompt,
+			agent.ProactiveMemoryInstruction(cfg.Agent.ProactiveMemory.Instruction))
+	}
 	asm := conversation.New(conversation.Options{System: sysPrompt, MaxHistory: histItems})
 	lg.Component("llm").Info("cache-first layout pinned",
 		"prefix_hash", asm.PrefixHash(), "prefix_runes", len([]rune(sysPrompt)),
@@ -551,11 +557,15 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 
 	// F-48 的规则触发：用户说"记住：xxx"时自动写入记忆，不依赖模型是否调工具。
 	var autoMem *agent.MemoryCommand
-	if boolOr(cfg.Agent.AutoMemory.Enabled, true) {
+	if cfg.Agent.AutoMemory.Enabled {
 		autoMem = agent.NewMemoryCommand(cfg.Agent.AutoMemory.Triggers)
 		lg.Component("agent").Info("explicit memory commands are auto-saved",
 			"triggers", autoMem.Triggers())
+	} else {
+		lg.Component("agent").Info("keyword-triggered memory is disabled")
 	}
+	lg.Component("agent").Info("proactive memory (model decides)",
+		"enabled", boolOr(cfg.Agent.ProactiveMemory.Enabled, true))
 
 	pipeline := replyPipeline{
 		brain: brain, sender: sender, sessions: sessions, asm: asm,
