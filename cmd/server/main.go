@@ -24,6 +24,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/httpx"
 	"github.com/drysaltyfish/agentbot/internal/llm"
+	"github.com/drysaltyfish/agentbot/internal/memory"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/retry"
@@ -188,6 +189,37 @@ func buildLLM(cfg *config.Config, lg *observe.Logger) (llm.LLM, error) {
 	}
 }
 
+// buildJudgeLLM 构造**关闭思考**的语义判官客户端（F-87）。
+//
+// 关闭思考是刻意的：判定只需要一个标签，开着思考会为它多花几百个 token 与几秒延迟。
+// 复用同一个 provider 与端点，只是换一组模型参数——因此不需要第二份配置。
+func buildJudgeLLM(cfg *config.Config, lg *observe.Logger) (llm.LLM, error) {
+	provider := strings.ToLower(strings.TrimSpace(cfg.LLM.Provider))
+	switch provider {
+	case "echo":
+		// 假模型判不了语义；返回 nil 让调用方退回确定性判据。
+		lg.Component("memory").Info("echo provider cannot judge semantics; using the deterministic threshold")
+		return nil, nil
+	case "", "openai", "deepseek":
+		client := httpx.NewClient(httpx.Config{
+			Timeout:      llmTimeout(cfg),
+			MaxBytes:     httpx.Defaults().MaxBytes,
+			MaxRedirects: 3,
+		})
+		noThinking := false // 判官不需要思考
+		base := llm.NewOpenAI(llm.OpenAIConfig{
+			BaseURL:  baseURL(cfg, provider),
+			APIKey:   stringOr(cfg.LLM.APIKey, ""),
+			Model:    cfg.LLM.Model,
+			Client:   client,
+			Thinking: &noThinking,
+		})
+		return llm.NewRetryLLM(base, retry.Default()), nil
+	default:
+		return nil, fmt.Errorf("unsupported llm.provider %q", cfg.LLM.Provider)
+	}
+}
+
 // baseURL 在未显式配置时给出该 provider 的默认端点。
 //
 // 注意：config.Default() 会把 base_url 预置成 OpenAI 的地址，所以 deepseek 必须同时
@@ -319,7 +351,7 @@ func agentRole(ev *event.Event) agent.Role {
 //
 // 返回的是 agent.Agent 接口：未启用 ReAct 时返回 DirectAgent，
 // 因此调用方对两条路径完全同形，不需要分支。
-func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist history.History, lg *observe.Logger) (agent.Agent, agent.Memory, error) {
+func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist history.History, st *store.Store, lg *observe.Logger) (agent.Agent, agent.Memory, error) {
 	if !cfg.Agent.Enabled {
 		return &agent.DirectAgent{LLM: model, SystemPrompt: sysPrompt}, nil, nil
 	}
@@ -328,22 +360,48 @@ func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist histor
 		lg.Component("tool").Warn(msg)
 	}))
 
+	// F-87：记忆落在持久层。
+	//
+	// 语义判官用**关闭思考**的模型：只在相似度落在歧义带时才问一次，
+	// 因此绝大多数字记忆写入不付额外调用。判官不可用时退回确定性判据，
+	// 写入照常成功——判官只是把判定做得更准，不是必须依赖。
+	maxPerScope := intOr(cfg.Agent.MemoryMax, 64)
+	var judge memory.Judge
+	if boolOr(cfg.Agent.MemoryJudge.Enabled, true) {
+		jm, jerr := buildJudgeLLM(cfg, lg)
+		switch {
+		case jerr != nil:
+			lg.Component("lifecycle").Warn("cannot build the memory judge; ambiguous writes use the deterministic threshold", "error", jerr)
+		case jm == nil:
+			// echo provider：判不了语义，保持 judge 为 nil。
+		default:
+			judge = memory.NewLLMJudge(jm, func(msg string) { lg.Component("memory").Debug(msg) })
+			lg.Component("memory").Info("semantic memory judge is enabled (thinking off)")
+		}
+	}
+
 	var mem agent.Memory
 	if boolOr(cfg.Agent.Memory, true) {
-		maxPerScope := intOr(cfg.Agent.MemoryMax, 64)
-		if path := strings.TrimSpace(cfg.Agent.MemoryFile); path != "" {
-			// 落盘：复用 F-38 的 JSONL 存储；裁剪用高水位批量进行，
-			// 避免每次写入都缩短记忆段（那会让记忆块每轮都变，白白失效缓存）。
-			file := history.NewFile(path, maxPerScope).WithTrimmer(history.HighWater{
-				Max: maxPerScope,
-				Low: maxPerScope * 3 / 4,
-			})
-			mem = agent.NewHistoryMemory(file)
-			lg.Component("agent").Info("memory is persisted to disk",
-				"path", path, "max_per_scope", maxPerScope)
-		} else {
-			mem = agent.NewMemoryStore(maxPerScope)
-			lg.Component("agent").Warn("memory is in-process only; it will be lost on restart (set agent.memory_file to persist)")
+		mem = memory.New(memory.Options{
+			Store: st, Judge: judge, Warn: func(msg string) { lg.Component("memory").Info(msg) },
+		})
+		lg.Component("memory").Info("long-term memory is stored in the database",
+			"max_per_scope", maxPerScope, "judge", judge != nil)
+	}
+
+	// 一次性迁移：旧记忆文件导入（幂等）。
+	if legacy := strings.TrimSpace(cfg.Agent.MemoryFile); legacy != "" && mem != nil {
+		migCtx, cancelMemMig := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancelMemMig()
+		imported, skipped, ierr := st.ImportMemoriesJSONL(migCtx, legacy)
+		switch {
+		case errors.Is(ierr, store.ErrImportSourceMissing):
+			lg.Component("memory").Info("no legacy memory file to import", "path", legacy)
+		case ierr != nil:
+			lg.Component("lifecycle").Warn("legacy memory import failed", "error", ierr, "path", legacy)
+		default:
+			lg.Component("memory").Info("legacy JSONL memory imported",
+				"path", legacy, "imported", imported, "skipped", skipped)
 		}
 	}
 
@@ -588,7 +646,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		"history_items", histItems, "trim_high_water", histItems, "trim_low_water", histItems*3/4)
 
 	// Agent：启用时走 ReAct（带工具），否则是直连 LLM。调用方对两条路径同形。
-	brain, mem, err := buildAgent(cfg, model, sysPrompt, hist, lg)
+	brain, mem, err := buildAgent(cfg, model, sysPrompt, hist, st, lg)
 	if err != nil {
 		lifecycle.Error("cannot build agent", "error", err)
 		return 1

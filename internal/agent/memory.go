@@ -2,29 +2,30 @@ package agent
 
 import (
 	"context"
-	"errors"
-	"strings"
 	"sync"
 
 	"github.com/drysaltyfish/agentbot/internal/history"
+	"github.com/drysaltyfish/agentbot/internal/memory"
 	"github.com/drysaltyfish/agentbot/internal/tool"
 )
 
+// 记忆的文本规则由 internal/memory 拥有，这里只做别名——
+// 两处各写一份 500 字上限，迟早会漂移。
 var (
 	// ErrEmptyMemory 表示要保存的记忆为空。
-	ErrEmptyMemory = errors.New("memory text is empty")
+	ErrEmptyMemory = memory.ErrEmpty
 	// ErrMultilineMemory 表示记忆含换行（F-40 要求单行）。
-	ErrMultilineMemory = errors.New("memory text must be a single line")
+	ErrMultilineMemory = memory.ErrMultiline
 	// ErrMemoryTooLong 表示记忆超长。
-	ErrMemoryTooLong = errors.New("memory text is too long")
+	ErrMemoryTooLong = memory.ErrTooLong
 	// ErrMemoryUnavailable 表示记忆存储未配置。
-	ErrMemoryUnavailable = errors.New("memory store is not configured")
+	ErrMemoryUnavailable = memory.ErrUnavailable
 )
 
 // MemoryLimit 是单条记忆的长度上限（字符）。
 //
 // 取值对齐 F-47："单条记忆长度上限（默认 500 字符）"。
-const MemoryLimit = 500
+const MemoryLimit = memory.Limit
 
 // Memory 是虚拟动作 save_memory / memory_recall 依赖的最小长期记忆能力。
 //
@@ -57,20 +58,9 @@ func MemoryScopeFrom(ctx context.Context) string {
 
 // validateMemoryText 做写入前的统一校验。
 //
-// 两种实现（进程内 / 落盘）共用同一套校验，避免换个实现就少一条约束。
-// 刻意返回错误而不是截断：截断会让模型以为整条存下来了。
+// 规则由 internal/memory 拥有；这里委托过去，避免两处实现漂移。
 func validateMemoryText(text string) (string, error) {
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
-		return "", ErrEmptyMemory
-	}
-	if strings.ContainsAny(trimmed, "\r\n") {
-		return "", ErrMultilineMemory
-	}
-	if len([]rune(trimmed)) > MemoryLimit {
-		return "", ErrMemoryTooLong
-	}
-	return trimmed, nil
+	return memory.Validate(text)
 }
 
 // MemoryStore 是进程内记忆实现，**按作用域隔离**。
