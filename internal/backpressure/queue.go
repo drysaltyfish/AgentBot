@@ -174,7 +174,7 @@ func (q *Queue[T]) Submit(item T) bool {
 				return false
 			}
 		}
-	default: // DropNewest
+	case DropNewest:
 		select {
 		case q.ch <- j:
 			q.received.Add(1)
@@ -183,6 +183,10 @@ func (q *Queue[T]) Submit(item T) bool {
 			q.drop("queue_full")
 			return false
 		}
+	default:
+		// 未知策略按最保守的方式处理：拒绝新事件而不是阻塞。
+		q.drop("queue_full")
+		return false
 	}
 }
 

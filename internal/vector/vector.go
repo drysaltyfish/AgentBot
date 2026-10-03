@@ -72,8 +72,10 @@ func (b Binary) Len() int { return len(b) * 8 }
 // 维度一致；同维向量才得到完整的位数距离。
 func Hamming(a, b Binary) int {
 	n := min(len(a), len(b))
+	// 先切片到公共长度，索引边界对静态检查与读者都一目了然。
+	a, b = a[:n], b[:n]
 	d := 0
-	for i := 0; i < n; i++ {
+	for i := range a {
 		d += bits.OnesCount8(a[i] ^ b[i])
 	}
 	return d
