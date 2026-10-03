@@ -85,6 +85,9 @@ type Options struct {
 	BusyTimeout time.Duration
 	// Rand 可注入确定性随机源，便于测试抖动路径。
 	Rand *rand.Rand
+	// Warn 接收降级路径的告警（例如 FTS 失败后回退 LIKE）。
+	// 降级可以发生，但必须留下痕迹——静默降级是这类问题最难查的形态。
+	Warn func(msg string)
 
 	// 以下字段仅供同包测试覆盖，外部调用方不应设置。
 	schema        []string
@@ -251,6 +254,13 @@ func isBusy(err error) bool {
 		}
 	}
 	return false
+}
+
+// warn 调用告警钩子（未配置时丢弃）。
+func (s *Store) warn(msg string) {
+	if s.opts.Warn != nil {
+		s.opts.Warn(msg)
+	}
 }
 
 // nowMillis 返回 Unix 毫秒。

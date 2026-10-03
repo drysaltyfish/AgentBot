@@ -164,7 +164,8 @@ func Test_F83_DeclarativeColumnAdd(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.db")
 	base := []string{`CREATE TABLE IF NOT EXISTS thing (id INTEGER PRIMARY KEY)`}
 
-	s1 := openTest(t, Options{Path: path, schema: base})
+	// 覆盖 schema 时必须一并覆盖 columns：否则会拿默认列集去对账不存在的表。
+	s1 := openTest(t, Options{Path: path, schema: base, columns: []columnSpec{}})
 	if _, err := s1.db.Exec("INSERT INTO thing (id) VALUES (1)"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -196,8 +197,9 @@ func Test_F83_DeclarativeColumnAdd(t *testing.T) {
 func Test_F83_ConcurrentReadWrite(t *testing.T) {
 	t.Parallel()
 	s := openTest(t, Options{
-		Path:   filepath.Join(t.TempDir(), "conc.db"),
-		schema: []string{`CREATE TABLE IF NOT EXISTS counter (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)`},
+		Path:    filepath.Join(t.TempDir(), "conc.db"),
+		schema:  []string{`CREATE TABLE IF NOT EXISTS counter (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)`},
+		columns: []columnSpec{},
 	})
 	if err := s.Write(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, "INSERT INTO counter (id, n) VALUES (1, 0)")
