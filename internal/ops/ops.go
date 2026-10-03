@@ -105,7 +105,8 @@ func (s *Server) Start() error {
 		s.mu.Unlock()
 		return fmt.Errorf("ops: listen %s: %w", s.opts.Addr, err)
 	}
-	srv := &http.Server{Handler: s.handler()}
+	// ReadHeaderTimeout 防 Slowloris（gosec G112）；探针端点只有回环访问，给 5s 足够。
+	srv := &http.Server{Handler: s.handler(), ReadHeaderTimeout: 5 * time.Second}
 	s.srv = srv
 	s.ln = ln
 	s.addr = ln.Addr().String()

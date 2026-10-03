@@ -1,6 +1,7 @@
 package toggle
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -18,7 +19,7 @@ func (failingStore) Delete(Key) error     { return errors.New("disk full") }
 func (failingStore) All() ([]Key, error)  { return nil, errors.New("disk read error") }
 
 func ctxFor(groupID int64) *router.Ctx {
-	return router.NewCtx(nil, &event.Event{GroupID: groupID}, nil)
+	return router.NewCtx(context.Background(), &event.Event{GroupID: groupID}, nil)
 }
 
 func Test_F19_RuleRejectsOffGroup(t *testing.T) {
@@ -47,7 +48,7 @@ func Test_F19_RuleRejectsOffGroup(t *testing.T) {
 	if !rule(nil) {
 		t.Fatalf("nil 上下文应放行")
 	}
-	if !rule(router.NewCtx(nil, nil, nil)) {
+	if !rule(router.NewCtx(context.Background(), nil, nil)) {
 		t.Fatalf("nil Event 应放行")
 	}
 }
