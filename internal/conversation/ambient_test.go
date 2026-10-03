@@ -138,3 +138,41 @@ func Test_Assembler_SeparatesConvoAndAmbient(t *testing.T) {
 		t.Fatalf("环境消息应被压到预算内，实际保留 %d 条", n)
 	}
 }
+
+// Test_Ambient_LabelDistinguishesOnePersonFromMany 是实测暴露的 bug 的回归测试。
+//
+// 一个人连发 10 条相同表情时，标签若写成「10人重复」会让模型以为有十个人在刷屏。
+func Test_Ambient_LabelDistinguishesOnePersonFromMany(t *testing.T) {
+	t.Parallel()
+	same := func(n int) []history.Item {
+		var out []history.Item
+		for i := 0; i < n; i++ {
+			it := amb("哈哈哈哈", "小明")
+			it.SpeakerID = 111
+			out = append(out, it)
+		}
+		return out
+	}
+	kept, _ := CompressAmbient(same(10), AmbientOptions{})
+	if len(kept) != 1 {
+		t.Fatalf("应合并为一条: %d", len(kept))
+	}
+	if !strings.Contains(kept[0].SpeakerName, "同一人") {
+		t.Fatalf("同一人重复必须如实标注: %q", kept[0].SpeakerName)
+	}
+	if strings.Contains(kept[0].SpeakerName, "10人") {
+		t.Fatalf("不能把一个人的 10 条说成 10 个人: %q", kept[0].SpeakerName)
+	}
+
+	// 多人各发一次：应标成人数，而不是"同一人"。
+	items := []history.Item{}
+	for i := 0; i < 3; i++ {
+		it := amb("哈哈", "群友")
+		it.SpeakerID = int64(100 + i)
+		items = append(items, it)
+	}
+	kept2, _ := CompressAmbient(items, AmbientOptions{})
+	if len(kept2) != 1 || !strings.Contains(kept2[0].SpeakerName, "3人") {
+		t.Fatalf("多人各发一次应标成 3 人: %+v", kept2)
+	}
+}
