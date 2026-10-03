@@ -231,6 +231,49 @@ var tables = []tableDef{
 			updated_at INTEGER NOT NULL
 		)`,
 	},
+	{
+		// 分层记忆（F-49）的四张表。
+		//
+		// id 全部来自 tier_ids 这一个分配器，而不是各表自己的 AUTOINCREMENT：
+		// MemTierStore 用的是一个全局单调计数器，而 Promote(id)/DeleteEpisodeItem(id)
+		// 都假设 id 在三层之间唯一。分表各自编号会让"working 的 5 与 semantic 的 5"
+		// 撞在一起，Promote 就会提升错条目——这类错不会报错，只会记错东西。
+		CreateSQL: `CREATE TABLE IF NOT EXISTS tier_ids (
+			id INTEGER PRIMARY KEY AUTOINCREMENT
+		)`,
+		Indexes: nil,
+	},
+	{
+		CreateSQL: `CREATE TABLE IF NOT EXISTS tier_episodes (
+			id         INTEGER PRIMARY KEY,
+			scope_key  TEXT    NOT NULL,
+			started_at INTEGER NOT NULL,
+			ended_at   INTEGER NOT NULL
+		)`,
+		Indexes: []string{
+			`CREATE INDEX IF NOT EXISTS idx_tier_episodes_scope ON tier_episodes(scope_key, id)`,
+		},
+	},
+	{
+		// tier 取 working | episodic | semantic；episodic 行用 episode_id 归组。
+		CreateSQL: `CREATE TABLE IF NOT EXISTS tier_items (
+			id          INTEGER PRIMARY KEY,
+			scope_key   TEXT    NOT NULL,
+			tier        TEXT    NOT NULL,
+			episode_id  INTEGER NOT NULL DEFAULT 0,
+			text        TEXT    NOT NULL,
+			title       TEXT    NOT NULL DEFAULT '',
+			refs        TEXT    NOT NULL DEFAULT '[]',
+			score       REAL    NOT NULL DEFAULT 0,
+			created_at  INTEGER NOT NULL,
+			updated_at  INTEGER NOT NULL DEFAULT 0,
+			fingerprint TEXT    NOT NULL DEFAULT ''
+		)`,
+		Indexes: []string{
+			`CREATE INDEX IF NOT EXISTS idx_tier_items_scope_tier ON tier_items(scope_key, tier, id)`,
+			`CREATE INDEX IF NOT EXISTS idx_tier_items_episode ON tier_items(episode_id, id)`,
+		},
+	},
 }
 
 // schemaStatements 把 tables 展平成建表/建索引语句序列，顺序与注册顺序一致。
