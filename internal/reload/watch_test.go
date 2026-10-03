@@ -130,3 +130,46 @@ func Test_F24_ManualReload(t *testing.T) {
 		t.Fatalf("失败后应保留旧值: %q", v)
 	}
 }
+
+// Test_F24_ReloadsDirectoryContentChange 钉住目录监听的正确性：
+// 改一个**已存在**文件的内容不会改目录 mtime，只看目录元信息就会永远漏掉，
+// 而"改人格文件里的一个字"正是最常见的用法。
+func Test_F24_ReloadsDirectoryContentChange(t *testing.T) {
+	dir := t.TempDir()
+	aPath := filepath.Join(dir, "a.yml")
+	writeFile(t, aPath, "第一版")
+
+	var loads atomic.Int64
+	w := New([]string{dir}, func() (string, error) {
+		loads.Add(1)
+		b, err := os.ReadFile(aPath)
+		if err != nil {
+			return "", err
+		}
+		if strings.Contains(string(b), "INVALID") {
+			return "", errors.New("内容非法")
+		}
+		return string(b), nil
+	}, Options{Interval: 10 * time.Millisecond, Debounce: 10 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.Start(ctx)
+	defer w.Stop()
+
+	if got, ok := w.Current(); !ok || got != "第一版" {
+		t.Fatalf("首次加载=(%q,%v)", got, ok)
+	}
+
+	writeFile(t, aPath, "第二版")
+	waitFor(t, "目录内文件内容变化被检测到", func() bool {
+		got, ok := w.Current()
+		return ok && got == "第二版"
+	})
+
+	// 非法内容必须保留旧值，而不是把当前值清空。
+	writeFile(t, aPath, "INVALID")
+	waitFor(t, "至少尝试了一次重新加载", func() bool { return loads.Load() > 2 })
+	if got, _ := w.Current(); got != "第二版" {
+		t.Fatalf("非法内容应保留旧值，实际 %q", got)
+	}
+}

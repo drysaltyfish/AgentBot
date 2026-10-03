@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -204,18 +205,56 @@ func (w *Watcher[T]) waitRetry() bool {
 func (w *Watcher[T]) fingerprint() string {
 	var b strings.Builder
 	for _, p := range w.paths {
-		info, err := os.Stat(p)
-		if err != nil {
-			b.WriteString(p + "=missing;")
+		b.WriteString(pathFingerprint(p))
+	}
+	return b.String()
+}
+
+// pathFingerprint 汇总一个被监听路径的内容身份。
+//
+// 目录必须逐个子文件取指纹，而不是只看目录本身的 mtime：
+// 改一个**已存在**文件的内容不会改目录 mtime，只看目录就会永远检测不到变化——
+// 而"改人格文件里的一个字"恰恰是最常见的用法。
+func pathFingerprint(p string) string {
+	info, err := os.Stat(p)
+	if err != nil {
+		return p + "=missing;"
+	}
+	if !info.IsDir() {
+		return fileFingerprint(p, info.ModTime().UnixNano(), info.Size())
+	}
+	entries, rerr := os.ReadDir(p)
+	if rerr != nil {
+		// 读不了目录内容时退回目录元信息：至少"增删文件"仍能被发现。
+		return fmt.Sprintf("%s=dir:%d:%d;", p, info.ModTime().UnixNano(), info.Size())
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s=dir;", p)
+	for _, e := range entries {
+		if e.IsDir() {
 			continue
 		}
-		fmt.Fprintf(&b, "%s=%d:%d", p, info.ModTime().UnixNano(), info.Size())
-		if info.Size() <= maxDigestBytes {
-			if sum, derr := fileDigest(p); derr == nil {
-				b.WriteString(":" + sum)
-			}
+		sub := filepath.Join(p, e.Name())
+		si, serr := e.Info()
+		if serr != nil {
+			continue
 		}
+		b.WriteString(e.Name())
+		b.WriteString(":")
+		b.WriteString(fileFingerprint(sub, si.ModTime().UnixNano(), si.Size()))
 		b.WriteString(";")
+	}
+	return b.String()
+}
+
+// fileFingerprint 汇总单文件的 mtime/大小/（小文件）内容摘要。
+func fileFingerprint(path string, modNano, size int64) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s=%d:%d", path, modNano, size)
+	if size <= maxDigestBytes {
+		if sum, derr := fileDigest(path); derr == nil {
+			b.WriteString(":" + sum)
+		}
 	}
 	return b.String()
 }

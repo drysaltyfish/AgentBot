@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/drysaltyfish/agentbot/internal/admin"
 	"github.com/drysaltyfish/agentbot/internal/config"
@@ -196,4 +197,62 @@ func reportLine(report, prefix string) string {
 		}
 	}
 	return ""
+}
+
+// Test_F24_PersonaFileChangeSwapsDefinitions 覆盖 F-24 的人格目录热加载：
+// 改一个**已存在**的人格文件必须让下一次请求的半静态段变化；
+// 写坏文件必须保留旧定义而不是清空（清空等于让人格静默消失）。
+func Test_F24_PersonaFileChangeSwapsDefinitions(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	writePersonaFile(t, dir, "default.yml", "name: default\nsystem_prompt: 默认人格正文\n")
+	writePersonaFile(t, dir, "alt.yml", "name: alt\nsystem_prompt: 旧版人格正文\n")
+
+	cfg := config.Default()
+	cfg.Prompt.PersonasDir = ptr(dir)
+	lg := testLogger(t)
+	defer func() { _ = lg.Close(ctx) }()
+
+	reg, mgr, err := buildPersonas(cfg, scoped.NewMemoryStore(), lg)
+	if err != nil {
+		t.Fatalf("buildPersonas: %v", err)
+	}
+	key := session.Key{SelfID: 1, GroupID: 2, UserID: 3}
+	if _, err := mgr.SetPersona(ctx, scoped.SessionRefForKey(key), "alt"); err != nil {
+		t.Fatalf("SetPersona: %v", err)
+	}
+	asm := conversation.New(conversation.Options{
+		System:     "静态段",
+		HalfStatic: personaHalfStatic(reg, mgr, nil),
+	})
+	if got := asm.SystemFor(ctx, key); !strings.Contains(got, "旧版人格正文") {
+		t.Fatalf("前置条件不成立: %q", got)
+	}
+
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	w := watchPersonas(wctx, dir, reg, lg)
+	if w == nil {
+		t.Fatal("watchPersonas 应返回监听器")
+	}
+	defer w.Stop()
+
+	writePersonaFile(t, dir, "alt.yml", "name: alt\nsystem_prompt: 新版人格正文\n")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(asm.SystemFor(ctx, key), "新版人格正文") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := asm.SystemFor(ctx, key); !strings.Contains(got, "新版人格正文") {
+		t.Fatalf("人格文件改动未被热加载: %q", got)
+	}
+
+	// 写坏文件：保留旧定义，不清空。
+	writePersonaFile(t, dir, "alt.yml", "name: alt\nsystem_prompt:\n")
+	time.Sleep(1500 * time.Millisecond)
+	if got := asm.SystemFor(ctx, key); !strings.Contains(got, "新版人格正文") {
+		t.Fatalf("非法人格文件应保留旧定义: %q", got)
+	}
 }
