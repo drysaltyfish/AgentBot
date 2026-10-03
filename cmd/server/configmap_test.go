@@ -352,7 +352,7 @@ func Test_F71_AdminModuleAuthorizesAndAudits(t *testing.T) {
 
 	var buf bytes.Buffer
 	alog := audit.New(audit.Options{Writer: &buf, QueueSize: 16, Now: time.Now})
-	m := buildAdminModule(cfg, alog, testLogger(t), nil)
+	m := buildAdminModule(cfg, alog, testLogger(t), nil, nil)
 
 	if _, err := m.Dispatch(context.Background(), admin.Request{Text: "/help", UserID: 42, Source: admin.SourceMessage}); err != nil {
 		t.Fatalf("超管执行 /help 不应报错: %v", err)
@@ -380,5 +380,44 @@ func Test_F71_AdminModuleAuthorizesAndAudits(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "denied") {
 		t.Fatalf("被拒调用也必须留痕: %s", buf.String())
+	}
+}
+
+// Test_F66_AdminCostCommandReportsUsage 端到端覆盖 F-66 与 F-71 的接合：
+// 一次真实（桩）LLM 调用被记账后，/cost 能把它读出来。
+func Test_F66_AdminCostCommandReportsUsage(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Moderation.SuperUsers = []int64{42}
+	cfg.Cost.Enabled = ptr(true)
+	cfg.Cost.Prices = map[string]config.CostPrice{"m": {InputPer1K: 0.01, OutputPer1K: 0.02}}
+
+	tracker, err := buildCostTracker(cfg, testLogger(t), nil)
+	if err != nil {
+		t.Fatalf("buildCostTracker: %v", err)
+	}
+	defer func() { _ = tracker.Close() }()
+
+	obs := &observedLLM{
+		next:     stubLLM{resp: &llm.ChatResponse{Usage: llm.Usage{PromptTokens: 1000, CompletionTokens: 1000}}},
+		provider: "p",
+		model:    "m",
+		cost:     tracker,
+	}
+	if _, err := obs.Chat(context.Background(), &llm.ChatRequest{}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	m := buildAdminModule(cfg, nil, testLogger(t), nil, tracker)
+	reply, err := m.Dispatch(context.Background(), admin.Request{Text: "/cost", UserID: 42, Source: admin.SourceMessage})
+	if err != nil {
+		t.Fatalf("Dispatch /cost: %v", err)
+	}
+	if !strings.Contains(reply, "1 次调用") {
+		t.Fatalf("/cost 应反映刚记录的那次调用: %q", reply)
+	}
+	if strings.Contains(reply, "$0.0000") {
+		t.Fatalf("/cost 应算出非零费用: %q", reply)
 	}
 }

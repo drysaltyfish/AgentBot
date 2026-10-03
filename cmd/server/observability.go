@@ -555,7 +555,7 @@ func buildCostTracker(cfg *config.Config, lg *observe.Logger, cat *metrics.Catal
 // 只注册组合根有能力提供数据的命令；/help 由 admin.New 自带。
 // 鉴权统一走 moderation.super_users：仓库里已经有"谁说了算"的配置，
 // 不该再造第二份。
-func buildAdminModule(cfg *config.Config, alog *audit.Logger, lg *observe.Logger, mod *moderation.Engine) *admin.Module {
+func buildAdminModule(cfg *config.Config, alog *audit.Logger, lg *observe.Logger, mod *moderation.Engine, costTracker *cost.Tracker) *admin.Module {
 	supers := make(map[int64]bool, len(cfg.Moderation.SuperUsers))
 	for _, id := range cfg.Moderation.SuperUsers {
 		supers[id] = true
@@ -628,6 +628,17 @@ func buildAdminModule(cfg *config.Config, alog *audit.Logger, lg *observe.Logger
 				}
 				return b.String(), nil
 			})
+		}
+	}
+
+	if costTracker != nil {
+		if err := m.Register("cost", "/cost —— 今日与累计调用次数与费用", func(_ context.Context, _ admin.Invocation) (string, error) {
+			today := costTracker.Today()
+			all := costTracker.Global()
+			return fmt.Sprintf("今日：%d 次调用 / $%.4f\n累计：%d 次调用 / $%.4f",
+				today.Calls, today.Cost, all.Calls, all.Cost), nil
+		}); err != nil {
+			mlog.Warn("register cost command", "error", err)
 		}
 	}
 
