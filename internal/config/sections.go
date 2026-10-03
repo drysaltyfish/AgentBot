@@ -246,6 +246,44 @@ type Singleflight struct {
 	Notice *bool `yaml:"notice"`
 }
 
+// Sandbox 描述工具执行沙箱（F-46）。
+//
+// 默认关闭：它会限制既有工具的能力，属于改变行为的开关。
+type Sandbox struct {
+	Enabled *bool `yaml:"enabled"`
+	// MaxOutputBytes 是单次工具输出的字节上限；<=0 取 64KiB。
+	MaxOutputBytes *int `yaml:"max_output_bytes"`
+	// ReadRoots / WriteRoots 是可访问的路径白名单根。
+	ReadRoots  []string `yaml:"read_roots"`
+	WriteRoots []string `yaml:"write_roots"`
+	// EnvAllowlist 是允许透传的环境变量名。
+	EnvAllowlist []string `yaml:"env_allowlist"`
+	// ForbiddenOps / ForbiddenTools 是禁止的操作与工具。
+	ForbiddenOps   []string `yaml:"forbidden_ops"`
+	ForbiddenTools []string `yaml:"forbidden_tools"`
+	// NetworkTools 是允许联网的工具名（其余工具默认禁网）。
+	NetworkTools    []string `yaml:"network_tools"`
+	AllowNetwork    *bool    `yaml:"allow_network"`
+	RequireReadOnly *bool    `yaml:"require_read_only"`
+}
+
+// EffectiveEnabled 返回是否启用工具沙箱；未配置时默认关闭。
+func (s Sandbox) EffectiveEnabled() bool { return orBool(s.Enabled, false) }
+
+// EffectiveMaxOutputBytes 返回输出上限；未配置或非正时取 64KiB。
+func (s Sandbox) EffectiveMaxOutputBytes() int {
+	if s.MaxOutputBytes == nil || *s.MaxOutputBytes <= 0 {
+		return 64 << 10
+	}
+	return *s.MaxOutputBytes
+}
+
+// EffectiveAllowNetwork 返回是否默认允许联网；未配置时默认禁止。
+func (s Sandbox) EffectiveAllowNetwork() bool { return orBool(s.AllowNetwork, false) }
+
+// EffectiveRequireReadOnly 返回是否要求工具只读；未配置时默认不要求。
+func (s Sandbox) EffectiveRequireReadOnly() bool { return orBool(s.RequireReadOnly, false) }
+
 // Moderation 描述入站内容审查与黑名单（F-57 / F-58）。
 //
 // 默认关闭：它会改写或拦截入站消息，属于改变行为的开关。
