@@ -34,6 +34,16 @@ func NewFile(path string, maxItems int) *File {
 	return &File{path: path, maxItems: maxItems, trimmer: Window{N: maxItems}, now: time.Now}
 }
 
+// WithTrimmer 替换裁剪策略（例如 HighWater，让裁剪批量发生而不是每次追加都裁）。
+func (f *File) WithTrimmer(t Trimmer) *File {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if t != nil {
+		f.trimmer = t
+	}
+	return f
+}
+
 // Append 追加一行 JSON；超过上限时按策略裁剪并重写文件。
 func (f *File) Append(ctx context.Context, key string, item Item) error {
 	if err := ctx.Err(); err != nil {

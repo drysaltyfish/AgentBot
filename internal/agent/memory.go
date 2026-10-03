@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"sync"
+
+	"github.com/drysaltyfish/agentbot/internal/history"
 )
 
 var (
@@ -14,6 +16,8 @@ var (
 	ErrMultilineMemory = errors.New("memory text must be a single line")
 	// ErrMemoryTooLong 表示记忆超长。
 	ErrMemoryTooLong = errors.New("memory text is too long")
+	// ErrMemoryUnavailable 表示记忆存储未配置。
+	ErrMemoryUnavailable = errors.New("memory store is not configured")
 )
 
 // MemoryLimit 是单条记忆的长度上限（字符）。
@@ -56,6 +60,24 @@ func MemoryScopeFrom(ctx context.Context) string {
 	return ""
 }
 
+// validateMemoryText 做写入前的统一校验。
+//
+// 两种实现（进程内 / 落盘）共用同一套校验，避免换个实现就少一条约束。
+// 刻意返回错误而不是截断：截断会让模型以为整条存下来了。
+func validateMemoryText(text string) (string, error) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return "", ErrEmptyMemory
+	}
+	if strings.ContainsAny(trimmed, "\r\n") {
+		return "", ErrMultilineMemory
+	}
+	if len([]rune(trimmed)) > MemoryLimit {
+		return "", ErrMemoryTooLong
+	}
+	return trimmed, nil
+}
+
 // MemoryStore 是进程内记忆实现，**按作用域隔离**。
 //
 // 顺序即写入顺序：只要写入序列相同，两次召回的结果就逐字节相同——这是记忆段
@@ -82,15 +104,9 @@ func (m *MemoryStore) Save(ctx context.Context, text string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
-		return ErrEmptyMemory
-	}
-	if strings.ContainsAny(trimmed, "\r\n") {
-		return ErrMultilineMemory
-	}
-	if len([]rune(trimmed)) > MemoryLimit {
-		return ErrMemoryTooLong
+	trimmed, err := validateMemoryText(text)
+	if err != nil {
+		return err
 	}
 
 	scope := MemoryScopeFrom(ctx)
@@ -152,3 +168,59 @@ func (m *MemoryStore) Reset(ctx context.Context) {
 }
 
 var _ Memory = (*MemoryStore)(nil)
+
+// HistoryMemory 把记忆落在 history.History 上（F-47 的"可选 JSONL 文件落盘"）。
+//
+// 复用 F-38 的历史存储而不是另写一套文件格式：JSONL 编码、权限、裁剪、并发都已经
+// 在那里经过测试。落盘条目用 KindMarker：它不是对话轮次，即便同一份文件被当作
+// 聊天历史读取，conversation.ToMessages 也会跳过它，不会误入提示词。
+type HistoryMemory struct {
+	hist history.History
+}
+
+// NewHistoryMemory 构造落盘记忆。
+func NewHistoryMemory(h history.History) *HistoryMemory {
+	return &HistoryMemory{hist: h}
+}
+
+// Save 实现 Memory。
+func (m *HistoryMemory) Save(ctx context.Context, text string) error {
+	if m == nil || m.hist == nil {
+		return ErrMemoryUnavailable
+	}
+	trimmed, err := validateMemoryText(text)
+	if err != nil {
+		return err
+	}
+	scope := MemoryScopeFrom(ctx)
+
+	// 去重：同样的写入序列必须得到同样的召回结果，否则记忆段会平白多失效一次缓存。
+	existing, err := m.Recall(ctx)
+	if err != nil {
+		return err
+	}
+	for _, e := range existing {
+		if e == trimmed {
+			return nil
+		}
+	}
+	return m.hist.Append(ctx, scope, history.Item{Kind: history.KindMarker, Content: trimmed})
+}
+
+// Recall 实现 Memory。
+func (m *HistoryMemory) Recall(ctx context.Context) ([]string, error) {
+	if m == nil || m.hist == nil {
+		return nil, ErrMemoryUnavailable
+	}
+	items, err := m.hist.Messages(ctx, MemoryScopeFrom(ctx))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.Content)
+	}
+	return out, nil
+}
+
+var _ Memory = (*HistoryMemory)(nil)

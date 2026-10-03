@@ -25,6 +25,9 @@ coverage.html
 
 # 人格提示词属私有资产，不入库；示例见 prompts/README.md
 /prompts/xiangcheng-niang.md
+
+# 运行时数据（长期记忆落盘等）
+/data/
 *.log
 
 # 编辑器

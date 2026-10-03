@@ -83,8 +83,11 @@ type Agent struct {
 	VirtualActions *bool `yaml:"virtual_actions"`
 	// Memory 为 true 时启用进程内长期记忆（F-48 的完整实现在 M3）。
 	Memory *bool `yaml:"memory"`
-	// MemoryMax 是记忆条数上限，默认 64。
+	// MemoryMax 是记忆条数上限（每个作用域），默认 64。
 	MemoryMax *int `yaml:"memory_max"`
+	// MemoryFile 是记忆落盘的 JSONL 路径；为空表示仅进程内（重启即丢）。
+	// 复用 F-38 的历史存储实现（F-47 的“可选 JSONL 文件落盘”）。
+	MemoryFile string `yaml:"memory_file"`
 	// ApprovalTimeout 是人工审批的独立预算，默认 60s。
 	ApprovalTimeout *Duration `yaml:"approval_timeout"`
 	// ApprovalEnabled 为 true 时启用 F-45 权限闸门。
