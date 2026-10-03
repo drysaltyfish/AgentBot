@@ -123,6 +123,16 @@ type Agent struct {
 	ProactiveMemory ProactiveMemory `yaml:"proactive_memory"`
 	// MemoryJudge 控制记忆写入的语义判官（F-87）。
 	MemoryJudge MemoryJudge `yaml:"memory_judge"`
+	// ToolHint 是提示模型如何使用工具（例如用 recall_history 回溯引用内容）。
+	ToolHint ToolHint `yaml:"tool_hint"`
+}
+
+// ToolHint 描述工具使用提示。
+type ToolHint struct {
+	// Enabled 为 nil 时按启用处理。
+	Enabled *bool `yaml:"enabled"`
+	// Instruction 覆盖内置提示；为空时使用默认。
+	Instruction string `yaml:"instruction"`
 }
 
 // MemoryJudge 描述记忆写入的语义判官。

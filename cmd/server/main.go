@@ -582,6 +582,20 @@ func durationOr(p *config.Duration, fallback time.Duration) time.Duration {
 	return fallback
 }
 
+// speakerName 返回群聊里用来标识发言人的名字。
+//
+// 群名片优先于昵称：群里大家认的是群名片。
+// 私聊返回空串——只有两个人，每句都加前缀是纯噪声。
+func speakerName(sender event.Sender, groupID int64) string {
+	if groupID == 0 {
+		return ""
+	}
+	if name := strings.TrimSpace(sender.Card); name != "" {
+		return name
+	}
+	return strings.TrimSpace(sender.Nickname)
+}
+
 // agentRole 把平台上报的成员角色映射成 F-45 的权限角色。
 func agentRole(ev *event.Event) agent.Role {
 	if ev.GroupID == 0 {
@@ -775,6 +789,9 @@ type replyJob struct {
 	text    string
 	traceID string
 	role    agent.Role
+	// speaker 是发言人在群里的标识（私聊为空）。
+	// 群里不加这个，模型就分不清 A 说的和 B 说的——记忆也会归错人。
+	speaker string
 	// message 是原始消息：引用解析要在 worker 里做，sink 里调 API 会死锁。
 	message event.Message
 	// caller 用于调用平台 API（get_msg）。
@@ -919,6 +936,12 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		sysPrompt = agent.ComposeSystemPrompt(sysPrompt,
 			agent.ProactiveMemoryInstruction(cfg.Agent.ProactiveMemory.Instruction))
 	}
+	// 工具使用提示：被引用内容只有一句，很久远时缺上下文——
+	// 告诉模型它可以用 recall_history 回溯，否则它不会想到这个手段。
+	if cfg.Agent.Enabled && boolOr(cfg.Agent.ToolHint.Enabled, true) {
+		sysPrompt = agent.ComposeSystemPrompt(sysPrompt,
+			agent.ToolUsageInstruction(cfg.Agent.ToolHint.Instruction))
+	}
 	asm := conversation.New(conversation.Options{System: sysPrompt, MaxHistory: histItems})
 	lg.Component("llm").Info("cache-first layout pinned",
 		"prefix_hash", asm.PrefixHash(), "prefix_runes", len([]rune(sysPrompt)),
@@ -1056,6 +1079,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 				text:    text,
 				traceID: observe.TraceID(c),
 				role:    agentRole(c.Event),
+				speaker: speakerName(c.Event.Sender, c.Event.GroupID),
 				message: c.Event.Message,
 				caller:  c.Caller(),
 			}:
@@ -1240,6 +1264,11 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 		}
 	}
 
+	queryText := j.text
+	if j.speaker != "" {
+		queryText = j.speaker + "：" + j.text
+	}
+
 	//nolint:contextcheck // 会话回收时的在途收尾走后台 ctx，与本次请求的生命周期无关
 	sess := p.sessions.GetOrCreate(j.key)
 	histKey := j.key.String()
@@ -1252,7 +1281,7 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 	// 两条路径（ReAct / 直连）在调用方看完全同形。
 	// 走 ReAct 时，记忆的注入位置由 Agent 按 ADR-0002 处理（system 之后、历史之前）。
 	out, runErr := p.brain.Run(callCtx, agent.Input{
-		Query:      j.text,
+		Query:      queryText,
 		History:    conversation.ToMessages(items),
 		SessionKey: j.key,
 		Role:       j.role,
@@ -1307,7 +1336,7 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 
 	// F-40：模型主动结束本轮。这**不是失败**，但也不发任何消息。
 	if errors.Is(runErr, agent.ErrEndOfTurn) {
-		if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindUser, Content: j.text}); err != nil {
+		if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindUser, Content: queryText}); err != nil {
 			rlog.Warn("cannot append user turn", "error", err)
 		}
 		rlog.Info("turn ended by end_action", "group_id", j.groupID, "user_id", j.userID)
@@ -1325,7 +1354,7 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 	}
 
 	// 只追加、绝不改写：这是下一轮还能命中前缀缓存的前提。
-	if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindUser, Content: j.text}); err != nil {
+	if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindUser, Content: queryText}); err != nil {
 		rlog.Warn("cannot append user turn", "error", err)
 	}
 	if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindAssistant, Content: reply}); err != nil {

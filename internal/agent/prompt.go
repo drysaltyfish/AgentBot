@@ -33,3 +33,20 @@ func ComposeSystemPrompt(base, instruction string) string {
 	}
 	return base + "\n\n" + instr
 }
+
+// DefaultToolUsageInstruction 提示模型如何用工具回溯历史。
+//
+// 为什么需要它：被引用的消息现在会进入本轮输入，但**只有那一句**。
+// 如果那句话很久远，它周围发生了什么并不在上下文里——而 recall_history
+// 恰好能按关键词检索并返回前后文。模型不知道有这个手段，就不会用。
+const DefaultToolUsageInstruction = "关于回溯：当对方引用了很久以前的话、" +
+	"而被引用的内容缺少上下文时，你可以用 recall_history 检索那句话里的关键词，" +
+	"它会返回命中处以及前后各一条，帮你还原当时在聊什么。"
+
+// ToolUsageInstruction 返回生效的工具使用提示。
+func ToolUsageInstruction(custom string) string {
+	if s := strings.TrimSpace(custom); s != "" {
+		return s
+	}
+	return DefaultToolUsageInstruction
+}
