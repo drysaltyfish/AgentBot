@@ -223,3 +223,22 @@ singleflight:
 #   llm:
 #     api_key_env: DEEPSEEK_API_KEY
 #     api_key_file: /etc/agentbot/deepseek.key
+
+# ---- 入站内容审查与黑名单（F-57 / F-58）----
+# 默认关闭。开启后：命中敏感词按 action 脱敏或拦截；被拉黑的用户/群不进入后续处理；
+# 防刷在窗口内超过阈值即临时封禁。拦截会写审计与 guard_blocks 指标。
+moderation:
+  enabled: false
+  sensitive_words: []
+  # 每行一个词，忽略空行与 # 注释。
+  sensitive_words_file: ""
+  action: mask            # mask（脱敏放行）| block（拦截）
+  mask_replacement: "***"
+  # 封禁记录落盘路径；留空则仅进程内（重启即丢）。
+  blacklist_file: ./data/blacklist.json
+  super_users: []
+  antispam:
+    window: 10s
+    max_messages: 20
+    ban_duration: 60s
+    duplicate_repeat: 5

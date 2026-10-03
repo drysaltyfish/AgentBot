@@ -200,3 +200,34 @@ func (s Singleflight) EffectiveKey() string {
 
 // EffectiveNotice 返回拒绝时是否回提示；未配置时默认关闭。
 func (s Singleflight) EffectiveNotice() bool { return orBool(s.Notice, defaultSingleflightNotice) }
+
+// EffectiveEnabled 返回是否启用入站审查；未配置时默认关闭。
+func (m Moderation) EffectiveEnabled() bool { return orBool(m.Enabled, false) }
+
+// EffectiveAction 返回敏感词命中后的动作；未配置时默认 mask。
+func (m Moderation) EffectiveAction() string {
+	if strings.TrimSpace(m.Action) == "" {
+		return defaultModerationAction
+	}
+	return m.Action
+}
+
+// EffectiveSpamWindow 返回防刷统计窗口；未配置或非正时取默认 10s。
+func (m Moderation) EffectiveSpamWindow() time.Duration {
+	return m.AntiSpam.Window.Or(defaultModerationSpamWindow)
+}
+
+// EffectiveSpamMaxMessages 返回窗口内允许的最大消息数；未配置或非正时取默认 20。
+func (m Moderation) EffectiveSpamMaxMessages() int {
+	return orPositive(m.AntiSpam.MaxMessages, defaultModerationSpamMaxMessages)
+}
+
+// EffectiveBanDuration 返回临时封禁时长；未配置或非正时取默认 60s。
+func (m Moderation) EffectiveBanDuration() time.Duration {
+	return m.AntiSpam.BanDuration.Or(defaultModerationBanDuration)
+}
+
+// EffectiveDuplicateRepeat 返回连续重复消息阈值；未配置或非正时取默认 5。
+func (m Moderation) EffectiveDuplicateRepeat() int {
+	return orPositive(m.AntiSpam.DuplicateRepeat, defaultModerationDuplicateRepeat)
+}

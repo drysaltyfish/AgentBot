@@ -368,6 +368,17 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		}
 	}
 
+	// F-57 / F-58：入站审查 + 黑名单 + 防刷，作为 pre 钩子。
+	// 拦截的事件不进入任何路由（连"只记录"的兜底路由也不执行）——被拉黑的人不该留下上下文。
+	modEngine, modErr := buildModeration(cfg, lg)
+	if modErr != nil {
+		lifecycle.Error("cannot build inbound moderation", "error", modErr)
+		return 1
+	}
+	if modEngine != nil {
+		engine.UsePre(moderationPreHook(modEngine, catalog, auditLog, lg))
+	}
+
 	// F-18：令牌桶限速（默认关闭）。超限事件会被整条丢弃——这是刻意的：
 	// 限速的目的就是让刷屏不产生任何 LLM 调用，代价远低于额度被打爆。
 	if cfg.RateLimit.EffectiveEnabled() {
