@@ -64,6 +64,7 @@ func (h *SQLite) Append(ctx context.Context, key string, item Item) error {
 		CreatedAt:   atMillis(item.At),
 		SpeakerID:   item.SpeakerID,
 		SpeakerName: item.SpeakerName,
+		Ambient:     item.Ambient,
 	}
 	if len(item.ToolCalls) > 0 {
 		raw, err := json.Marshal(item.ToolCalls)
@@ -196,6 +197,7 @@ func toItem(m store.Message) (Item, error) {
 		At:          time.UnixMilli(m.CreatedAt),
 		SpeakerID:   m.SpeakerID,
 		SpeakerName: m.SpeakerName,
+		Ambient:     m.Ambient,
 	}
 	if strings.TrimSpace(m.ToolCalls) != "" {
 		var calls []ToolCall

@@ -23,7 +23,8 @@ var messagesSchema = []string{
 		created_at  INTEGER NOT NULL,
 		fingerprint TEXT    NOT NULL,
 		speaker_id   INTEGER NOT NULL DEFAULT 0,
-		speaker_name TEXT    NOT NULL DEFAULT ''
+		speaker_name TEXT    NOT NULL DEFAULT '',
+		ambient      INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_seq
 		ON messages(session_key, seq)`,
@@ -62,6 +63,7 @@ var messagesColumns = []columnSpec{
 	{Table: "messages", Name: "fingerprint", DDL: "fingerprint TEXT NOT NULL DEFAULT ''"},
 	{Table: "messages", Name: "speaker_id", DDL: "speaker_id INTEGER NOT NULL DEFAULT 0"},
 	{Table: "messages", Name: "speaker_name", DDL: "speaker_name TEXT NOT NULL DEFAULT ''"},
+	{Table: "messages", Name: "ambient", DDL: "ambient INTEGER NOT NULL DEFAULT 0"},
 }
 
 var sessionsSchema = []string{

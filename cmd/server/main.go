@@ -987,7 +987,13 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		sysPrompt = agent.ComposeSystemPrompt(sysPrompt,
 			agent.ToolUsageInstruction(cfg.Agent.ToolHint.Instruction))
 	}
-	asm := conversation.New(conversation.Options{System: sysPrompt, MaxHistory: histItems})
+	asm := conversation.New(conversation.Options{
+		System:     sysPrompt,
+		MaxHistory: histItems,
+		// 环境消息（群里没被 @ 的）按 token 预算压缩，不跟对话争窗口。
+		AmbientTokenBudget: intOr(cfg.LLM.AmbientTokenBudget, conversation.DefaultAmbientTokenBudget),
+		AmbientMaxChars:    intOr(cfg.LLM.AmbientMaxChars, conversation.DefaultAmbientMaxChars),
+	})
 	lg.Component("llm").Info("cache-first layout pinned",
 		"prefix_hash", asm.PrefixHash(), "prefix_runes", len([]rune(sysPrompt)),
 		"history_items", histItems, "trim_high_water", histItems, "trim_low_water", histItems*3/4)
@@ -1326,6 +1332,8 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 		SpeakerID:   j.speakerID,
 		SpeakerName: j.speakerName,
 		At:          time.Now(),
+		// 没被 @ 的消息是**环境消息**：按 token 预算压缩，不跟对话争窗口。
+		Ambient: !j.shouldReply,
 	}
 	queryText := turn.RenderText()
 
