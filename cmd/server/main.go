@@ -436,6 +436,14 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		if detail := segmentDetail(ev.Message); detail != "" {
 			tlog.Debug("non-text segment fields", "detail", detail)
 		}
+		// F-15：会话级临时路由优先于常规路由。命中即消费，不再进入常规路由——
+		// 否则 Await 等待的那条消息会同时被常规路由处理一遍。
+		if sessions.Temp().Offer(sessions.KeyFor(ev.SelfID, ev.GroupID, ev.UserID), ev) {
+			tlog.Debug("event consumed by a temporary route",
+				"self_id", ev.SelfID, "user_id", ev.UserID, "group_id", ev.GroupID)
+			return
+		}
+
 		ectx := observe.WithTraceID(listenCtx, traceID(ev))
 		engine.Dispatch(ectx, ev, caller)
 	}
