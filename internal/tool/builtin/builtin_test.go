@@ -12,6 +12,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/httpx"
 	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/tool"
+	"github.com/drysaltyfish/agentbot/internal/transport"
 )
 
 func newRegistry(t *testing.T, deps Deps) *tool.Registry {
@@ -43,7 +44,7 @@ func Test_F44_RegisterIsOrderStable(t *testing.T) {
 	if strings.Join(r1.Names(), ",") != strings.Join(r2.Names(), ",") {
 		t.Fatalf("注册顺序不稳定: %v vs %v", r1.Names(), r2.Names())
 	}
-	want := "calculator,current_time,json_query,http_fetch,memory_save,memory_recall,recall_history,forget_memory,list_memories"
+	want := "calculator,current_time,json_query,http_fetch,memory_save,memory_recall,recall_history,forget_memory,list_memories,get_user_info"
 	if got := strings.Join(r1.Names(), ","); got != want {
 		t.Fatalf("内置工具集顺序: actual=%q expected=%q", got, want)
 	}
@@ -533,5 +534,82 @@ func Test_F88_ListMemoriesEmpty(t *testing.T) {
 	res := execWith(t, r, context.Background(), "list_memories", `{}`)
 	if res.Failed() || !strings.Contains(res.Output, "还没有记住") {
 		t.Fatalf("空记忆应给出可读提示: %+v", res)
+	}
+}
+
+// userInfoCaller 记录 get_user_info 发出的平台 API 调用。
+type userInfoCaller struct {
+	last     transport.Request
+	byAction map[string]transport.Response
+}
+
+func (u *userInfoCaller) Call(ctx context.Context, req transport.Request) (transport.Response, error) {
+	u.last = req
+	if r, ok := u.byAction[req.Action]; ok {
+		return r, nil
+	}
+	return transport.Response{RetCode: 1404, Message: "not found"}, nil
+}
+
+type callerBoxStub struct{ c transport.Caller }
+
+func (b callerBoxStub) Caller() transport.Caller { return b.c }
+
+func Test_GetUserInfoGroupMember(t *testing.T) {
+	t.Parallel()
+	data, _ := json.Marshal(map[string]any{
+		"nickname": "小明", "card": "群里的名片", "role": "admin", "level": "3",
+	})
+	c := &userInfoCaller{byAction: map[string]transport.Response{
+		"get_group_member_info": {RetCode: 0, Data: data},
+	}}
+	r := newRegistry(t, Deps{Caller: callerBoxStub{c: c}})
+	// 作用域形状：selfID:groupID:userID
+	ctx := tool.WithScope(context.Background(), "1:1032011055:2981539016")
+
+	res := execWith(t, r, ctx, "get_user_info", `{"qq":2981539016}`)
+	if res.Failed() {
+		t.Fatalf("查询失败: %+v", res)
+	}
+	if c.last.Action != "get_group_member_info" {
+		t.Fatalf("群里应查群成员: %q", c.last.Action)
+	}
+	if c.last.Params["group_id"] != int64(1032011055) {
+		t.Fatalf("群号应取自作用域: %+v", c.last.Params)
+	}
+	for _, want := range []string{"2981539016", "群里的名片", "小明", "管理员", "q1.qlogo.cn"} {
+		if !strings.Contains(res.Output, want) {
+			t.Fatalf("应包含 %q: %q", want, res.Output)
+		}
+	}
+}
+
+func Test_GetUserInfoPrivateUsesStranger(t *testing.T) {
+	t.Parallel()
+	data, _ := json.Marshal(map[string]any{"nickname": "私聊者"})
+	c := &userInfoCaller{byAction: map[string]transport.Response{
+		"get_stranger_info": {RetCode: 0, Data: data},
+	}}
+	r := newRegistry(t, Deps{Caller: callerBoxStub{c: c}})
+	ctx := tool.WithScope(context.Background(), "1:0:999")
+
+	res := execWith(t, r, ctx, "get_user_info", `{"qq":999}`)
+	if res.Failed() {
+		t.Fatalf("查询失败: %+v", res)
+	}
+	if c.last.Action != "get_stranger_info" {
+		t.Fatalf("私聊应查陌生人信息: %q", c.last.Action)
+	}
+	if !strings.Contains(res.Output, "私聊者") {
+		t.Fatalf("应含昵称: %q", res.Output)
+	}
+}
+
+func Test_GetUserInfoFailsLoudlyWithoutCaller(t *testing.T) {
+	t.Parallel()
+	r := newRegistry(t, Deps{})
+	res := execWith(t, r, tool.WithScope(context.Background(), "1:2:3"), "get_user_info", `{"qq":123}`)
+	if !res.Failed() || !strings.Contains(res.Error, "通道") {
+		t.Fatalf("无 API 通道应明确失败: %+v", res)
 	}
 }
