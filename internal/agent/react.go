@@ -99,7 +99,11 @@ func (a *ReactAgent) Run(ctx context.Context, in Input) (*Output, error) {
 		if err != nil {
 			a.warnf("cannot recall memory: %v", err)
 		} else if block := RenderMemory(items); block != "" {
-			messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: block})
+			memMsg := llm.Message{Role: llm.RoleSystem, Content: block}
+			messages = append(messages, memMsg)
+			// 记下记忆块的指纹：记忆一变它之后的内容必然失效，那是**预期**变化，
+			// 必须能让上层与"意外前缀分歧"区分开（否则告警会一直响）。
+			out.MemoryDigest = llm.Digest([]llm.Message{memMsg})[0]
 		}
 	}
 	messages = append(messages, in.History...)
