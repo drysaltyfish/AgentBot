@@ -271,7 +271,7 @@ func (e *Engine) Review(ctx context.Context, msg Message, meta Meta) (Decision, 
 		}
 	}
 
-	if e.spam != nil && !(hasAmb && amb.SkipAntiSpam) {
+	if e.spam != nil && (!hasAmb || !amb.SkipAntiSpam) {
 		if d, ok := e.spamDecision(msg, meta); ok {
 			e.record(EventRateLimited, meta, d)
 			e.count(MetricRateLimited)
@@ -303,7 +303,7 @@ func (e *Engine) Review(ctx context.Context, msg Message, meta Meta) (Decision, 
 		}
 	}
 
-	if e.chain != nil && !(hasAmb && amb.SkipGuards) {
+	if e.chain != nil && (!hasAmb || !amb.SkipGuards) {
 		v, err := e.chain.Check(ctx, msg, meta)
 		if err != nil {
 			e.warnf("moderation: guard chain: %v", err)

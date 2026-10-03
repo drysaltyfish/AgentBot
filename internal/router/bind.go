@@ -90,28 +90,29 @@ func bindInfoFor(t reflect.Type) bindInfo {
 
 // supportedBindType 判断字段类型是否可绑定（F-22 支持的类型集合）。
 func supportedBindType(t reflect.Type) bool {
-	switch t.Kind() {
-	case reflect.String, reflect.Bool, reflect.Int, reflect.Int64, reflect.Float64, reflect.Interface:
-		return true
-	case reflect.Slice:
+	kind := t.Kind()
+	if kind == reflect.Slice {
 		return t.Elem().Kind() == reflect.String
-	default:
-		return false
 	}
+	// 用条件表达式而不是对 reflect.Kind 的 switch：那是个大枚举，
+	// 穷举检查只会制造噪音。
+	return kind == reflect.String || kind == reflect.Bool ||
+		kind == reflect.Int || kind == reflect.Int64 ||
+		kind == reflect.Float64 || kind == reflect.Interface
 }
 
 func setBoundField(field reflect.Value, raw any) error {
 	if raw == nil {
 		return fmt.Errorf("期望 %s，实际为 nil", field.Type())
 	}
-	switch field.Kind() {
-	case reflect.String:
+	switch kind := field.Kind(); {
+	case kind == reflect.String:
 		s, ok := raw.(string)
 		if !ok {
 			return bindTypeErr(field.Type(), raw)
 		}
 		field.SetString(s)
-	case reflect.Int, reflect.Int64:
+	case kind == reflect.Int, kind == reflect.Int64:
 		switch n := raw.(type) {
 		case int:
 			field.SetInt(int64(n))
@@ -120,25 +121,25 @@ func setBoundField(field reflect.Value, raw any) error {
 		default:
 			return bindTypeErr(field.Type(), raw)
 		}
-	case reflect.Bool:
+	case kind == reflect.Bool:
 		b, ok := raw.(bool)
 		if !ok {
 			return bindTypeErr(field.Type(), raw)
 		}
 		field.SetBool(b)
-	case reflect.Float64:
+	case kind == reflect.Float64:
 		f, ok := raw.(float64)
 		if !ok {
 			return bindTypeErr(field.Type(), raw)
 		}
 		field.SetFloat(f)
-	case reflect.Slice:
+	case kind == reflect.Slice:
 		ss, ok := raw.([]string)
 		if !ok {
 			return bindTypeErr(field.Type(), raw)
 		}
 		field.Set(reflect.ValueOf(ss))
-	case reflect.Interface:
+	case kind == reflect.Interface:
 		field.Set(reflect.ValueOf(raw))
 	default:
 		return bindTypeErr(field.Type(), raw)
