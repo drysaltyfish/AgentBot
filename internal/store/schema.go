@@ -115,3 +115,25 @@ var memoriesColumns = []columnSpec{
 	{Table: "memories", Name: "title", DDL: "title TEXT NOT NULL DEFAULT ''"},
 	{Table: "memories", Name: "source_refs", DDL: "source_refs TEXT NOT NULL DEFAULT '[]'"},
 }
+
+var pendingSchema = []string{
+	// 在途操作（F-86）：等待下一条消息、等待人工审批。
+	//
+	// 存在这张表里的理由是"重启不该让用户悬在空中"：一次审批可能已经问过人了，
+	// 确认回来时进程却已经忘了在等什么。
+	//
+	// 记录**不随完成而删除**，只改状态：谁在什么时候批准/拒绝/超时，正是审计要回答的。
+	// 表的有界性由 PrunePending 保证。
+	`CREATE TABLE IF NOT EXISTS pending (
+		id          TEXT PRIMARY KEY,
+		session_key TEXT    NOT NULL,
+		kind        TEXT    NOT NULL,
+		payload     TEXT    NOT NULL DEFAULT '',
+		created_at  INTEGER NOT NULL,
+		expires_at  INTEGER NOT NULL DEFAULT 0,
+		status      TEXT    NOT NULL,
+		note        TEXT    NOT NULL DEFAULT ''
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_pending_status ON pending(status, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_pending_session ON pending(session_key)`,
+}

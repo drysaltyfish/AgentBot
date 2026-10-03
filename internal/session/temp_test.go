@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -274,4 +275,96 @@ func waitForTemp(t *testing.T, m *Manager, want int) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("等待临时路由注册超时: want=%d actual=%d", want, m.Temp().Len())
+}
+
+// fakePendingStore 记录会话层发出的在途记录调用。
+type fakePendingStore struct {
+	saved    []PendingRecord
+	finished []string
+	failSave bool
+}
+
+func (f *fakePendingStore) SavePending(ctx context.Context, r PendingRecord) error {
+	if f.failSave {
+		return errors.New("store down")
+	}
+	f.saved = append(f.saved, r)
+	return nil
+}
+
+func (f *fakePendingStore) FinishPending(ctx context.Context, id, status, note string) error {
+	f.finished = append(f.finished, id+"|"+status)
+	return nil
+}
+
+// Test_F86_RegisterPersistsPending 覆盖"带 Pending 的等待会落盘"。
+func Test_F86_RegisterPersistsPending(t *testing.T) {
+	t.Parallel()
+	ps := &fakePendingStore{}
+	tt := NewTempTable().WithPendingStore(ps, nil)
+	key := Key{SelfID: 1, GroupID: 2}
+
+	remove := tt.Register(TempRoute{
+		Key: key, Name: "await", Once: true, TTL: time.Minute,
+		Match:   func(*event.Event) bool { return true },
+		Pending: &PendingMeta{ID: "p1", Kind: "await", Payload: "等一条"},
+	})
+	if len(ps.saved) != 1 || ps.saved[0].ID != "p1" {
+		t.Fatalf("应落盘一条在途记录: %+v", ps.saved)
+	}
+	if ps.saved[0].SessionKey != key.String() {
+		t.Fatalf("应记录会话键: %+v", ps.saved[0])
+	}
+	if ps.saved[0].ExpiresAt <= 0 {
+		t.Fatalf("应记录到期时间: %+v", ps.saved[0])
+	}
+
+	remove()
+	if len(ps.finished) != 1 || !strings.Contains(ps.finished[0], "done") {
+		t.Fatalf("移除时应标记完成: %v", ps.finished)
+	}
+
+	// 幂等：重复调用移除函数只收尾一次。
+	remove()
+	if len(ps.finished) != 1 {
+		t.Fatalf("移除函数应幂等: %v", ps.finished)
+	}
+}
+
+// Test_F86_RemoveKeyOrphansPending 覆盖会话回收时的收尾。
+func Test_F86_RemoveKeyOrphansPending(t *testing.T) {
+	t.Parallel()
+	ps := &fakePendingStore{}
+	tt := NewTempTable().WithPendingStore(ps, nil)
+	key := Key{SelfID: 1, UserID: 9}
+	tt.Register(TempRoute{Key: key, Name: "await", Once: true, TTL: time.Minute,
+		Pending: &PendingMeta{ID: "p2", Kind: "await"}})
+
+	if n := tt.RemoveKey(key); n != 1 {
+		t.Fatalf("应移除 1 条: %d", n)
+	}
+	if len(ps.finished) != 1 || !strings.Contains(ps.finished[0], "orphaned") {
+		t.Fatalf("会话回收应把在途记录标为孤儿: %v", ps.finished)
+	}
+}
+
+// Test_F86_PersistFailureDoesNotBlockWait 守住"落盘失败不影响等待本身"。
+func Test_F86_PersistFailureDoesNotBlockWait(t *testing.T) {
+	t.Parallel()
+	ps := &fakePendingStore{failSave: true}
+	var warned []string
+	tt := NewTempTable().WithPendingStore(ps, func(m string) { warned = append(warned, m) })
+	key := Key{SelfID: 1, UserID: 9}
+
+	remove := tt.Register(TempRoute{Key: key, Name: "await", Once: true, TTL: time.Minute,
+		Match:   func(*event.Event) bool { return true },
+		Pending: &PendingMeta{ID: "p3"}})
+	defer remove()
+
+	if tt.Len() != 1 {
+		t.Fatalf("落盘失败不该影响注册")
+	}
+	if len(warned) == 0 || !strings.Contains(warned[0], "restart") {
+		t.Fatalf("落盘失败必须告警: %v", warned)
+	}
 }

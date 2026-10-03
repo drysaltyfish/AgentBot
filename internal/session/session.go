@@ -285,12 +285,20 @@ func (m *Manager) Await(ctx context.Context, key Key, match func(*event.Event) b
 	}
 
 	ch := make(chan *event.Event, 1)
+	// F-86：把这次等待落盘。ID 用会话键 + 纳秒时间，保证同一次等待稳定、
+	// 不同次等待不会互相覆盖（恢复方按 id 幂等）。
+	//nolint:contextcheck // 落盘用后台 ctx：等待本身已由调用方 ctx 约束，落盘只是旁路记录
 	remove := temp.Register(TempRoute{
 		Key:   key,
 		Name:  "await",
 		Once:  true,
 		TTL:   DefaultAwaitTTL,
 		Match: match,
+		Pending: &PendingMeta{
+			ID:      fmt.Sprintf("await:%s:%d", key.String(), time.Now().UnixNano()),
+			Kind:    "await",
+			Payload: "等待下一条消息",
+		},
 		Deliver: func(ev *event.Event) {
 			// 带缓冲 + 非阻塞投递：读循环绝不因为等待方来不及取而被拖住。
 			select {
@@ -413,6 +421,7 @@ func (m *Manager) Reclaim(ctx context.Context) int {
 		if ctx.Err() != nil {
 			break
 		}
+		//nolint:contextcheck // finalize 只做后台收尾（落盘在途记录），无请求 ctx 可用
 		m.finalize(s)
 	}
 	return len(victims)
@@ -473,6 +482,7 @@ func (m *Manager) Close(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		//nolint:contextcheck // finalize 只做后台收尾（落盘在途记录），无请求 ctx 可用
 		m.finalize(s)
 	}
 	return nil
