@@ -108,6 +108,19 @@ type Agent struct {
 	// Allow 是「工具 -> 角色」的放行表，仅在 ApprovalEnabled 时生效。
 	// 形如 {calculator: [member], json_query: [member]}：列出的角色可直接执行。
 	Allow map[string][]string `yaml:"allow"`
+	// AutoMemory 是显式记忆指令的自动写入（F-48 的规则触发）。
+	AutoMemory AutoMemory `yaml:"auto_memory"`
+}
+
+// AutoMemory 描述"记住：xxx"这类指令的自动写入。
+//
+// 只做**规则触发**，不做"让模型判断什么重要"——后者是 F-49 的固化（P2/M4）。
+// 规则触发是用户明确说"记住"时的可靠通道，且完全确定性。
+type AutoMemory struct {
+	// Enabled 为 nil 时按启用处理。
+	Enabled *bool `yaml:"enabled"`
+	// Triggers 覆盖默认触发词；为空时使用 agent.DefaultMemoryTriggers。
+	Triggers []string `yaml:"triggers"`
 }
 
 // Behavior 描述回复行为（F-13 路由策略的配置面）。
