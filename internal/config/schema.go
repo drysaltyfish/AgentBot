@@ -68,4 +68,5 @@ type Config struct {
 	Ops          Ops          `yaml:"ops"`
 	Singleflight Singleflight `yaml:"singleflight"`
 	Moderation   Moderation   `yaml:"moderation"`
+	Sandbox      Sandbox      `yaml:"sandbox"`
 }

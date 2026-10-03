@@ -249,3 +249,18 @@ moderation:
 #   prompt:
 #     dir: prompts
 #     personas_dir: prompts/personas
+
+# ---- 工具执行沙箱（F-46）----
+# 默认关闭。开启后按白名单限制工具的读写路径、环境变量与联网能力，
+# 并限制单次输出大小；越权调用返回结构化拒绝而不是执行。
+sandbox:
+  enabled: false
+  max_output_bytes: 65536
+  read_roots: []
+  write_roots: []
+  env_allowlist: []
+  forbidden_ops: []
+  forbidden_tools: []
+  network_tools: []
+  allow_network: false
+  require_read_only: false

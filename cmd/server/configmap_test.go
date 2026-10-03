@@ -264,3 +264,33 @@ func Test_ConfigMapScalarHelpers(t *testing.T) {
 		t.Fatalf("pick(false): %q", got)
 	}
 }
+
+// Test_F46_SandboxPolicyFromConfig 覆盖 F-46 的接线映射与启动期校验：
+// 默认关闭不改行为；开启后配置真的进到策略里；非法策略在启动期就失败。
+func Test_F46_SandboxPolicyFromConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	if _, on, err := sandboxPolicyFromConfig(cfg); on || err != nil {
+		t.Fatalf("默认应关闭且无错误: on=%v err=%v", on, err)
+	}
+
+	cfg.Sandbox.Enabled = ptr(true)
+	cfg.Sandbox.MaxOutputBytes = ptr(1024)
+	cfg.Sandbox.ReadRoots = []string{t.TempDir()}
+	cfg.Sandbox.AllowNetwork = ptr(true)
+	cfg.Sandbox.ForbiddenTools = []string{"exec"}
+	p, on, err := sandboxPolicyFromConfig(cfg)
+	if err != nil || !on {
+		t.Fatalf("应启用且无错误: on=%v err=%v", on, err)
+	}
+	if p.MaxOutputBytes != 1024 || !p.AllowNetwork || len(p.ReadRoots) != 1 || len(p.ForbiddenTools) != 1 {
+		t.Fatalf("配置映射不符: %+v", p)
+	}
+
+	// 边界：相对路径白名单必须在启动期被拒（否则运行时才炸，且判定含糊）。
+	cfg.Sandbox.ReadRoots = []string{"relative/path"}
+	if _, _, err := sandboxPolicyFromConfig(cfg); err == nil {
+		t.Fatalf("相对路径白名单应在启动期报错")
+	}
+}

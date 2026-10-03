@@ -229,6 +229,22 @@ func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, 
 			return nil, nil, fmt.Errorf("register virtual actions: %w", err)
 		}
 	}
+	// F-46：工具执行沙箱（默认关闭）。放在装配最后一步，
+	// 保证"注册顺序 = 内置顺序"不被破坏（前缀缓存依赖它）。
+	if policy, on, perr := sandboxPolicyFromConfig(cfg); perr != nil {
+		return nil, nil, perr
+	} else if on {
+		sandboxed, serr := registry.Sandbox(&policy)
+		if serr != nil {
+			return nil, nil, fmt.Errorf("apply tool sandbox: %w", serr)
+		}
+		registry = sandboxed
+		lg.Component("tool").Info("tool sandbox enabled",
+			"tools", len(registry.Names()),
+			"max_output_bytes", policy.MaxOutputBytes,
+			"allow_network", policy.AllowNetwork,
+			"require_read_only", policy.RequireReadOnly)
+	}
 
 	react := &agent.ReactAgent{
 		LLM:             model,
@@ -270,4 +286,29 @@ func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, 
 		"history_file", strings.TrimSpace(cfg.History.File),
 		"approval", cfg.Agent.ApprovalEnabled)
 	return react, mem, nil
+}
+
+// sandboxPolicyFromConfig 把配置映射成工具沙箱策略（F-46）。
+//
+// 返回 on=false 表示未启用；策略非法时返回错误，让启动在配置写错时就失败，
+// 而不是等到某个工具被调用时才发现白名单是相对路径。
+func sandboxPolicyFromConfig(cfg *config.Config) (tool.Policy, bool, error) {
+	if !cfg.Sandbox.EffectiveEnabled() {
+		return tool.Policy{}, false, nil
+	}
+	p := tool.Policy{
+		MaxOutputBytes:  cfg.Sandbox.EffectiveMaxOutputBytes(),
+		ReadRoots:       cfg.Sandbox.ReadRoots,
+		WriteRoots:      cfg.Sandbox.WriteRoots,
+		EnvAllowlist:    cfg.Sandbox.EnvAllowlist,
+		ForbiddenOps:    cfg.Sandbox.ForbiddenOps,
+		ForbiddenTools:  cfg.Sandbox.ForbiddenTools,
+		NetworkTools:    cfg.Sandbox.NetworkTools,
+		AllowNetwork:    cfg.Sandbox.EffectiveAllowNetwork(),
+		RequireReadOnly: cfg.Sandbox.EffectiveRequireReadOnly(),
+	}
+	if err := p.Validate(); err != nil {
+		return tool.Policy{}, false, fmt.Errorf("sandbox policy: %w", err)
+	}
+	return p, true, nil
 }
