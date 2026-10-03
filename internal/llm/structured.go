@@ -437,19 +437,19 @@ func ChatStructured(ctx context.Context, l LLM, req *ChatRequest, target any) (*
 	if err != nil {
 		return nil, err
 	}
-	if firstErr := DecodeStructuredString(first.Content, target, format); firstErr == nil {
+	firstErr := DecodeStructuredString(first.Content, target, format)
+	if firstErr == nil {
 		return first, nil
-	} else {
-		retryReq := cloneForStructuredRetry(req, first.Content, firstErr)
-		second, retryErr := l.Chat(ctx, retryReq)
-		if retryErr != nil {
-			return nil, retryErr
-		}
-		if decodeErr := DecodeStructuredString(second.Content, target, format); decodeErr != nil {
-			return nil, fmt.Errorf("%w: %w", ErrStructuredOutput, decodeErr)
-		}
-		return second, nil
 	}
+	retryReq := cloneForStructuredRetry(req, first.Content, firstErr)
+	second, retryErr := l.Chat(ctx, retryReq)
+	if retryErr != nil {
+		return nil, retryErr
+	}
+	if decodeErr := DecodeStructuredString(second.Content, target, format); decodeErr != nil {
+		return nil, fmt.Errorf("%w: %w", ErrStructuredOutput, decodeErr)
+	}
+	return second, nil
 }
 
 func cloneForStructuredRetry(req *ChatRequest, previous string, cause error) *ChatRequest {
