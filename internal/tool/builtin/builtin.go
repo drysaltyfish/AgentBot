@@ -37,6 +37,8 @@ type Deps struct {
 	History HistoryReader
 	// MemoryAdmin 供 forget_memory / list_memories 遗忘与检视记忆；为 nil 时这两个工具会明确报错。
 	MemoryAdmin MemoryAdmin
+	// Caller 提供平台 API 通道（get_user_info 等需要向平台查询的工具）。
+	Caller CallerProvider
 	// Now 注入时间源（测试用）。
 	Now func() time.Time
 }
@@ -62,6 +64,7 @@ func Register(r *tool.Registry, deps Deps) error {
 		recallHistory{deps: deps},
 		forgetMemory{deps: deps},
 		listMemories{deps: deps},
+		getUserInfo{deps: deps},
 	} {
 		if err := r.Register(t); err != nil {
 			return err

@@ -172,6 +172,27 @@ func runStats(cfg *config.Config, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// callerBox 让工具的 API 通道可以**迟到绑定**。
+//
+// 需要它是因为传输客户端在工具装配之后才创建；直接注入会迫使初始化顺序倒置，
+// 而顺序一乱很容易再踩一次"在错误的地方调 API"（引用解析就踩过）。
+type callerBox struct {
+	mu sync.RWMutex
+	c  transport.Caller
+}
+
+func (b *callerBox) Caller() transport.Caller {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.c
+}
+
+func (b *callerBox) set(c transport.Caller) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.c = c
+}
+
 // quotedResolver 解析引用消息的内容（QQ 的"回复"功能）。
 //
 // 为什么需要它：OneBot 的 reply 段只给一个 message_id，**被引用的内容不在事件里**。
@@ -582,18 +603,18 @@ func durationOr(p *config.Duration, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-// speakerName 返回群聊里用来标识发言人的名字。
+// speakerLabel 返回群聊里用来标识发言人的标签。
 //
-// 群名片优先于昵称：群里大家认的是群名片。
+// **锚点是 QQ 号，不是昵称**：昵称与群名片随时会改，一改模型就认不出是同一个人，
+// 记忆归属也会跟着断。QQ 号不变，所以历史文本稳定、身份稳定（前缀缓存也顺带稳定）。
+// 要知道这个号是谁，用 get_user_info 查。
+//
 // 私聊返回空串——只有两个人，每句都加前缀是纯噪声。
-func speakerName(sender event.Sender, groupID int64) string {
-	if groupID == 0 {
+func speakerLabel(userID, groupID int64) string {
+	if groupID == 0 || userID <= 0 {
 		return ""
 	}
-	if name := strings.TrimSpace(sender.Card); name != "" {
-		return name
-	}
-	return strings.TrimSpace(sender.Nickname)
+	return fmt.Sprintf("[QQ%d]", userID)
 }
 
 // agentRole 把平台上报的成员角色映射成 F-45 的权限角色。
@@ -615,7 +636,7 @@ func agentRole(ev *event.Event) agent.Role {
 //
 // 返回的是 agent.Agent 接口：未启用 ReAct 时返回 DirectAgent，
 // 因此调用方对两条路径完全同形，不需要分支。
-func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist history.History, st *store.Store, lg *observe.Logger) (agent.Agent, agent.Memory, error) {
+func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist history.History, st *store.Store, caller builtin.CallerProvider, lg *observe.Logger) (agent.Agent, agent.Memory, error) {
 	if !cfg.Agent.Enabled {
 		return &agent.DirectAgent{LLM: model, SystemPrompt: sysPrompt}, nil, nil
 	}
@@ -679,7 +700,7 @@ func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist histor
 	}
 
 	// 内置工具：先全量注册再按配置裁剪，这样顺序始终等于内置顺序（前缀缓存需要稳定）。
-	deps := builtin.Deps{Memory: mem, HTTP: httpx.Defaults(), Now: time.Now, History: hist, MemoryAdmin: memAdmin}
+	deps := builtin.Deps{Memory: mem, HTTP: httpx.Defaults(), Now: time.Now, History: hist, MemoryAdmin: memAdmin, Caller: caller}
 	if err := builtin.Register(registry, deps); err != nil {
 		return nil, nil, fmt.Errorf("register builtin tools: %w", err)
 	}
@@ -948,7 +969,9 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		"history_items", histItems, "trim_high_water", histItems, "trim_low_water", histItems*3/4)
 
 	// Agent：启用时走 ReAct（带工具），否则是直连 LLM。调用方对两条路径同形。
-	brain, mem, err := buildAgent(cfg, model, sysPrompt, hist, st, lg)
+	// 平台 API 通道：ws 稍后才创建，因此用迟到绑定的盒子。
+	apiCaller := &callerBox{}
+	brain, mem, err := buildAgent(cfg, model, sysPrompt, hist, st, apiCaller, lg)
 	if err != nil {
 		lifecycle.Error("cannot build agent", "error", err)
 		return 1
@@ -986,6 +1009,8 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 			lg.Component("outbound").Error("filter panicked", "filter", name, "panic", fmt.Sprint(recovered))
 		}),
 	)
+
+	apiCaller.set(ws)
 
 	sender := outbound.NewSender(ws, chain, outbound.WithAudit(func(rec outbound.AuditRecord) {
 		lg.Component("outbound").Info("outbound",
@@ -1079,7 +1104,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 				text:    text,
 				traceID: observe.TraceID(c),
 				role:    agentRole(c.Event),
-				speaker: speakerName(c.Event.Sender, c.Event.GroupID),
+				speaker: speakerLabel(c.Event.UserID, c.Event.GroupID),
 				message: c.Event.Message,
 				caller:  c.Caller(),
 			}:
