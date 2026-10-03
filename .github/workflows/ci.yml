@@ -66,23 +66,25 @@ jobs:
           # -update 只是"未知 flag"报错，于是这一步无论对错都会通过，成了假安全感。
           # 现在改成：先探测哪些包真的有 golden 用例；有则真断言，没有则显式告知。
           #
-          # 两个坑都已实测：
-          #   1) -list 不受 -run 约束：`-run Golden -list '.*'` 会把全部 244 个测试都列出来
-          #      （当时误判为"有 244 个 golden 用例"），探测必须直接用 -list 'Golden'。
+          # 探测方式：以**已提交的 golden 文件**为准。
+          #
+          # 为什么不用 go test -list：实测同一份提交，windows 探测到了 internal/testutil，
+          # ubuntu 却走了"未落地"分支——探测本身在平台间不稳定（它依赖测试二进制能否
+          # 成功构建并列出用例）。golden 文件按 F-74 必须入库，用它探测是确定性的。
+          #
+          # 两个仍然成立的历史坑：
+          #   1) -list 不受 -run 约束：`-run Golden -list '.*'` 会把全部用例都列出来，
+          #      于是"探测"永远为真——这也是改用文件探测的原因之一。
           #   2) 不能对 ./... 断言：没有 -update flag 的包会先以"未知 flag"失败，
           #      掩盖"是助手接受了 -update"这个真正要报的原因。只对 golden 包断言。
           pkgs=""
           for p in $(go list ./...); do
-            if go test "$p" -list 'Golden' 2>/dev/null | grep -q '^Test'; then
+            dir=$(go list -f '{{.Dir}}' "$p")
+            if find "$dir" -name '*.golden' -print -quit 2>/dev/null | grep -q .; then
               pkgs="$pkgs $p"
             fi
           done
           pkgs=$(echo "$pkgs" | xargs)
-
-          if [ -z "$pkgs" ]; then
-            echo "::notice::golden 用例尚未落地（F-74 属 M3）——本步当前不提供任何保护，特此显式告知，避免假安全感。"
-            exit 0
-          fi
           echo "含 golden 用例的包：$pkgs"
 
           if out=$(go test $pkgs -run Golden -update 2>&1); then
