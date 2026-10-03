@@ -166,3 +166,43 @@ log:
 
 shutdown:
   timeout: 10s
+
+# ---- 令牌桶限速（F-18）----
+# 防止单用户/单群刷屏打爆 LLM 额度。默认**关闭**：限速会让超限事件被整条丢弃
+# （连"只记录"的兜底路由也不执行），需要你确认这是想要的行为。
+# 挂载为 mid 钩子；key 是用户与群，TTL = burst/rate*3 自动回收空闲 key。
+ratelimit:
+  enabled: false
+  user_per_minute: 20
+  user_burst: 5
+  group_per_minute: 120
+  group_burst: 20
+
+# ---- 功能开关（F-19）----
+# 群管可以按群关闭某个插件（/switch <plugin> on|off），重启后保持。
+# file 为空则仅进程内，重启即丢。
+toggle:
+  enabled: false
+  default_on: true
+  file: ./data/toggles.json
+
+# ---- 审计日志（F-60）----
+# 审计**不可关闭**（规格明确要求），只能调去处与内容保留量。
+# 异步 + 有界队列：写失败或队列满只丢审计并计数，绝不影响主流程。
+audit:
+  file: ./data/audit.jsonl
+  stdout: false
+  queue_size: 4096
+  # 用户内容只保留前 N 个字符（其余以 …(len=N) 代替），避免审计里留下大段聊天内容。
+  content_limit: 20
+
+# ---- 指标与探针（F-68 / F-69）----
+# 独立监听地址，默认只绑回环：/metrics、/healthz、/readyz。
+# readyz 会检查依赖（存储可用等），结果缓存 10s；healthz 只看进程存活。
+ops:
+  enabled: true
+  addr: 127.0.0.1:9090
+  # 非空时三个端点都要求 Authorization: Bearer <token>；绑定回环时通常不需要。
+  auth_token: ""
+  ready_cache_ttl: 10s
+  probe_timeout: 1s

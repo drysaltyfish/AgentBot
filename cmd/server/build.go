@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/drysaltyfish/agentbot/internal/agent"
+	"github.com/drysaltyfish/agentbot/internal/audit"
 	"github.com/drysaltyfish/agentbot/internal/config"
 	"github.com/drysaltyfish/agentbot/internal/conversation"
 	"github.com/drysaltyfish/agentbot/internal/history"
@@ -127,7 +128,7 @@ func systemPrompt(cfg *config.Config) (string, error) {
 //
 // 返回的是 agent.Agent 接口：未启用 ReAct 时返回 DirectAgent，
 // 因此调用方对两条路径完全同形，不需要分支。
-func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, hist history.History, st *store.Store, caller builtin.CallerProvider, lg *observe.Logger) (agent.Agent, agent.Memory, error) {
+func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, hist history.History, st *store.Store, caller builtin.CallerProvider, lg *observe.Logger, auditLog *audit.Logger) (agent.Agent, agent.Memory, error) {
 	if !cfg.Agent.Enabled {
 		return &agent.DirectAgent{LLM: model, Assembler: asm}, nil, nil
 	}
@@ -223,6 +224,8 @@ func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, 
 		Memory:          mem,
 		ApprovalTimeout: cfg.Agent.ApprovalTimeoutOr(agent.DefaultApprovalTimeout),
 		Warn:            func(msg string) { lg.Component("agent").Warn(msg) },
+		// F-60：审批与策略拒绝都要留痕。
+		OnApproval: approvalAuditHook(auditLog),
 	}
 
 	if cfg.Agent.ApprovalEnabled {

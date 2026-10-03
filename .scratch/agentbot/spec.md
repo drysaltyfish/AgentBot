@@ -149,6 +149,20 @@ M2 的 Feature 范围来自附录 A：F-15, F-16, F-35, F-40, F-41~F-45。
 (3) 记忆只能写不能删，"忘记我"没有通道。
 因此新增 F-83~F-89，并把 F-47/F-48/F-50 既有的 SQLite 计划与它们合并到同一里程碑。
 
+### 5.4 M3 补记 · 生产可用五项（本次补齐）
+
+M3 原计划还包含限速/开关/审计/指标/探针，本轮一并落地（对应 F-18 / F-19 / F-60 / F-68 / F-69）：
+
+| Feature | 落地 | 位置 |
+|---|---|---|
+| F-18 令牌桶限速 | `Limiter` / `LimiterManager[K]`，按 TTL 回收空闲 key，挂 mid 钩子 | `internal/router/ratelimit.go` |
+| F-19 功能开关 | `Toggle` + 内存/文件 Store，`/switch <plugin> on\|off` 限群管理，启动期校验插件名 | `internal/toggle/` |
+| F-60 审计日志 | 异步有界队列 + JSON 行，出口/审批/限速/工具调用留痕，不可关闭 | `internal/audit/` |
+| F-68 指标暴露 | 手写 Prometheus 文本格式 + 单一指标目录（15 个指标），`/metrics` | `internal/metrics/`、`internal/ops/` |
+| F-69 健康与就绪探针 | `/healthz` 只看进程、`/readyz` 查存储/传输/provider 且结果缓存 10s | `internal/ops/` |
+
+仍未落地的 M3 项：F-07/F-17/F-22/F-24/F-27/F-29/F-31/F-32/F-50/F-56/F-57/F-58/F-64/F-74/F-77/F-79/F-82。
+
 **执行顺序约束**：ticket 45 必须先完成，其余六张都依赖它建立的存储与迁移机制。
 **F-83 未落地前不得开始任何功能搬移**——否则会出现两套迁移逻辑。
 

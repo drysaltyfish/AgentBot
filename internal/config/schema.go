@@ -62,4 +62,8 @@ type Config struct {
 	Policy    Policy    `yaml:"policy"`
 	Log       Log       `yaml:"log"`
 	Shutdown  Shutdown  `yaml:"shutdown"`
+	RateLimit RateLimit `yaml:"ratelimit"`
+	Toggle    Toggle    `yaml:"toggle"`
+	Audit     Audit     `yaml:"audit"`
+	Ops       Ops       `yaml:"ops"`
 }

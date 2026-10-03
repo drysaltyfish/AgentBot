@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
+	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/reply"
@@ -47,11 +49,43 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	}()
 	lifecycle := lg.Component("lifecycle")
 
+	// F-60：审计不可关闭，先建好；后续每个关键动作都往它写。
+	auditLog, auditCloser := buildAudit(cfg, lg)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := auditLog.Close(ctx); err != nil {
+			lifecycle.Warn("cannot close audit log", "error", err)
+		}
+		if auditCloser != nil {
+			_ = auditCloser.Close()
+		}
+	}()
+
+	// F-68：全部指标在**同一处**定义；F-69 的探针复用它的注册表。
+	// sessionMgr / replyQueue 在稍后赋值，这里只登记取值闭包。
+	var (
+		sessionMgr *session.Manager
+		replyQueue chan reply.Job
+		wsUp       atomic.Bool
+	)
+	catalog := metrics.NewCatalog(metrics.CatalogOptions{
+		SessionsActive: func() float64 {
+			if sessionMgr == nil {
+				return 0
+			}
+			return float64(sessionMgr.Len())
+		},
+		QueueDepth: func() float64 { return float64(len(replyQueue)) },
+	})
+
 	model, err := buildLLM(cfg, lg)
 	if err != nil {
 		lifecycle.Error("cannot build llm", "error", err)
 		return 1
 	}
+	// F-68：用装饰器收集模型调用的状态、延迟与 token，不改 internal/llm。
+	model = &observedLLM{next: model, cat: catalog, provider: providerName(cfg), model: cfg.LLM.Model}
 
 	// 缓存优先（二）：历史裁剪交给存储层，且用高水位批量裁剪。
 	// 若由装配层每轮裁剪，前缀会逐轮变化，前缀缓存永远无法命中。
@@ -136,6 +170,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		session.WithTTL(session.DefaultTTL),
 		session.WithMax(session.DefaultMax),
 	)
+	sessionMgr = sessions
 	// F-86：把等待落盘，重启后至少能通知原会话，而不是让用户一直干等。
 	sessions.Temp().WithPendingStore(pendingStoreAdapter{st: st}, func(msg string) {
 		lg.Component("session").Warn(msg)
@@ -181,7 +216,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	// Agent：启用时走 ReAct（带工具），否则是直连 LLM。调用方对两条路径同形。
 	// 平台 API 通道：ws 稍后才创建，因此用迟到绑定的盒子。
 	apiCaller := &callerBox{}
-	brain, mem, err := buildAgent(cfg, model, asm, hist, st, apiCaller, lg)
+	brain, mem, err := buildAgent(cfg, model, asm, hist, st, apiCaller, lg, auditLog)
 	if err != nil {
 		lifecycle.Error("cannot build agent", "error", err)
 		return 1
@@ -197,6 +232,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		router.WithRejectHandler(func(c *router.Ctx, phase string) {
 			lg.Component("router").Debug("route rejected", "phase", phase)
 		}),
+		router.WithObserver(routeMetrics{cat: catalog}),
 	)
 
 	auth := transport.NewAuth(
@@ -222,11 +258,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 
 	apiCaller.set(ws)
 
-	sender := outbound.NewSender(ws, chain, outbound.WithAudit(func(rec outbound.AuditRecord) {
-		lg.Component("outbound").Info("outbound",
-			"group_id", rec.GroupID, "user_id", rec.UserID,
-			"dropped", rec.Dropped, "reason", rec.Reason, "runes", len([]rune(rec.Filtered)))
-	}))
+	sender := outbound.NewSender(ws, chain, outbound.WithAudit(outboundAuditHook(catalog, lg)))
 	// F-86：恢复残留的在途记录（通知原会话；已过期的作废）。
 	{
 		recoverCtx, cancelRecover := context.WithTimeout(context.Background(), 30*time.Second)
@@ -236,6 +268,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 
 	listenCtx, stopListen := context.WithCancel(context.Background())
 	jobs := make(chan reply.Job, 256)
+	replyQueue = jobs
 	var inflight sync.WaitGroup
 
 	app := bot.New(
@@ -289,6 +322,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		Brain: brain, Sender: sender, Sessions: sessions, Assembler: asm,
 		Memory: mem, AutoMem: autoMem, Timeout: timeout, Shape: shape,
 		Store: st, Price: price, Log: lg,
+		Audit: auditLog, Catalog: catalog,
 	})
 
 	// 回复策略是**规则**，不是 handler 里的分支：路由层就能回答"什么时候回复"。
@@ -318,12 +352,42 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		}:
 		default:
 			inflight.Done()
+			catalog.EventsDropped.With(metrics.Labels{"reason": "queue_full"}).Inc()
 			lifecycle.Warn("reply queue is full; dropping message", "user_id", c.Event.UserID)
 		}
 	}
 
+	// F-18：令牌桶限速（默认关闭）。超限事件会被整条丢弃——这是刻意的：
+	// 限速的目的就是让刷屏不产生任何 LLM 调用，代价远低于额度被打爆。
+	if cfg.RateLimit.EffectiveEnabled() {
+		userLimit := router.NewLimiterManager[int64](
+			float64(cfg.RateLimit.EffectiveUserPerMinute())/60, float64(cfg.RateLimit.EffectiveUserBurst()))
+		groupLimit := router.NewLimiterManager[int64](
+			float64(cfg.RateLimit.EffectiveGroupPerMinute())/60, float64(cfg.RateLimit.EffectiveGroupBurst()))
+		engine.UseMid(userLimit.Rule(
+			func(c *router.Ctx) int64 { return c.Event.UserID },
+			rateLimitedHook(catalog, auditLog, "user")))
+		engine.UseMid(groupLimit.Rule(
+			func(c *router.Ctx) int64 { return c.Event.GroupID },
+			rateLimitedHook(catalog, auditLog, "group")))
+		lg.Component("ratelimit").Info("token bucket rate limiting is enabled",
+			"user_per_minute", cfg.RateLimit.EffectiveUserPerMinute(), "user_burst", cfg.RateLimit.EffectiveUserBurst(),
+			"group_per_minute", cfg.RateLimit.EffectiveGroupPerMinute(), "group_burst", cfg.RateLimit.EffectiveGroupBurst())
+	}
+
+	// F-19：功能开关。未启用时等价于没有开关（默认全开）。
+	toggles := newToggles(cfg, lg)
+	if cfg.Toggle.EffectiveEnabled() {
+		routes.OnMessage(router.Prefix("/switch")).
+			Named("switch").
+			Priority(router.PriorityEarly).
+			Block(true).
+			Handle(func(c *router.Ctx) { switchCommand(c, toggles, sender) })
+	}
+
 	routes.OnMessage(replyRule(cfg)).
 		Named("reply").
+		UsePre(toggles.Rule("reply")).
 		Priority(router.PriorityEarly).
 		Block(true).
 		Handle(func(c *router.Ctx) { enqueue(c, true) })
@@ -366,6 +430,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 			tlog.Warn("event decoded with warnings",
 				"warning", ev.DecodeWarning, "segments", segmentTypes(ev.Message))
 		}
+		catalog.EventsReceived.With(metrics.Labels{"kind": string(ev.Kind)}).Inc()
 		tlog.Debug("event received",
 			"kind", string(ev.Kind), "sub", ev.Sub, "self_id", ev.SelfID,
 			"user_id", ev.UserID, "group_id", ev.GroupID, "message_id", ev.MessageID.String(),
@@ -394,6 +459,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 			lg.Component("transport").Error("connect failed", "url", cfg.Transport.URL, "error", err)
 			return
 		}
+		wsUp.Store(true)
 		go func() {
 			resp, err := ws.Call(ctx, transport.Request{Action: "get_login_info"})
 			if err != nil {
@@ -439,8 +505,21 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 			"router-snapshot-match", "rule-handler-separation", "engine-hooks",
 			"session-manager", "history-memory", "llm-interface", "llm-retry",
 			"outbound-filter-chain", "graceful-shutdown",
+			"rate-limit", "feature-toggle", "audit-log", "metrics", "health-probes",
 		},
 	)
+
+	// F-68/F-69：监听放在最后启动——此时探针要读的状态都已赋值，
+	// 抓取不会与启动初始化并发。
+	opsSrv, oerr := buildOps(cfg, catalog, readinessChecks(st, &wsUp, provider), lg)
+	if oerr != nil {
+		lifecycle.Error("cannot start ops listener", "error", oerr)
+		return 1
+	}
+	defer closeOps(opsSrv, lg)
+	if opsSrv != nil {
+		opsSrv.SetReady(true)
+	}
 
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -448,6 +527,9 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 
 	<-sig
 	lifecycle.Info("shutdown signal received", "timeout", timeout.String())
+	if opsSrv != nil {
+		opsSrv.SetReady(false)
+	}
 
 	go func() {
 		<-sig

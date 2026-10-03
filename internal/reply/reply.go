@@ -16,10 +16,12 @@ import (
 	"time"
 
 	"github.com/drysaltyfish/agentbot/internal/agent"
+	"github.com/drysaltyfish/agentbot/internal/audit"
 	"github.com/drysaltyfish/agentbot/internal/conversation"
 	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
+	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/session"
@@ -68,6 +70,10 @@ type Deps struct {
 	Log       *observe.Logger
 	Timeout   time.Duration
 	Shape     Shape
+	// Audit 接收本轮的审计记录（F-60）；为 nil 时不记录。
+	Audit *audit.Logger
+	// Catalog 接收本轮的指标（F-68）；为 nil 时不记录。
+	Catalog *metrics.Catalog
 }
 
 // Pipeline 执行一次回复轮次。
@@ -206,6 +212,41 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 		}
 	}
 
+	// F-60：每轮模型调用与每次工具调用都留一条审计；F-68 同步记录工具指标。
+	// 审计写入是异步有界的，这里不会阻塞回复链路。
+	result := audit.ResultOK
+	if runErr != nil {
+		result = audit.ResultError
+	}
+	if p.deps.Audit != nil {
+		p.deps.Audit.Log(audit.Event{
+			Type: audit.EventLLMCall, TraceID: j.TraceID, SessionKey: j.Key.String(),
+			UserID: j.UserID, GroupID: j.GroupID, Action: "chat", Result: result,
+			Tokens: out.Usage.PromptTokens + out.Usage.CompletionTokens,
+		})
+	}
+	for _, st := range out.Steps {
+		if st.Type != agent.StepAction {
+			continue
+		}
+		status := "ok"
+		if st.Error != "" {
+			status = "error"
+		}
+		if p.deps.Audit != nil {
+			p.deps.Audit.Log(audit.Event{
+				Type: audit.EventToolCall, TraceID: j.TraceID, SessionKey: j.Key.String(),
+				UserID: j.UserID, GroupID: j.GroupID, Action: st.ToolName,
+				Result: audit.Result(status), DurationMS: st.DurationMS,
+				Params: map[string]string{"input": st.ToolInput},
+			})
+		}
+		if p.deps.Catalog != nil {
+			p.deps.Catalog.ToolCalls.With(metrics.Labels{"tool": st.ToolName, "status": status}).Inc()
+			p.deps.Catalog.ToolDuration.With(metrics.Labels{"tool": st.ToolName}).Observe(float64(st.DurationMS) / 1000)
+		}
+	}
+
 	// F-89：记录本轮实际发送的消息指纹，并判断前缀是否**意外**变化。
 	// 这是把"前缀为什么变了"从事后猜变成当场知道的那一步。
 	if p.deps.Store != nil && len(out.PromptDigest) > 0 {
@@ -291,6 +332,10 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 		rlog.Error("send failed", "error", err, "sent", sent, "segments", len(parts))
 		return
 	}
+	if p.deps.Catalog != nil {
+		p.deps.Catalog.ActionsSent.With(metrics.Labels{"action": "send_msg", "status": "ok"}).Add(float64(len(parts)))
+	}
+
 	// 每条讯息都带上它自己的缓存命中率：这是"缓存优先"是否生效的唯一客观指标。
 	rlog.Info("replied", "group_id", j.GroupID, "user_id", j.UserID,
 		"runes", len([]rune(text)), "segments", len(parts),

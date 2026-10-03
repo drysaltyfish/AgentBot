@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"os"
 	"sort"
 	"strconv"
@@ -169,6 +170,36 @@ func (c *Config) Validate() error {
 			add("shutdown.timeout", "必须为正")
 		} else if c.Shutdown.Timeout.D > time.Minute {
 			add("shutdown.timeout", "超过 1 分钟；关闭必须有界（F-70）")
+		}
+	}
+
+	if c.RateLimit.UserPerMinute != nil && *c.RateLimit.UserPerMinute < 0 {
+		add("ratelimit.user_per_minute", "不能为负")
+	}
+	if c.RateLimit.UserBurst != nil && *c.RateLimit.UserBurst < 0 {
+		add("ratelimit.user_burst", "不能为负")
+	}
+	if c.RateLimit.GroupPerMinute != nil && *c.RateLimit.GroupPerMinute < 0 {
+		add("ratelimit.group_per_minute", "不能为负")
+	}
+	if c.RateLimit.GroupBurst != nil && *c.RateLimit.GroupBurst < 0 {
+		add("ratelimit.group_burst", "不能为负")
+	}
+	if c.Audit.QueueSize != nil && *c.Audit.QueueSize <= 0 {
+		add("audit.queue_size", "必须为正")
+	}
+	if c.Audit.ContentLimit != nil && *c.Audit.ContentLimit < 1 {
+		add("audit.content_limit", "必须 >= 1")
+	}
+	if c.Ops.ReadyCacheTTL != nil && c.Ops.ReadyCacheTTL.D <= 0 {
+		add("ops.ready_cache_ttl", "必须为正")
+	}
+	if c.Ops.ProbeTimeout != nil && c.Ops.ProbeTimeout.D <= 0 {
+		add("ops.probe_timeout", "必须为正")
+	}
+	if c.Ops.EffectiveEnabled() {
+		if _, _, err := net.SplitHostPort(c.Ops.EffectiveAddr()); err != nil {
+			add("ops.addr", "必须是 host:port 形式（如 127.0.0.1:9090）: "+err.Error())
 		}
 	}
 

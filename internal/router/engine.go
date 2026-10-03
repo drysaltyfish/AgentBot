@@ -5,6 +5,7 @@ import (
 	"errors"
 	"runtime/debug"
 	"sync"
+	"time"
 
 	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/transport"
@@ -12,6 +13,19 @@ import (
 
 // ErrPanic 表示 Rule/Handler 发生 panic（已被调度层恢复）。
 var ErrPanic = errors.New("panic recovered in engine")
+
+// RouteObserver 观测每条路由的匹配与耗时（F-68 的指标接入口）。
+//
+// 定义在 router 侧，避免 router 依赖具体指标实现；组合根把指标目录适配成这个接口即可。
+type RouteObserver interface {
+	// RouteMatched 在一条路由执行完毕后调用（含耗时）。
+	RouteMatched(route string, d time.Duration)
+	// RoutePanicked 在该路由的 Handler 发生 panic（已被恢复）后调用。
+	RoutePanicked(route string)
+}
+
+// WithObserver 注入路由观测器。
+func WithObserver(o RouteObserver) EngineOption { return func(e *Engine) { e.observer = o } }
 
 // EngineOption 配置 Engine。
 type EngineOption func(*Engine)
@@ -41,6 +55,7 @@ type Engine struct {
 	mid      []Rule
 	post     []Handler
 	onPanic  func(phase string, recovered any, stack []byte)
+	observer RouteObserver
 	onReject func(c *Ctx, phase string)
 }
 
@@ -128,7 +143,14 @@ func (e *Engine) Dispatch(ctx context.Context, ev *event.Event, caller transport
 		}
 
 		matched++
-		e.runRoute(c, rt)
+		start := time.Now()
+		panicked := e.runRoute(c, rt)
+		if e.observer != nil {
+			e.observer.RouteMatched(rt.name, time.Since(start))
+			if panicked {
+				e.observer.RoutePanicked(rt.name)
+			}
+		}
 
 		if rt.IsOnce() {
 			e.router.Remove(rt)
@@ -140,12 +162,13 @@ func (e *Engine) Dispatch(ctx context.Context, ev *event.Event, caller transport
 	return matched
 }
 
-func (e *Engine) runRoute(c *Ctx, rt *Route) {
+func (e *Engine) runRoute(c *Ctx, rt *Route) (panicked bool) {
 	// Block: 本条路由执行后停止尝试后续路由。
 	// Break: 同上，并且跳过 post 钩子（用于"已充分处理、无需统计"的场景）。
 	skipPost := rt.brk
 	defer func() {
 		if r := recover(); r != nil {
+			panicked = true
 			e.reportPanic("handler", r)
 		}
 		if !skipPost {
@@ -155,6 +178,7 @@ func (e *Engine) runRoute(c *Ctx, rt *Route) {
 	for _, h := range rt.handlers {
 		h(c)
 	}
+	return panicked
 }
 
 func (e *Engine) runPost(c *Ctx) {

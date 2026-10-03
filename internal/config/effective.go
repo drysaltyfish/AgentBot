@@ -1,6 +1,9 @@
 package config
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // 本文件的取值访问器把“未设置（nil 或零值）→ 模块默认”的解析收进模块内部，
 // 调用方直接用 cfg.X.Y() 读取生效值，不必再抄一份默认常量。
@@ -125,3 +128,61 @@ func (l Log) EffectiveQueueSize() int { return orPositive(l.QueueSize, defaultLo
 
 // EffectiveTimeout 返回优雅关闭预算；未配置或非正时取默认 10s。
 func (s Shutdown) EffectiveTimeout() time.Duration { return s.Timeout.Or(defaultShutdownTimeout) }
+
+// EffectiveEnabled 返回是否启用限速；未配置时默认关闭。
+func (r RateLimit) EffectiveEnabled() bool { return orBool(r.Enabled, false) }
+
+// EffectiveUserPerMinute 返回单用户每分钟可用次数；未配置或非正时取默认 20。
+func (r RateLimit) EffectiveUserPerMinute() int {
+	return orPositive(r.UserPerMinute, defaultRateLimitUserPerMinute)
+}
+
+// EffectiveUserBurst 返回单用户突发容量；未配置或非正时取默认 5。
+func (r RateLimit) EffectiveUserBurst() int {
+	return orPositive(r.UserBurst, defaultRateLimitUserBurst)
+}
+
+// EffectiveGroupPerMinute 返回单群每分钟可用次数；未配置或非正时取默认 120。
+func (r RateLimit) EffectiveGroupPerMinute() int {
+	return orPositive(r.GroupPerMinute, defaultRateLimitGroupPerMinute)
+}
+
+// EffectiveGroupBurst 返回单群突发容量；未配置或非正时取默认 20。
+func (r RateLimit) EffectiveGroupBurst() int {
+	return orPositive(r.GroupBurst, defaultRateLimitGroupBurst)
+}
+
+// EffectiveEnabled 返回是否启用功能开关；未配置时默认关闭。
+func (t Toggle) EffectiveEnabled() bool { return orBool(t.Enabled, false) }
+
+// EffectiveDefaultOn 返回未显式设置过时插件的默认状态；未配置时默认开启。
+func (t Toggle) EffectiveDefaultOn() bool { return orBool(t.DefaultOn, true) }
+
+// EffectiveQueueSize 返回审计队列容量；未配置或非正时取默认 4096。
+func (a Audit) EffectiveQueueSize() int { return orPositive(a.QueueSize, defaultAuditQueueSize) }
+
+// EffectiveContentLimit 返回审计中用户内容保留的字符数；未配置或小于 1 时取默认 20。
+func (a Audit) EffectiveContentLimit() int {
+	return orPositive(a.ContentLimit, defaultAuditContentLimit)
+}
+
+// EffectiveEnabled 返回是否启用指标与探针监听；未配置时默认开启（仅回环）。
+func (o Ops) EffectiveEnabled() bool { return orBool(o.Enabled, true) }
+
+// EffectiveAddr 返回监听地址；未配置时取默认 127.0.0.1:9090。
+func (o Ops) EffectiveAddr() string {
+	if strings.TrimSpace(o.Addr) == "" {
+		return defaultOpsAddr
+	}
+	return o.Addr
+}
+
+// EffectiveReadyCacheTTL 返回就绪检查缓存时长；未配置或非正时取默认 10s。
+func (o Ops) EffectiveReadyCacheTTL() time.Duration {
+	return o.ReadyCacheTTL.Or(defaultOpsReadyCacheTTL)
+}
+
+// EffectiveProbeTimeout 返回单次依赖检查超时；未配置或非正时取默认 1s。
+func (o Ops) EffectiveProbeTimeout() time.Duration {
+	return o.ProbeTimeout.Or(defaultOpsProbeTimeout)
+}

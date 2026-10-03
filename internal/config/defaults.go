@@ -29,6 +29,20 @@ const (
 	defaultBehaviorMaxSegments = 4
 	// defaultHistoryRetention 是历史存储默认保留的条目上限。
 	defaultHistoryRetention = 400
+
+	// 以下为 F-18 / F-19 / F-60 / F-68 / F-69 的默认值。
+	defaultRateLimitUserPerMinute  = 20
+	defaultRateLimitUserBurst      = 5
+	defaultRateLimitGroupPerMinute = 120
+	defaultRateLimitGroupBurst     = 20
+	defaultAuditQueueSize          = 4096
+	defaultAuditContentLimit       = 20
+	// defaultOpsAddr 必须与 internal/ops.DefaultAddr 一致（回环地址）。
+	defaultOpsAddr          = "127.0.0.1:9090"
+	defaultOpsReadyCacheTTL = 10 * time.Second
+	defaultOpsProbeTimeout  = time.Second
+	defaultAuditFile        = "./data/audit.jsonl"
+	defaultToggleFile       = "./data/toggles.json"
 )
 
 // Default 返回带默认值的配置。可选字段用指针，nil 表示“未设置”。
@@ -47,6 +61,13 @@ func Default() *Config {
 	splitOnBlank := true
 	splitDelay := Duration{D: defaultBehaviorSplitDelay}
 	maxSegments := defaultBehaviorMaxSegments
+	rlUser, rlUserBurst := defaultRateLimitUserPerMinute, defaultRateLimitUserBurst
+	rlGroup, rlGroupBurst := defaultRateLimitGroupPerMinute, defaultRateLimitGroupBurst
+	toggleDefaultOn := true
+	auditQueue, auditLimit := defaultAuditQueueSize, defaultAuditContentLimit
+	opsOn := true
+	opsTTL := Duration{D: defaultOpsReadyCacheTTL}
+	opsProbe := Duration{D: defaultOpsProbeTimeout}
 	return &Config{
 		Transport: Transport{Mode: "wsclient", Backoff: &backoff},
 		LLM: LLM{
@@ -67,6 +88,13 @@ func Default() *Config {
 		Policy:   Policy{File: "actions.yaml"},
 		Log:      Log{Level: "info", Format: "json", Components: map[string]string{}, QueueSize: &queue},
 		Shutdown: Shutdown{Timeout: &sdTimeout},
+		RateLimit: RateLimit{
+			UserPerMinute: &rlUser, UserBurst: &rlUserBurst,
+			GroupPerMinute: &rlGroup, GroupBurst: &rlGroupBurst,
+		},
+		Toggle: Toggle{DefaultOn: &toggleDefaultOn, File: defaultToggleFile},
+		Audit:  Audit{File: defaultAuditFile, QueueSize: &auditQueue, ContentLimit: &auditLimit},
+		Ops:    Ops{Enabled: &opsOn, Addr: defaultOpsAddr, ReadyCacheTTL: &opsTTL, ProbeTimeout: &opsProbe},
 	}
 }
 

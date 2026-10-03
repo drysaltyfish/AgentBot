@@ -187,3 +187,59 @@ type Log struct {
 type Shutdown struct {
 	Timeout *Duration `yaml:"timeout"`
 }
+
+// RateLimit 描述令牌桶限速（F-18）。
+//
+// 限速会改变行为（超限事件被整条丢弃），因此**默认关闭**，需要显式打开。
+type RateLimit struct {
+	// Enabled 为 nil 时按关闭处理。
+	Enabled *bool `yaml:"enabled"`
+	// UserPerMinute 是单用户每分钟可用次数；未配置或非正时取默认 20。
+	UserPerMinute *int `yaml:"user_per_minute"`
+	// UserBurst 是单用户的突发容量（桶容量）；未配置或非正时取默认 5。
+	UserBurst *int `yaml:"user_burst"`
+	// GroupPerMinute 是单群每分钟可用次数；未配置或非正时取默认 120。
+	GroupPerMinute *int `yaml:"group_per_minute"`
+	// GroupBurst 是单群的突发容量；未配置或非正时取默认 20。
+	GroupBurst *int `yaml:"group_burst"`
+}
+
+// Toggle 描述功能开关（F-19）：群管可以按群关闭某个插件，且重启后保持。
+type Toggle struct {
+	// Enabled 为 nil 时按关闭处理。
+	Enabled *bool `yaml:"enabled"`
+	// DefaultOn 是未显式设置过的 (plugin, group) 的默认状态；nil 时按 true 处理。
+	DefaultOn *bool `yaml:"default_on"`
+	// File 是开关状态的落盘路径；为空表示仅进程内（重启即丢）。
+	File string `yaml:"file"`
+}
+
+// Audit 描述审计日志（F-60）。
+//
+// 审计**不可关闭**（F-60 明确要求），只可调去处与内容保留量，因此没有 enabled 字段。
+type Audit struct {
+	// File 是审计 JSONL 的落盘路径；为空时只写 stdout。
+	File string `yaml:"file"`
+	// Stdout 为 true 时同时写标准输出（便于采集器直接抓）。
+	Stdout bool `yaml:"stdout"`
+	// QueueSize 是异步队列容量；未配置或非正时取默认 4096。
+	QueueSize *int `yaml:"queue_size"`
+	// ContentLimit 是用户内容保留的字符数；未配置或小于 1 时取默认 20。
+	ContentLimit *int `yaml:"content_limit"`
+}
+
+// Ops 描述指标与探针的独立监听（F-68 / F-69）。
+//
+// 默认只监听回环地址：指标与探针不需要对外暴露，这也是默认不配鉴权也安全的前提。
+type Ops struct {
+	// Enabled 为 nil 时按启用处理。
+	Enabled *bool `yaml:"enabled"`
+	// Addr 是监听地址；为空时取默认 127.0.0.1:9090。
+	Addr string `yaml:"addr"`
+	// AuthToken 非空时三个端点都要求 Authorization: Bearer <token>。
+	AuthToken *string `yaml:"auth_token"`
+	// ReadyCacheTTL 是就绪检查结果的缓存时长；未配置或非正时取默认 10s。
+	ReadyCacheTTL *Duration `yaml:"ready_cache_ttl"`
+	// ProbeTimeout 是单次依赖检查的超时；未配置或非正时取默认 1s。
+	ProbeTimeout *Duration `yaml:"probe_timeout"`
+}
