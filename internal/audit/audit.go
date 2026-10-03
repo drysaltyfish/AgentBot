@@ -207,6 +207,7 @@ func (l *Logger) encode(e Event) []byte {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
+	//nolint:gosec // G117 按字段名把 session_key 当成密钥误判；它是会话标识，不是凭证。
 	if err := enc.Encode(wire); err != nil {
 		return nil
 	}

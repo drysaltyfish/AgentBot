@@ -39,8 +39,11 @@ func Test_F18_ClockBackwardsDoesNotInflate(t *testing.T) {
 	now := time.Unix(100, 0)
 	l := NewLimiter(1, 2).WithClock(func() time.Time { return now })
 
-	if !l.Allow() || !l.Allow() {
-		t.Fatalf("初始两个令牌应可用")
+	if !l.Allow() {
+		t.Fatalf("初始第一个令牌应可用")
+	}
+	if !l.Allow() {
+		t.Fatalf("初始第二个令牌应可用")
 	}
 	if l.Allow() {
 		t.Fatalf("桶已空")
