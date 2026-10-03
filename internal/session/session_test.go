@@ -208,3 +208,36 @@ func Test_F21_HistoryIsSharedWithSessions(t *testing.T) {
 		t.Fatalf("history round trip: %+v", items)
 	}
 }
+
+// Test_F21_PrivateChatsDoNotShareSession 是串台缺陷的回归测试。
+//
+// 修复前 PerGroup 在私聊（GroupID=0）时也返回 UserID=0，于是所有私聊共用同一个
+// 会话——A 的上下文与记忆会出现在 B 的私聊里。
+func Test_F21_PrivateChatsDoNotShareSession(t *testing.T) {
+	t.Parallel()
+	m := New() // 默认策略即 PerGroup
+
+	keyA := m.KeyFor(1, 0, 100)
+	keyB := m.KeyFor(1, 0, 200)
+	if keyA == keyB {
+		t.Fatalf("不同用户的私聊不得共用会话: %+v == %+v", keyA, keyB)
+	}
+	if keyA.UserID != 100 || keyB.UserID != 200 {
+		t.Fatalf("私聊会话键应包含用户: %+v / %+v", keyA, keyB)
+	}
+
+	// 群聊仍按群分桶（同一个群里的不同用户共用会话）。
+	g1 := m.KeyFor(1, 555, 100)
+	g2 := m.KeyFor(1, 555, 200)
+	if g1 != g2 {
+		t.Fatalf("同一个群应共用一个会话: %+v != %+v", g1, g2)
+	}
+	if g1.GroupID != 555 || g1.UserID != 0 {
+		t.Fatalf("群会话键应按 F-21 保持 UserID=0: %+v", g1)
+	}
+
+	// 私聊与群聊之间也不能混。
+	if keyA == g1 {
+		t.Fatalf("私聊与群聊不得共用会话")
+	}
+}

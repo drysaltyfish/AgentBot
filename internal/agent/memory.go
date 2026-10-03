@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/drysaltyfish/agentbot/internal/history"
+	"github.com/drysaltyfish/agentbot/internal/tool"
 )
 
 var (
@@ -38,26 +39,20 @@ type Memory interface {
 	Recall(ctx context.Context) ([]string, error)
 }
 
-// memoryScopeKey 是 ctx 里存放记忆作用域的私有键。
-type memoryScopeKey struct{}
-
 // WithMemoryScope 把记忆作用域放进 ctx。
 //
 // 作用域隔离是 F-47 的硬要求："群 A 的记忆不得出现在群 B 的回忆中"。
 // 不隔离的话，私聊里存下的内容会被注入群聊的提示词——这是隐私缺陷。
+//
+// 实现下沉在 tool 包：内置工具（如 recall_history）也需要按会话取值，
+// 而 builtin 不该反向依赖 agent。
 func WithMemoryScope(ctx context.Context, scope string) context.Context {
-	return context.WithValue(ctx, memoryScopeKey{}, scope)
+	return tool.WithScope(ctx, scope)
 }
 
 // MemoryScopeFrom 取出 ctx 里的作用域；没有时返回空串（默认桶）。
 func MemoryScopeFrom(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	if v, ok := ctx.Value(memoryScopeKey{}).(string); ok {
-		return v
-	}
-	return ""
+	return tool.ScopeFrom(ctx)
 }
 
 // validateMemoryText 做写入前的统一校验。

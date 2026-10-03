@@ -33,6 +33,8 @@ type Deps struct {
 	Memory Memory
 	// HTTP 是出站抓取配置；零值时使用 httpx.Defaults()。
 	HTTP httpx.Config
+	// History 供 recall_history 读取当前会话的历史；为 nil 时该工具会明确报错。
+	History HistoryReader
 	// Now 注入时间源（测试用）。
 	Now func() time.Time
 }
@@ -55,6 +57,7 @@ func Register(r *tool.Registry, deps Deps) error {
 		httpFetch{deps: deps},
 		memorySave{deps: deps},
 		memoryRecall{deps: deps},
+		recallHistory{deps: deps},
 	} {
 		if err := r.Register(t); err != nil {
 			return err
