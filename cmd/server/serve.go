@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/drysaltyfish/agentbot/internal/admin"
 	"github.com/drysaltyfish/agentbot/internal/agent"
 	"github.com/drysaltyfish/agentbot/internal/backpressure"
 	"github.com/drysaltyfish/agentbot/internal/bot"
@@ -409,6 +410,45 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	if modEngine != nil {
 		engine.UsePre(moderationPreHook(modEngine, catalog, auditLog, lg))
 	}
+	// F-71：管理命令（/help、/ban、/unban、/banlist）。
+	// 注意：/switch 已由既有路由处理，这里不重复注册——两条授权路径比没有更难维护。
+	// 只在配置了超管时才启用：没有授权者就没有"管理"可言。
+	if adminMod := buildAdminModule(cfg, auditLog, lg, modEngine); len(cfg.Moderation.SuperUsers) > 0 {
+		engine.UsePre(func(c *router.Ctx) bool {
+			if c == nil || c.Event == nil {
+				return true
+			}
+			text := strings.TrimSpace(c.MessageString())
+			if !strings.HasPrefix(text, "/") {
+				return true
+			}
+			reply, derr := adminMod.Dispatch(c, admin.Request{
+				Text: text, UserID: c.Event.UserID, GroupID: c.Event.GroupID,
+				Source: admin.SourceMessage,
+			})
+			if errors.Is(derr, admin.ErrUnknownCommand) {
+				// 不是管理命令：交回路由，别把普通聊天里的斜杠吃掉。
+				return true
+			}
+			if derr != nil {
+				lg.Component("admin").Warn("admin command failed", "error", derr, "command", text)
+				return false
+			}
+			if reply == "" {
+				// 未授权且配置为静默：不泄露命令是否存在，但审计已经记了。
+				return false
+			}
+			target := outbound.PrivateTarget(c.Event.UserID)
+			if c.Event.GroupID != 0 {
+				target = outbound.GroupTarget(c.Event.GroupID)
+			}
+			if _, serr := sender.SendMany(context.Background(), target, []string{reply}, 0); serr != nil {
+				lg.Component("admin").Warn("send admin reply failed", "error", serr)
+			}
+			return false
+		})
+	}
+
 	// F-24：敏感词表热加载——改词表不必重启（编译失败保留旧表）。
 	if w := watchSensitiveWords(listenCtx, cfg.Moderation.SensitiveWordsFile, cfg.Moderation.MaskReplacement, modEngine, lg); w != nil {
 		defer w.Stop()
