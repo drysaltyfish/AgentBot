@@ -329,6 +329,10 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		}),
 	)
 
+	// F-23：定期回收不再活跃的会话。只把 Close 接进 Shutdown 是不够的——
+	// 长期运行的进程靠的是这条 ticker 来释放会话、临时路由与其绑定的状态。
+	startSessionReclaimer(app, sessions, lg, session.DefaultReclaimEvery)
+
 	// F-48 的规则触发：用户说"记住：xxx"时自动写入记忆，不依赖模型是否调工具。
 	var autoMem *agent.MemoryCommand
 	if cfg.Agent.AutoMemory.Enabled {
