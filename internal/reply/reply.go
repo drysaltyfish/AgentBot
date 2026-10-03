@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
+	"github.com/drysaltyfish/agentbot/internal/semcache"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/transport"
@@ -76,6 +78,14 @@ type Deps struct {
 	Audit *audit.Logger
 	// Catalog 接收本轮的指标（F-68）；为 nil 时不记录。
 	Catalog *metrics.Catalog
+	// Semcache 是语义缓存（F-63）；nil 表示未启用。
+	Semcache *semcache.Cache
+	// SemcacheFingerprint 返回某会话的上下文指纹（当前是人格指纹）。
+	// 为 nil 或返回空串时退化为"只按系统提示词哈希隔离"。
+	SemcacheFingerprint func(ctx context.Context, key session.Key) string
+	// SemcacheTokens 估算一条答案的 token 数（"省下多少"的指标用它）；
+	// nil 时按 rune 数 / 4 估算。
+	SemcacheTokens func(answer string) int
 }
 
 // Pipeline 执行一次回复轮次。
@@ -186,6 +196,18 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 	// 归属与记忆作用域是同一性质（"这次调用属于谁"），因此都走 ctx 而不是 Input：
 	// agent 与 llm 不需要为了记账多知道一个与它们无关的概念。
 	callCtx = cost.WithAttribution(callCtx, j.Key.String(), strconv.FormatInt(j.UserID, 10))
+
+	// F-63：语义缓存命中则完全跳过模型调用。
+	// 放在这一层而不是 LLM 装饰器上：只有这里同时拿得到会话键、人格指纹、
+	// 出口过滤链（发送走 Sender）与历史追加，四者缺一都会让缓存串台、漏过滤，
+	// 或让上下文与用户看到的回答对不上。
+	// 缓存键用**干净的用户文本**（j.Text），而不是 queryText：
+	// queryText 是渲染后的轮次（带发言人标签与时间戳），拿它当键永远命不中。
+	semFP := p.semcacheFingerprint(callCtx, j.Key)
+	if answer, ok := p.cachedAnswer(j.Text, semFP); ok {
+		p.finishCachedTurn(callCtx, j, sess, histKey, j.Text, answer, rlog)
+		return
+	}
 
 	// 两条路径（ReAct / 直连）在调用方看完全同形。
 	// 记忆的注入位置与呈现窗口由装配器按 ADR-0002 处理（system 之后、历史之前）。
@@ -308,6 +330,12 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 		return
 	}
 
+	// F-63：只缓存**没有工具调用**的最终答案。有工具调用的轮次依赖外部状态
+	// （查了什么、什么时候查的），把文本固化成缓存等于把当时的世界状态一起固化。
+	if p.deps.Semcache != nil && semFP != "" && len(out.ToolCalls) == 0 {
+		p.deps.Semcache.Put(j.Text, semFP, text)
+	}
+
 	// 只追加、绝不改写：这是下一轮还能命中前缀缓存的前提。
 	// 用户那一轮已在开头记录，这里只补助手回复。
 	if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindAssistant, Content: text}); err != nil {
@@ -363,6 +391,100 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 		"cache_hit_ratio", fmt.Sprintf("%.1f%%", out.Usage.CacheHitRatio()*100),
 		"cache_hit_tokens", out.Usage.PromptCacheHitTokens,
 		"cache_miss_tokens", out.Usage.PromptCacheMissTokens)
+}
+
+// semcacheFingerprint 组合语义缓存的上下文指纹：系统提示词哈希 + 会话人格指纹。
+//
+// 两者缺一都会有串台风险：只按问题匹配会让换人格后拿到旧人格的回答；
+// 不区分系统提示词则让改了全局提示词后仍然吃旧答案。
+func (p *Pipeline) semcacheFingerprint(ctx context.Context, key session.Key) string {
+	if p.deps.Semcache == nil {
+		return ""
+	}
+	parts := make([]string, 0, 2)
+	if p.deps.Assembler != nil {
+		parts = append(parts, p.deps.Assembler.PrefixHash())
+	}
+	if p.deps.SemcacheFingerprint != nil {
+		fp := p.deps.SemcacheFingerprint(ctx, key)
+		if fp == "" {
+			// 解析不出人格时也要占位：否则它会与"某个人格"的桶撞在一起。
+			fp = "unknown"
+		}
+		parts = append(parts, fp)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "|")
+}
+
+// cachedAnswer 查询语义缓存并记指标。
+//
+// 缓存未启用或指纹为空时**不计未命中**：那不是"缓存没命中"，是"没有缓存"。
+func (p *Pipeline) cachedAnswer(question, fingerprint string) (string, bool) {
+	if p.deps.Semcache == nil || fingerprint == "" {
+		return "", false
+	}
+	answer, ok := p.deps.Semcache.Get(question, fingerprint)
+	if p.deps.Catalog == nil {
+		return answer, ok
+	}
+	if !ok {
+		p.deps.Catalog.SemcacheMisses.Inc()
+		return "", false
+	}
+	p.deps.Catalog.SemcacheHits.Inc()
+	if saved := p.semcacheTokenCount(answer); saved > 0 {
+		p.deps.Catalog.SemcacheSavedTokens.Add(float64(saved))
+	}
+	return answer, true
+}
+
+// semcacheTokenCount 估算一条答案的 token 数。
+//
+// 只用于"省下多少"的观测，不参与配额或计费，因此允许粗估。
+func (p *Pipeline) semcacheTokenCount(answer string) int {
+	if p.deps.SemcacheTokens != nil {
+		return p.deps.SemcacheTokens(answer)
+	}
+	n := len([]rune(answer))
+	if n == 0 {
+		return 0
+	}
+	return (n + 3) / 4
+}
+
+// finishCachedTurn 走与正常回复**相同**的出口与历史路径，只是跳过模型调用。
+//
+// 共用出口是硬要求：F-63 明确"答案写入缓存前必须经过出口过滤链"（F-55），
+// 而发送走 Sender 就天然满足；历史也只追加一次助手轮，缓存命中不改变
+// "对话里发生了什么"。
+func (p *Pipeline) finishCachedTurn(ctx context.Context, j Job, sess *session.Session, histKey, question, answer string, rlog *slog.Logger) {
+	if err := sess.Hist.Append(ctx, histKey, history.Item{Kind: history.KindAssistant, Content: answer}); err != nil {
+		rlog.Warn("cannot append cached assistant turn", "error", err)
+	}
+	target := outbound.PrivateTarget(j.UserID)
+	if j.GroupID != 0 {
+		target = outbound.GroupTarget(j.GroupID)
+	}
+	parts := []string{answer}
+	if p.deps.Shape.SplitOnBlank {
+		parts = outbound.SplitParagraphs(answer, p.deps.Shape.MaxSegments)
+	}
+	if len(parts) == 0 {
+		rlog.Warn("cached reply became empty after splitting")
+		return
+	}
+	if _, err := p.deps.Sender.SendMany(ctx, target, parts, p.deps.Shape.Delay); err != nil {
+		rlog.Error("send cached reply failed", "error", err, "segments", len(parts))
+		return
+	}
+	if p.deps.Catalog != nil {
+		p.deps.Catalog.ActionsSent.With(metrics.Labels{"action": "send_msg", "status": "ok"}).Add(float64(len(parts)))
+	}
+	rlog.Info("semantic cache hit; model call skipped",
+		"question_runes", len([]rune(question)), "answer_runes", len([]rune(answer)), "segments", len(parts))
 }
 
 // quotaDenied 从错误链里取出配额拒绝，非配额错误返回 nil。

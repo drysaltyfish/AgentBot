@@ -26,6 +26,11 @@ type Catalog struct {
 	GuardBlocks    *Counter
 	RateLimited    *Counter
 
+	// F-63：语义缓存的命中/未命中与省下的 token。
+	SemcacheHits        *Counter
+	SemcacheMisses      *Counter
+	SemcacheSavedTokens *Counter
+
 	HandlerDuration *Histogram
 	LLMLatency      *Histogram
 	ToolDuration    *Histogram
@@ -70,6 +75,9 @@ func NewCatalog(opts CatalogOptions) *Catalog {
 	c.queueDepth = r.GaugeFunc("queue_depth", "Number of queued items.", queueDepth)
 	c.GuardBlocks = r.Counter("guard_blocks_total", "Total number of guard blocks.", "guard", "reason")
 	c.RateLimited = r.Counter("rate_limited_total", "Total number of rate limited requests.", "scope")
+	c.SemcacheHits = r.Counter("semcache_hits_total", "Total number of semantic cache hits.")
+	c.SemcacheMisses = r.Counter("semcache_misses_total", "Total number of semantic cache misses.")
+	c.SemcacheSavedTokens = r.Counter("semcache_saved_tokens_total", "Total number of tokens saved by the semantic cache.")
 
 	c.names = []string{
 		"events_received_total",
@@ -87,6 +95,9 @@ func NewCatalog(opts CatalogOptions) *Catalog {
 		"queue_depth",
 		"guard_blocks_total",
 		"rate_limited_total",
+		"semcache_hits_total",
+		"semcache_misses_total",
+		"semcache_saved_tokens_total",
 	}
 	sort.Strings(c.names)
 	return c

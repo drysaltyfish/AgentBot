@@ -17,9 +17,11 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
+	"github.com/drysaltyfish/agentbot/internal/semcache"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/transport"
+	"github.com/drysaltyfish/agentbot/internal/vector"
 )
 
 // stubBrain 是可控的 agent.Agent：记录调用次数与输入，返回预设输出。
@@ -284,5 +286,123 @@ func Test_RepliesGoOutThroughTheSender(t *testing.T) {
 	}
 	if len(items) != 2 || items[1].Kind != history.KindAssistant {
 		t.Fatalf("助手轮次未追加: %+v", items)
+	}
+}
+
+// Test_F63_SecondIdenticalQuestionSkipsTheModel 是 F-63 的核心验收：
+// 同一问题第二次直接命中（Brain 调用不增加）；换人格指纹则必须重新调用。
+func Test_F63_SecondIdenticalQuestionSkipsTheModel(t *testing.T) {
+	ctx := context.Background()
+	lg := testLogger(t)
+	mgr := testSessions(t)
+	caller := &recordingCaller{}
+	sender := outbound.NewSender(caller, outbound.New())
+	brain := &stubBrain{out: &agent.Output{Text: "固定回答", FinishReason: "stop"}}
+	cache, err := semcache.New(semcache.Options{
+		Vectorize: func(q string) vector.Binary { return vector.TextBinary(q, vector.TextDim) },
+	})
+	if err != nil {
+		t.Fatalf("semcache.New: %v", err)
+	}
+	persona := "persona-a"
+	p := New(Deps{
+		Brain: brain, Sessions: mgr, Sender: sender, Log: lg, Timeout: 5 * time.Second,
+		Semcache:            cache,
+		SemcacheFingerprint: func(context.Context, session.Key) string { return persona },
+	})
+	key := session.Key{SelfID: 1, GroupID: 2, UserID: 3}
+	job := testJob(key)
+	job.Text = "你是谁"
+
+	p.Handle(ctx, job)
+	if brain.calls != 1 {
+		t.Fatalf("首次应调用模型，实际 %d 次", brain.calls)
+	}
+	p.Handle(ctx, job)
+	if brain.calls != 1 {
+		t.Fatalf("第二次相同问题应命中缓存，模型调用=%d", brain.calls)
+	}
+	if stats := cache.Stats(); stats.Hits != 1 {
+		t.Fatalf("命中计数=%d，期望 1", stats.Hits)
+	}
+	if caller.count() < 2 {
+		t.Fatal("命中也要把回答发出去（走同一条出口）")
+	}
+	sess, ok := mgr.Get(key)
+	if !ok {
+		t.Fatal("会话未建立")
+	}
+	items, err := sess.Hist.Messages(ctx, key.String())
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	// 两次交互 = 2 条用户轮 + 2 条助手轮；缓存命中不得漏记助手轮。
+	if len(items) != 4 {
+		t.Fatalf("历史条目=%d，期望 4: %+v", len(items), items)
+	}
+
+	// 换人格：同一问题不得复用旧人格的答案。
+	persona = "persona-b"
+	p.Handle(ctx, job)
+	if brain.calls != 2 {
+		t.Fatalf("换人格后应重新调用模型，实际 %d 次", brain.calls)
+	}
+}
+
+// Test_F63_ToolTurnsAreNotCached 钉住安全边界：带工具调用的轮次不进缓存。
+func Test_F63_ToolTurnsAreNotCached(t *testing.T) {
+	ctx := context.Background()
+	lg := testLogger(t)
+	mgr := testSessions(t)
+	caller := &recordingCaller{}
+	sender := outbound.NewSender(caller, outbound.New())
+	brain := &stubBrain{out: &agent.Output{
+		Text:      "用了工具的回答",
+		ToolCalls: []llm.ToolCall{{ID: "1", Name: "recall_history"}},
+	}}
+	cache, err := semcache.New(semcache.Options{
+		Vectorize: func(q string) vector.Binary { return vector.TextBinary(q, vector.TextDim) },
+	})
+	if err != nil {
+		t.Fatalf("semcache.New: %v", err)
+	}
+	p := New(Deps{
+		Brain: brain, Sessions: mgr, Sender: sender, Log: lg, Timeout: 5 * time.Second,
+		Semcache: cache, SemcacheFingerprint: func(context.Context, session.Key) string { return "p" },
+	})
+	job := testJob(session.Key{SelfID: 1, GroupID: 2, UserID: 3})
+	job.Text = "上次我们说了什么"
+	p.Handle(ctx, job)
+	if got := cache.Len(); got != 0 {
+		t.Fatalf("带工具调用的轮次不应进缓存，条目=%d", got)
+	}
+}
+
+// Test_F63_CacheHitGoesThroughTheSendChain 钉住出口过滤：命中的回答也必须走 Sender。
+func Test_F63_CacheHitGoesThroughTheSendChain(t *testing.T) {
+	ctx := context.Background()
+	lg := testLogger(t)
+	mgr := testSessions(t)
+	caller := &recordingCaller{}
+	chain := outbound.New(outbound.WithFilter("suffix", func(s string) string { return s + "-filtered" }))
+	sender := outbound.NewSender(caller, chain)
+	brain := &stubBrain{out: &agent.Output{Text: "答案", FinishReason: "stop"}}
+	cache, err := semcache.New(semcache.Options{
+		Vectorize: func(q string) vector.Binary { return vector.TextBinary(q, vector.TextDim) },
+	})
+	if err != nil {
+		t.Fatalf("semcache.New: %v", err)
+	}
+	p := New(Deps{
+		Brain: brain, Sessions: mgr, Sender: sender, Log: lg, Timeout: 5 * time.Second,
+		Semcache: cache, SemcacheFingerprint: func(context.Context, session.Key) string { return "p" },
+	})
+	job := testJob(session.Key{SelfID: 1, GroupID: 2, UserID: 3})
+	job.Text = "同一个问题"
+	p.Handle(ctx, job)
+	sentBefore := caller.count()
+	p.Handle(ctx, job)
+	if caller.count() <= sentBefore {
+		t.Fatal("缓存命中必须经 Sender 发出（出口过滤链是唯一出口）")
 	}
 }

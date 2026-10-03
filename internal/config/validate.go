@@ -227,6 +227,19 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.Semcache.Threshold != nil {
+		v := *c.Semcache.Threshold
+		if v < 0 || v > 1 {
+			add("semcache.threshold", "必须在 (0,1] 区间内，实际为 "+strconv.FormatFloat(v, 'g', -1, 64))
+		}
+	}
+	if c.Semcache.TTLSeconds != nil && *c.Semcache.TTLSeconds < 1 {
+		add("semcache.ttl_seconds", "必须 >= 1")
+	}
+	if c.Semcache.MaxEntries != nil && *c.Semcache.MaxEntries < 1 {
+		add("semcache.max_entries", "必须 >= 1")
+	}
+
 	if len(problems) == 0 {
 		return nil
 	}

@@ -70,4 +70,5 @@ type Config struct {
 	Moderation   Moderation   `yaml:"moderation"`
 	Sandbox      Sandbox      `yaml:"sandbox"`
 	Cost         Cost         `yaml:"cost"`
+	Semcache     Semcache     `yaml:"semcache"`
 }
