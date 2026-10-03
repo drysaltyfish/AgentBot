@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -169,6 +170,122 @@ func runStats(cfg *config.Config, stdout, stderr io.Writer) int {
 		}
 	}
 	return 0
+}
+
+// pendingStoreAdapter 把持久层适配成会话层的在途记录接口（F-86）。
+//
+// 中间隔一层是因为会话层不该知道 SQL 长什么样：它只需要"存一条等待 / 结束一条等待"。
+type pendingStoreAdapter struct{ st *store.Store }
+
+func (a pendingStoreAdapter) SavePending(ctx context.Context, r session.PendingRecord) error {
+	return a.st.UpsertPending(ctx, store.Pending{
+		ID: r.ID, SessionKey: r.SessionKey, Kind: r.Kind, Payload: r.Payload,
+		CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt, Status: store.PendingStatusPending,
+	})
+}
+
+func (a pendingStoreAdapter) FinishPending(ctx context.Context, id, status, note string) error {
+	return a.st.CompletePending(ctx, id, status, note)
+}
+
+// pendingSessionTarget 由会话键还原出投递目标。
+//
+// 群消息投群、私聊投人——**不猜测**：键里还原不出的信息不编造。
+func pendingSessionTarget(key string) (outbound.Target, bool) {
+	parts := strings.Split(key, ":")
+	if len(parts) < 3 {
+		return outbound.Target{}, false
+	}
+	groupID, err1 := strconv.ParseInt(parts[1], 10, 64)
+	userID, err2 := strconv.ParseInt(parts[2], 10, 64)
+	if err1 != nil || err2 != nil {
+		return outbound.Target{}, false
+	}
+	if groupID != 0 {
+		return outbound.GroupTarget(groupID), true
+	}
+	if userID != 0 {
+		return outbound.PrivateTarget(userID), true
+	}
+	return outbound.Target{}, false
+}
+
+// recoverPending 处理重启时残留的在途记录（F-86）。
+//
+// **诚实的说明**：我们只能通知，不能真正续跑。等待下一条消息与等待人工审批都挂在
+// 一次正在执行的调用上（阻塞在 channel 上），进程重启后那次调用已经不存在，
+// 没有东西可以"恢复"。因此这里做两件事：
+//  1. 未过期的：告诉对方"刚才重启了，那个等待被打断"，避免一直干等；
+//  2. 已过期的：告诉对方"等太久了，已作废"。
+//
+// 状态分别置为 orphaned / expired，**保留记录**而不是删除——
+// "谁在什么时候批准/超时"正是审计要回答的。
+//
+// 之所以不做成"真正续跑"：那需要把等待变成可重放的持久工作流（谁在等、等到什么、
+// 等到之后干什么），那是一个独立得多的特性，不该塞进这一条里假装完成。
+func recoverPending(ctx context.Context, st *store.Store, sender *outbound.Sender, lg *observe.Logger) {
+	plog := lg.Component("pending")
+
+	rows, err := st.ListPending(ctx, "")
+	if err != nil {
+		plog.Warn("cannot list pending operations; recovery skipped", "error", err)
+		return
+	}
+	expired, err := st.ExpirePending(ctx, 0)
+	if err != nil {
+		plog.Warn("cannot expire stale pending operations", "error", err)
+	}
+
+	notify := func(p store.Pending, expiredAlready bool, note string) {
+		target, ok := pendingSessionTarget(p.SessionKey)
+		if !ok {
+			// 还原不出目标就不猜：标成孤儿并告警。
+			if err := st.CompletePending(ctx, p.ID, store.PendingStatusOrphaned,
+				"无法从会话键还原投递目标"); err != nil {
+				plog.Warn("cannot mark pending as orphaned", "error", err, "id", p.ID)
+			}
+			plog.Warn("pending operation has an unparsable session key", "id", p.ID, "session_key", p.SessionKey)
+			return
+		}
+		if _, serr := sender.SendMany(ctx, target, []string{note}, 0); serr != nil {
+			plog.Warn("cannot notify the session about an interrupted wait", "error", serr, "id", p.ID)
+			return
+		}
+		status := store.PendingStatusOrphaned
+		if expiredAlready {
+			status = store.PendingStatusExpired
+		}
+		if err := st.CompletePending(ctx, p.ID, status, "重启后已通知原会话"); err != nil {
+			plog.Warn("cannot close pending operation", "error", err, "id", p.ID)
+		}
+	}
+
+	for _, p := range expired {
+		notify(p, true, "刚才那件事等太久了，已经作废啦；要办的话请再说一次～")
+	}
+
+	expiredIDs := make(map[string]struct{}, len(expired))
+	for _, p := range expired {
+		expiredIDs[p.ID] = struct{}{}
+	}
+	notified := 0
+	for _, p := range rows {
+		if _, done := expiredIDs[p.ID]; done {
+			continue
+		}
+		notified++
+		notify(p, false, "刚才我重启了一下，之前正在等的那件事被打断了；麻烦你再发起一次～")
+	}
+	plog.Info("pending operations recovered",
+		"total", len(rows), "expired", len(expired), "notified", notified)
+
+	// 有界性：清掉早已结束的记录。
+	cutoff := time.Now().Add(-7 * 24 * time.Hour).UnixMilli()
+	if pruned, perr := st.PrunePending(ctx, cutoff); perr != nil {
+		plog.Warn("cannot prune pending history", "error", perr)
+	} else if pruned > 0 {
+		plog.Info("pruned finished pending records", "count", pruned)
+	}
 }
 
 func shutdownTimeout(cfg *config.Config) time.Duration {
@@ -675,6 +792,10 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		session.WithTTL(session.DefaultTTL),
 		session.WithMax(session.DefaultMax),
 	)
+	// F-86：把等待落盘，重启后至少能通知原会话，而不是让用户一直干等。
+	sessions.Temp().WithPendingStore(pendingStoreAdapter{st: st}, func(msg string) {
+		lg.Component("session").Warn(msg)
+	})
 
 	// 缓存优先（一）：不可变前缀在启动时固定一次，所有会话共享同一段前缀，
 	// 因此公共前缀检测能让不同会话也命中同一块缓存。
@@ -736,11 +857,18 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 			lg.Component("outbound").Error("filter panicked", "filter", name, "panic", fmt.Sprint(recovered))
 		}),
 	)
+
 	sender := outbound.NewSender(ws, chain, outbound.WithAudit(func(rec outbound.AuditRecord) {
 		lg.Component("outbound").Info("outbound",
 			"group_id", rec.GroupID, "user_id", rec.UserID,
 			"dropped", rec.Dropped, "reason", rec.Reason, "runes", len([]rune(rec.Filtered)))
 	}))
+	// F-86：恢复残留的在途记录（通知原会话；已过期的作废）。
+	{
+		recoverCtx, cancelRecover := context.WithTimeout(context.Background(), 30*time.Second)
+		recoverPending(recoverCtx, st, sender, lg)
+		cancelRecover()
+	}
 
 	listenCtx, stopListen := context.WithCancel(context.Background())
 	jobs := make(chan replyJob, 256)
@@ -868,6 +996,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		}
 		// F-15：会话级临时路由优先于常规路由。命中即消费，不再进入常规路由——
 		// 否则 Await 等待的那条消息会同时被常规路由处理一遍。
+		//nolint:contextcheck // Offer 只在过期清理时做后台收尾，事件循环本身没有请求 ctx
 		if sessions.Temp().Offer(sessions.KeyFor(ev.SelfID, ev.GroupID, ev.UserID), ev) {
 			tlog.Debug("event consumed by a temporary route",
 				"self_id", ev.SelfID, "user_id", ev.UserID, "group_id", ev.GroupID)
@@ -978,6 +1107,7 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 		}
 	}
 
+	//nolint:contextcheck // 会话回收时的在途收尾走后台 ctx，与本次请求的生命周期无关
 	sess := p.sessions.GetOrCreate(j.key)
 	histKey := j.key.String()
 	items, err := sess.Hist.Messages(callCtx, histKey)
