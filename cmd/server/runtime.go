@@ -215,7 +215,10 @@ func segmentTypes(m event.Message) string {
 	return strings.Join(parts, "+")
 }
 
-// traceID 为一次事件生成贯穿日志的标识。
-func traceID(ev *event.Event) string {
+// legacyTraceID 是 trace 包不可用时的兜底标识（F-72 之前的形式）。
+//
+// 保留它是因为「生成随机 trace id」理论上可能失败（crypto/rand 出错）；
+// 那种时候宁可日志里的 trace_id 不那么标准，也不能让一次事件处理挂掉。
+func legacyTraceID(ev *event.Event) string {
 	return fmt.Sprintf("%d-%d-%s", ev.SelfID, ev.Time.Unix(), ev.MessageID.String())
 }

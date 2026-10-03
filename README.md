@@ -62,12 +62,12 @@ F-36/F-37 已在本轮接入（LLM Evaluator + `agent.paradigm`），故不在�
 | 分层记忆 / 混合检索 | F-49 / F-51 | 需 SQLite `TierStore`（否则重启丢记忆，是行为退化） |
 | 语义缓存 | F-63 | 需 `Vectorize` 与出口过滤，接在 LLM 请求路径 |
 | 摘要树 | F-52 | 需注入 `Summarizer`/`Embedder` |
-| 分布式追踪 | F-72 | 需入站上下文桥接与出站 HTTP 头传播（且**无 OTLP 导出**，见已知偏离） |
 | 流式增量发送 | F-64 | 需接 outbound 发送路径 |
 | 配置热加载（其余资产，**部分已接**） | F-24 | 已交付"敏感词表"一项；提示词/开关/限速未接 |
 
 F-65/F-82 已于 21059e7 接入：三段式前缀（静态/半静态/动态）、`/prompt-hash`、
-SQLite 会话人格持久化、`/persona` 切换与 RouteKey 喂半静态段，因此不在此表。
+SQLite 会话人格持久化、`/persona` 切换与 RouteKey 喂半静态段；F-66 会话维度与
+F-72 出站 traceparent 传播随后补齐，因此都不在此表。
 
 剩余工作的入口、前置条件、风险与已知偏离，见 [HANDOFF.md](HANDOFF.md)。
 
@@ -358,7 +358,7 @@ gofmt -l cmd internal          # 格式检查（应无输出）
 | F-63 | 语义缓存 | P2 | |
 | F-65 | 提示词前缀稳定化 | P2 | **已接入**（21059e7）：静态/半静态/动态三段固定顺序、`/prompt-hash` 报告各段哈希、100 次渲染静态段哈希不变 |
 | F-71 | 管理命令 | P2 | CLI 维护命令已有（`--stats` / `--export-memories`）；聊天内管理命令未做 |
-| F-72 | 分布式追踪 | P2 | 已有 trace ID 贯穿日志；未接 OpenTelemetry 等 |
+| F-72 | 分布式追踪 | P2 | **传播已接入**：入站事件建立 W3C span、日志 `trace_id` 与之一致、httpx 自动带 `traceparent`；**无 OTLP 导出**（依赖白名单限制，见已知偏离） |
 
 > 上表由 `.scratch/agentbot/spec.md` 的 ticket 表（权威进度）配合代码检索核对得出。如果某个 Feature 其实已经落地但没进 ticket 表，请以代码为准并更新 spec。
 
