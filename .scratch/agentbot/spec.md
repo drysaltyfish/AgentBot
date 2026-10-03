@@ -1,8 +1,9 @@
-# AgentBot · Spec（M0 + M1）
+# AgentBot · Spec（M0 + M1 + M2 已落地；M3 已立项）
 
-> **规范来源**：[`FEATURES.md`](../FEATURES.md)（v2，82 条 Feature）是**唯一规范**。
+> **规范来源**：[`FEATURES.md`](../FEATURES.md)（v2，**89** 条 Feature）是**唯一规范**。
 > 本文件只记录"本轮做什么、按什么约定做、以及已经拍板的决策"，不重复 Feature 细节。
-> **本轮范围**：M0 骨架 + M1 最小闭环，共 **32** 张 ticket。
+> **已完成**：M0 骨架（32 张 ticket）+ M2 交互与工具（ticket 33–44）。
+> **已立项**：M3 持久化与检索（ticket 45–51，对应 F-83~F-89）。
 
 ## 1. 本轮目标
 
@@ -27,7 +28,7 @@
 | 8 | 传输鉴权 | fail-closed：`wsserver` 未配 Token 即**启动失败**；密钥比较用 `hmac.Equal` |
 | 9 | 权限角色 | 由**库内** `Resolver` 推导；不接受宿主传入裸 role 字符串；失败落最低权限 |
 | 10 | 工具执行归属 | Agent **内部执行**；`Output.ToolCalls` 是"已执行记录"而非待执行队列 |
-| 11 | 持久化 | M1 只做进程内 map + 可选 JSONL；SQLite 推迟到 M4，用 `modernc.org/sqlite`（纯 Go） |
+| 11 | 持久化 | M1/M2 只做进程内 map + 可选 JSONL；**SQLite 定于 M3**（原写 M4，与附录 A 矛盾，2026-10-03 校正），用 `modernc.org/sqlite`（纯 Go） |
 | 12 | 会话键 | `SessionKey{SelfID, GroupID, UserID}`；日志/指标里的 `session_key` 一律用它 `String()` |
 | 13 | 传输范围 | M1 只做 `wsclient` + `FakeDriver`；`wsserver`/`http` 推到 M3 |
 | 14 | 状态保留键 | 常量 `StateKeyKeepPrefix = "__keep__"`（前后各两个下划线） |
@@ -36,6 +37,9 @@
 | 17 | 工程杂项 | 禁止代码生成；lint 只报不改（`issues.fix: false`）；发布自动化推到 M3 之后 |
 | 18 | 里程碑校准 | F-15 提为 P0；F-07/F-22/F-48/F-50 移入 M3；F-52 移回 M4；M2 不再重复分配 F-11 |
 | 19 | 提示词缓存 | "静态段"定义为**进程启动期内**逐字节稳定；权限表热加载会主动使其失效，属预期行为 |
+| 20 | 持久化分层 | 单一嵌入式数据库（SQLite，纯 Go）作为唯一持久层；JSONL 退化为导入/导出格式。表按**生命周期**分层（消息流/会话台账/长期记忆/在途状态/提示词快照），而非按功能分层。理由见 ADR-0003 |
+
+完整的持久化理由与备选方案否决记录见 [`docs/adr/0003-persistence-and-data-layering.md`](../docs/adr/0003-persistence-and-data-layering.md)。
 
 完整理由与逐条裁决见 `FEATURES.md` §0.4、§12.1 与附录 A。
 
@@ -127,6 +131,30 @@ M2 的 Feature 范围来自附录 A：F-15, F-16, F-35, F-40, F-41~F-45。
 完成判据：Await 多轮对话可用 + F-75 中"多轮工具调用契约"通过。
 **F-15（ticket 39）必须先于 F-16（ticket 40）完成。**
 
+### 5.3 M3 · 持久化与检索（ticket 45–51）
+
+| # | Feature | 名称 | P | 里程碑 | Blocked by | 文件 |
+|---|---|---|---|---|---|---|
+| 45 | F-83 | 嵌入式持久层与版本化迁移 | P0 | M3 | 无 | `issues/45-persistence-core.md` |
+| 46 | F-84 | 消息归档与全文检索 | P0 | M3 | 45 | `issues/46-message-archive-fts.md` |
+| 47 | F-85 | 会话台账与用量归集 | P1 | M3 | 45 | `issues/47-session-ledger-usage.md` |
+| 48 | F-87 | 记忆落库与写入决策 | P0 | M3 | 45 | `issues/48-memory-table-write-decision.md` |
+| 49 | F-88 | 记忆的遗忘、导出与留存 | P1 | M3 | 48 | `issues/49-memory-forget-export.md` |
+| 50 | F-86 | 在途操作持久化（可恢复的等待与审批） | P2 | M3 | 45 | `issues/50-pending-state-durability.md` |
+| 51 | F-89 | 提示词快照与可重放 | P1 | M3 | 46, 47 | `issues/51-prompt-snapshot-replay.md` |
+
+**本轮为何新增 Feature**：M2 落地后暴露出三类需求是既有 Feature 覆盖不到的——
+(1) 对话历史只有"整段读出"，`recall_history` 一度沦为摆设（见 ticket 43 补记）；
+(2) 缓存命中率与 token 消耗只进日志，不能查询也不能回归；
+(3) 记忆只能写不能删，"忘记我"没有通道。
+因此新增 F-83~F-89，并把 F-47/F-48/F-50 既有的 SQLite 计划与它们合并到同一里程碑。
+
+**执行顺序约束**：ticket 45 必须先完成，其余六张都依赖它建立的存储与迁移机制。
+**F-83 未落地前不得开始任何功能搬移**——否则会出现两套迁移逻辑。
+
+**迁移策略**：JSONL 不是立刻删除。F-83 提供幂等导入，F-84/F-87 提供 SQLite 实现，
+JSONL 实现保留用于导入与故障排查；待 M3 收尾时再决定是否移除。
+
 ## 6. 已登记的分歧点
 
 ### 6.1 已裁定（2026-10-03）
@@ -134,7 +162,7 @@ M2 的 Feature 范围来自附录 A：F-15, F-16, F-35, F-40, F-41~F-45。
 | 编号 | 分歧点 | 裁定 | 记录 |
 |---|---|---|---|
 | G7 | F-35 的 `tool_calls` 管道与 F-39/F-40 的 Action 管道如何共存、是否合并为一条 | **原生 `tool_calls` 为唯一执行通道**；F-39 的解析器降级为抢救通道（scavenge）；F-40 的虚拟动作注册为普通工具；配置 `agent.protocol: native \| auto`，默认 `auto` | `docs/adr/0001-tool-call-protocol.md` |
-| G8 | `save_memory` 的记忆注入位置——与"不可变前缀"的缓存设计正面冲突 | 记忆作为**独立消息放在 system 之后、历史之前**；长度上限 2 KiB；内容确定性排序 | `docs/adr/0002-memory-injection-position.md` |
+| G8 | `save_memory` 的记忆注入位置——与"不可变前缀"的缓存设计正面冲突 | 记忆作为**独立消息放在 system 之后、历史之前**；长度上限 500 字符（对齐 F-47，2026-10-03 校正）；内容确定性排序 | `docs/adr/0002-memory-injection-position.md` |
 
 G8 是本轮做前缀缓存优化时新发现的分歧点：把它并入 system 会让每次记忆更新都报废整块缓存。
 
@@ -151,4 +179,4 @@ G8 是本轮做前缀缓存优化时新发现的分歧点：把它并入 system 
 
 ---
 
-*生成日期：2026-10-02 · 对应 `FEATURES.md` v2*
+*生成日期：2026-10-02 · 更新：2026-10-03（新增 M3 持久化立项与 F-83~F-89）· 对应 `FEATURES.md` v2（89 条）*

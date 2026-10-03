@@ -8,7 +8,7 @@
 | WebSocket 客户端（F-04） | `github.com/coder/websocket` | v1.8.15 | ISC | M1 |
 | YAML 解析（F-25 / F-53 / F-82） | `gopkg.in/yaml.v3` | v3.0.1 | MIT + Apache-2.0 | M1 |
 | goroutine 泄漏检测（F-70，仅测试依赖） | `go.uber.org/goleak` | v1.3.0 | MIT | M0 |
-| SQLite（F-50） | `modernc.org/sqlite` | v1.60.1 | BSD-3-Clause（内嵌 public-domain SQLite、MIT 的 sqlite_vec） | M4 |
+| SQLite（F-50） | `modernc.org/sqlite` | v1.60.1 | BSD-3-Clause（内嵌 public-domain SQLite、MIT 的 sqlite_vec） | M3 |
 
 ## 明确排除
 
