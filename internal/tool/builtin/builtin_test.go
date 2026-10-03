@@ -10,6 +10,7 @@ import (
 
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/httpx"
+	"github.com/drysaltyfish/agentbot/internal/scope"
 	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/tool"
 	"github.com/drysaltyfish/agentbot/internal/transport"
@@ -263,7 +264,7 @@ func Test_F38_RecallHistoryReadsCurrentSession(t *testing.T) {
 	h.byKey["k2"] = []history.Item{{Kind: history.KindUser, Content: "别的会话的内容"}}
 
 	r := newRegistry(t, Deps{History: h})
-	ctx := tool.WithScope(context.Background(), "k1")
+	ctx := scope.WithScope(context.Background(), "k1")
 
 	res := execWith(t, r, ctx, "recall_history", `{"query":"橘子"}`)
 	if res.Failed() {
@@ -304,7 +305,7 @@ func Test_F38_RecallHistoryLimitAndEmpty(t *testing.T) {
 		h.byKey["k"] = append(h.byKey["k"], history.Item{Kind: history.KindUser, Content: "第" + strconv.Itoa(i) + "条"})
 	}
 	r := newRegistry(t, Deps{History: h})
-	ctx := tool.WithScope(context.Background(), "k")
+	ctx := scope.WithScope(context.Background(), "k")
 
 	res := execWith(t, r, ctx, "recall_history", `{"limit":3}`)
 	if res.Failed() {
@@ -324,7 +325,7 @@ func Test_F38_RecallHistoryLimitAndEmpty(t *testing.T) {
 
 	empty := newMemHistory()
 	r2 := newRegistry(t, Deps{History: empty})
-	res = execWith(t, r2, tool.WithScope(context.Background(), "none"), "recall_history", `{}`)
+	res = execWith(t, r2, scope.WithScope(context.Background(), "none"), "recall_history", `{}`)
 	if res.Failed() || !strings.Contains(res.Output, "还没有历史") {
 		t.Fatalf("空历史应给出可读提示: %+v", res)
 	}
@@ -333,7 +334,7 @@ func Test_F38_RecallHistoryLimitAndEmpty(t *testing.T) {
 func Test_F38_RecallHistoryWithoutStoreFailsLoudly(t *testing.T) {
 	t.Parallel()
 	r := newRegistry(t, Deps{})
-	res := execWith(t, r, tool.WithScope(context.Background(), "k"), "recall_history", `{}`)
+	res := execWith(t, r, scope.WithScope(context.Background(), "k"), "recall_history", `{}`)
 	if !res.Failed() || !strings.Contains(res.Error, "历史存储") {
 		t.Fatalf("未配置历史存储应明确失败: %+v", res)
 	}
@@ -378,7 +379,7 @@ func Test_F84_RecallHistoryPrefersSearch(t *testing.T) {
 		Before:  &history.Item{Kind: history.KindAssistant, Content: "记住啦"},
 	}}}
 	r := newRegistry(t, Deps{History: sh})
-	ctx := tool.WithScope(context.Background(), "k1")
+	ctx := scope.WithScope(context.Background(), "k1")
 
 	res := execWith(t, r, ctx, "recall_history", `{"query":"橙汁"}`)
 	if res.Failed() {
@@ -406,7 +407,7 @@ func Test_F84_RecallHistorySearchNoHits(t *testing.T) {
 	t.Parallel()
 	sh := &searchableHistory{}
 	r := newRegistry(t, Deps{History: sh})
-	res := execWith(t, r, tool.WithScope(context.Background(), "k1"), "recall_history", `{"query":"不存在"}`)
+	res := execWith(t, r, scope.WithScope(context.Background(), "k1"), "recall_history", `{"query":"不存在"}`)
 	if res.Failed() {
 		t.Fatalf("无结果不该报错: %+v", res)
 	}
@@ -565,7 +566,7 @@ func Test_GetUserInfoGroupMember(t *testing.T) {
 	}}
 	r := newRegistry(t, Deps{Caller: callerBoxStub{c: c}})
 	// 作用域形状：selfID:groupID:userID
-	ctx := tool.WithScope(context.Background(), "1:1032011055:2981539016")
+	ctx := scope.WithScope(context.Background(), "1:1032011055:2981539016")
 
 	res := execWith(t, r, ctx, "get_user_info", `{"qq":2981539016}`)
 	if res.Failed() {
@@ -591,7 +592,7 @@ func Test_GetUserInfoPrivateUsesStranger(t *testing.T) {
 		"get_stranger_info": {RetCode: 0, Data: data},
 	}}
 	r := newRegistry(t, Deps{Caller: callerBoxStub{c: c}})
-	ctx := tool.WithScope(context.Background(), "1:0:999")
+	ctx := scope.WithScope(context.Background(), "1:0:999")
 
 	res := execWith(t, r, ctx, "get_user_info", `{"qq":999}`)
 	if res.Failed() {
@@ -608,7 +609,7 @@ func Test_GetUserInfoPrivateUsesStranger(t *testing.T) {
 func Test_GetUserInfoFailsLoudlyWithoutCaller(t *testing.T) {
 	t.Parallel()
 	r := newRegistry(t, Deps{})
-	res := execWith(t, r, tool.WithScope(context.Background(), "1:2:3"), "get_user_info", `{"qq":123}`)
+	res := execWith(t, r, scope.WithScope(context.Background(), "1:2:3"), "get_user_info", `{"qq":123}`)
 	if !res.Failed() || !strings.Contains(res.Error, "通道") {
 		t.Fatalf("无 API 通道应明确失败: %+v", res)
 	}

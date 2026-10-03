@@ -136,7 +136,7 @@ func Test_F09_OrderStableAfterChurn(t *testing.T) {
 			if info.Name == "r"+strconv.Itoa(i) {
 				// 通过路由表快照找到并删除
 				for _, rt := range r.Snapshot() {
-					if rt.Name == "r"+strconv.Itoa(i) {
+					if rt.Name() == "r"+strconv.Itoa(i) {
 						r.Remove(rt)
 					}
 				}
@@ -232,10 +232,10 @@ func Test_F12_ConcurrentRegisterAndMatch(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 2000; i++ {
 				for _, rt := range r.Snapshot() {
-					if !KindMatches(rt.Kind, ev) {
+					if !KindMatches(rt.kind, ev) {
 						continue
 					}
-					for _, rule := range rt.Rules {
+					for _, rule := range rt.rules {
 						if !rule(c) {
 							break
 						}
@@ -262,10 +262,10 @@ func BenchmarkRouteMatch(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for _, rt := range r.Snapshot() {
-			if !KindMatches(rt.Kind, ev) {
+			if !KindMatches(rt.kind, ev) {
 				continue
 			}
-			for _, rule := range rt.Rules {
+			for _, rule := range rt.rules {
 				if !rule(c) {
 					break
 				}

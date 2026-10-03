@@ -61,7 +61,7 @@ func Test_F47_MemoryIsolationEndToEnd(t *testing.T) {
 		{ToolCalls: []llm.ToolCall{toolCall("c1", ActionSaveMemory, `{"text":"群A的秘密"}`)}, FinishReason: llm.FinishReasonToolCalls},
 		{Content: "好", FinishReason: "stop"},
 	}}
-	aA := &ReactAgent{LLM: save, Tools: r, SystemPrompt: "s", Memory: mem}
+	aA := &ReactAgent{LLM: save, Tools: r, Assembler: testAssembler("s"), Memory: mem}
 	if _, err := aA.Run(context.Background(), Input{Query: "记住", SessionKey: groupA}); err != nil {
 		t.Fatalf("Run A: %v", err)
 	}
@@ -71,7 +71,7 @@ func Test_F47_MemoryIsolationEndToEnd(t *testing.T) {
 
 	// B 的提示词里不能出现它。
 	probe := &scriptedLLM{replies: []*llm.ChatResponse{{Content: "ok", FinishReason: "stop"}}}
-	aB := &ReactAgent{LLM: probe, Tools: r, SystemPrompt: "s", Memory: mem}
+	aB := &ReactAgent{LLM: probe, Tools: r, Assembler: testAssembler("s"), Memory: mem}
 	if _, err := aB.Run(context.Background(), Input{Query: "你好", SessionKey: groupB}); err != nil {
 		t.Fatalf("Run B: %v", err)
 	}
@@ -86,7 +86,7 @@ func Test_F47_MemoryIsolationEndToEnd(t *testing.T) {
 		{ToolCalls: []llm.ToolCall{toolCall("c1", ActionSaveMemory, `{"text":"群B的偏好"}`)}, FinishReason: llm.FinishReasonToolCalls},
 		{Content: "好", FinishReason: "stop"},
 	}}
-	aB2 := &ReactAgent{LLM: probe2, Tools: r, SystemPrompt: "s", Memory: mem}
+	aB2 := &ReactAgent{LLM: probe2, Tools: r, Assembler: testAssembler("s"), Memory: mem}
 	if _, err := aB2.Run(context.Background(), Input{Query: "记住", SessionKey: groupB}); err != nil {
 		t.Fatalf("Run B2: %v", err)
 	}
@@ -185,7 +185,7 @@ func Test_F47_PersistentMemoryWorksThroughVirtualAction(t *testing.T) {
 		{ToolCalls: []llm.ToolCall{toolCall("c1", ActionSaveMemory, `{"text":"喜欢橘子汁"}`)}, FinishReason: llm.FinishReasonToolCalls},
 		{Content: "好", FinishReason: "stop"},
 	}}
-	a := &ReactAgent{LLM: save, Tools: r, SystemPrompt: "s", Memory: mem1}
+	a := &ReactAgent{LLM: save, Tools: r, Assembler: testAssembler("s"), Memory: mem1}
 	if _, err := a.Run(context.Background(), Input{Query: "记住", SessionKey: key}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -197,7 +197,7 @@ func Test_F47_PersistentMemoryWorksThroughVirtualAction(t *testing.T) {
 		t.Fatalf("RegisterVirtual: %v", err)
 	}
 	probe := &scriptedLLM{replies: []*llm.ChatResponse{{Content: "ok", FinishReason: "stop"}}}
-	b := &ReactAgent{LLM: probe, Tools: r2, SystemPrompt: "s", Memory: mem2}
+	b := &ReactAgent{LLM: probe, Tools: r2, Assembler: testAssembler("s"), Memory: mem2}
 	if _, err := b.Run(context.Background(), Input{Query: "我喜欢什么", SessionKey: key}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}

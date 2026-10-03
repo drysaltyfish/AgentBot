@@ -34,7 +34,7 @@ func runViaHandler(ctx context.Context, a Agent, query string) (string, int, err
 func Test_F34_ImplementationsAreInterchangeable(t *testing.T) {
 	t.Parallel()
 	fake := llm.NewFakeLLM(llm.ScriptedResponse{Response: &llm.ChatResponse{Content: "hello", FinishReason: "stop"}})
-	direct := &DirectAgent{LLM: fake, SystemPrompt: "sys"}
+	direct := &DirectAgent{LLM: fake, Assembler: testAssembler("sys")}
 	other := &stubAgent{out: &Output{Text: "hi", Steps: []Step{{Type: StepThought}}}}
 
 	text, steps, err := runViaHandler(context.Background(), direct, "q")
@@ -65,7 +65,7 @@ func Test_F34_NilLLMIsReportedNotPanicked(t *testing.T) {
 	if out == nil {
 		t.Fatalf("output must not be nil even on error")
 	}
-	b := &DirectAgent{}
+	b := &DirectAgent{Assembler: testAssembler("")}
 	if _, err := b.Run(context.Background(), Input{Query: "x"}); !errors.Is(err, ErrNoLLM) {
 		t.Fatalf("agent without llm: actual=%v expected=ErrNoLLM", err)
 	}
@@ -75,7 +75,7 @@ func Test_F34_StepsAreFilledOnErrorPath(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("llm down")
 	fake := llm.NewFakeLLM(llm.ScriptedResponse{Err: boom})
-	out, err := (&DirectAgent{LLM: fake}).Run(context.Background(), Input{Query: "x"})
+	out, err := (&DirectAgent{LLM: fake, Assembler: testAssembler("")}).Run(context.Background(), Input{Query: "x"})
 	if !errors.Is(err, boom) {
 		t.Fatalf("err: actual=%v expected=%v", err, boom)
 	}
@@ -90,7 +90,7 @@ func Test_F34_ToolCallsOnlyResultIsValid(t *testing.T) {
 		ToolCalls:    []llm.ToolCall{{ID: "c1", Name: "weather", Arguments: "{}"}},
 		FinishReason: llm.FinishReasonToolCalls,
 	}})
-	out, err := (&DirectAgent{LLM: fake}).Run(context.Background(), Input{Query: "x"})
+	out, err := (&DirectAgent{LLM: fake, Assembler: testAssembler("")}).Run(context.Background(), Input{Query: "x"})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -105,7 +105,7 @@ func Test_F34_ContextCancellationReturnsQuickly(t *testing.T) {
 	fake := llm.NewFakeLLM(llm.ScriptedResponse{Delay: time.Hour, Response: &llm.ChatResponse{Content: "late"}})
 	cancel()
 	start := time.Now()
-	if _, err := (&DirectAgent{LLM: fake}).Run(ctx, Input{Query: "x"}); err == nil {
+	if _, err := (&DirectAgent{LLM: fake, Assembler: testAssembler("")}).Run(ctx, Input{Query: "x"}); err == nil {
 		t.Fatalf("Run with cancelled ctx: actual=nil expected=error")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {

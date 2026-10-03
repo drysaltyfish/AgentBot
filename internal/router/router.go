@@ -21,15 +21,19 @@ const (
 
 // Route 是一条路由。
 //
-// 注意：priority / once 用非导出字段承载，以便同时提供链式方法
-// Priority(p) / Once(bool)（F-08 的链式注册 API）。
+// 所有可变态都是非导出字段：外部若要修改，只能走链式构建方法。
+// 这样 Priority / Named 这类会影响 Router 记账的操作不会绕过
+// markDirty（重排序 + 递增 epoch）与 noteName（重名告警）；
+// 同时避免注册后直接改写字段导致与并发 Dispatch 的数据竞争。
 type Route struct {
-	Kind     string
-	Rules    []Rule
-	Handlers []Handler
-	Block    bool
-	Break    bool
-	Name     string
+	kind     string
+	rules    []Rule
+	handlers []Handler
+	// block 表示本条路由执行后停止尝试后续路由。
+	block bool
+	// brk 表示本条路由执行后停止后续路由并跳过 post 钩子。
+	brk  bool
+	name string
 
 	priority int
 	once     bool
@@ -40,6 +44,12 @@ type Route struct {
 	removed  atomic.Bool
 	owner    *Router
 }
+
+// Kind 返回该路由匹配的事件种类模式。
+func (rt *Route) Kind() string { return rt.kind }
+
+// Name 返回路由名（未命名时为空串）。
+func (rt *Route) Name() string { return rt.name }
 
 // Priority 设置优先级并让路由表重新排序（递增 epoch）。
 func (rt *Route) Priority(p int) *Route {
@@ -62,6 +72,24 @@ func (rt *Route) Once(on bool) *Route {
 // IsOnce 报告是否为一次性路由。
 func (rt *Route) IsOnce() bool { return rt.once }
 
+// Block 设置"本条路由执行后停止尝试后续路由"。
+func (rt *Route) Block(on bool) *Route {
+	rt.block = on
+	return rt
+}
+
+// IsBlocked 报告是否设置了 Block。
+func (rt *Route) IsBlocked() bool { return rt.block }
+
+// Break 设置"停止后续路由并跳过 post 钩子"。
+func (rt *Route) Break(on bool) *Route {
+	rt.brk = on
+	return rt
+}
+
+// SkipsPost 报告该路由执行后是否跳过 post 钩子。
+func (rt *Route) SkipsPost() bool { return rt.brk }
+
 // Expire 设置注册后的存活期（F-15 的过期清理使用）。
 func (rt *Route) Expire(d time.Duration) *Route {
 	rt.expire = d
@@ -80,7 +108,7 @@ func (rt *Route) ExpiresAt() time.Time {
 //
 // 重名不报错，但会通过 WithWarnFunc 告警（F-08）。
 func (rt *Route) Named(name string) *Route {
-	rt.Name = name
+	rt.name = name
 	if rt.owner != nil {
 		rt.owner.noteName(name)
 	}
@@ -89,14 +117,28 @@ func (rt *Route) Named(name string) *Route {
 
 // Handle 追加处理器。
 func (rt *Route) Handle(hs ...Handler) *Route {
-	rt.Handlers = append(rt.Handlers, hs...)
+	rt.handlers = append(rt.handlers, hs...)
 	return rt
+}
+
+// Handlers 返回处理器的副本，供自省使用。
+func (rt *Route) Handlers() []Handler {
+	out := make([]Handler, len(rt.handlers))
+	copy(out, rt.handlers)
+	return out
 }
 
 // UseRules 追加该路由私有规则。
 func (rt *Route) UseRules(rs ...Rule) *Route {
-	rt.Rules = append(rt.Rules, rs...)
+	rt.rules = append(rt.rules, rs...)
 	return rt
+}
+
+// Rules 返回该路由私有规则的副本，供自省使用。
+func (rt *Route) Rules() []Rule {
+	out := make([]Rule, len(rt.rules))
+	copy(out, rt.rules)
+	return out
 }
 
 // UsePre 追加只对该路由生效的 pre 钩子。
@@ -169,8 +211,8 @@ func NewRouter(opts ...Option) *Router {
 
 // On 注册一条通用路由：kind 支持 "message" / "message/group" / "notice/notify/poke"。
 func (r *Router) On(kind string, rules ...Rule) *Route {
-	rt := &Route{Kind: kind, priority: PriorityNormal, created: r.now(), owner: r}
-	rt.Rules = append(rt.Rules, rules...)
+	rt := &Route{kind: kind, priority: PriorityNormal, created: r.now(), owner: r}
+	rt.rules = append(rt.rules, rules...)
 	r.add(rt)
 	return rt
 }
@@ -215,8 +257,8 @@ func (r *Router) add(rt *Route) {
 	rt.owner = r
 	r.routes = append(r.routes, rt)
 	r.mu.Unlock()
-	if rt.Name != "" {
-		r.noteName(rt.Name)
+	if rt.name != "" {
+		r.noteName(rt.name)
 	}
 	r.markDirty()
 }
@@ -257,8 +299,8 @@ func (r *Router) Remove(rt *Route) {
 		kept = append(kept, cur)
 	}
 	r.routes = kept
-	if rt.Name != "" && r.names[rt.Name] > 0 {
-		r.names[rt.Name]--
+	if rt.name != "" && r.names[rt.name] > 0 {
+		r.names[rt.name]--
 	}
 	r.mu.Unlock()
 	r.markDirty()
@@ -277,12 +319,12 @@ func (r *Router) Routes() []RouteInfo {
 	out := make([]RouteInfo, 0, len(snap))
 	for _, rt := range snap {
 		out = append(out, RouteInfo{
-			Name:     rt.Name,
-			Kind:     rt.Kind,
+			Name:     rt.name,
+			Kind:     rt.kind,
 			Priority: rt.priority,
 			Once:     rt.once,
-			Rules:    len(rt.Rules),
-			Handlers: len(rt.Handlers),
+			Rules:    len(rt.rules),
+			Handlers: len(rt.handlers),
 		})
 	}
 	return out

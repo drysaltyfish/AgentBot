@@ -142,8 +142,8 @@ func Test_F13_BlockStopsLaterRoutes(t *testing.T) {
 	var ran []string
 	router.OnMessage().Priority(PriorityEarly).Named("first").Handle(func(*Ctx) { ran = append(ran, "first") })
 	for _, rt := range router.Snapshot() {
-		if rt.Name == "first" {
-			rt.Block = true
+		if rt.Name() == "first" {
+			rt.Block(true)
 		}
 	}
 	router.OnMessage().Priority(PriorityLate).Named("second").Handle(func(*Ctx) { ran = append(ran, "second") })
@@ -165,7 +165,7 @@ func Test_F13_BreakSkipsPostHook(t *testing.T) {
 
 	rt := router.OnMessage()
 	rt.Handle(func(*Ctx) {})
-	rt.Break = true
+	rt.Break(true)
 
 	if n := engine.Dispatch(context.Background(), event.NewEvent([]byte(groupMessage)), nil); n != 1 {
 		t.Fatalf("matched: actual=%d expected=1", n)

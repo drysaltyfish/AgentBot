@@ -3,7 +3,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 
+	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/session"
 )
@@ -27,8 +29,12 @@ type Attachment struct {
 // 注意：**不设** Metadata map[string]any——需要传递的字段必须显式出现在结构体上，
 // 否则会出现"写了读不到"的死字段（反模式 #8）。
 type Input struct {
-	Query      string
-	History    []llm.Message
+	Query string
+	// History 是按原顺序追加的历史条目（含发言人、时间与环境消息标记）。
+	//
+	// 这里收**条目**而不是成品消息：环境消息的压缩与呈现窗口都发生在
+	// 装配层，agent 拿到的是已经压好的消息序列。
+	History    []history.Item
 	SessionKey session.Key
 	Files      []Attachment
 	// Role 是发起者的角色，供 F-45 的权限判定使用；为空时按 RoleMember 处理。
@@ -82,12 +88,29 @@ type Agent interface {
 	Run(ctx context.Context, in Input) (*Output, error)
 }
 
+// MessageAssembler 把历史条目、记忆块与当前输入装配成一次请求的消息序列。
+//
+// 定义在 agent 侧，让 agent 只依赖"能装配"这一能力，而不依赖具体实现。
+// 布局规则（不可变前缀 / 记忆位置 / 呈现窗口 / 环境消息压缩）由实现拥有，
+// 且**只能有一份**（见 docs/adr/0002 与 internal/conversation）。
+type MessageAssembler interface {
+	Build(hist []history.Item, memoryBlock, user string) []llm.Message
+	PrefixHash() string
+}
+
+// ErrNoAssembler 表示没有配置消息装配器。
+//
+// 装配是必填依赖：缺了它 agent 就只能自己拼消息，而"缓存优先"的布局
+// 一旦出现第二份实现，窗口与 token 预算就会静默失效。
+var ErrNoAssembler = errors.New("agent has no message assembler")
+
 // DirectAgent 是最小的 Agent 实现：把提示词交给 LLM 直接作答，不调用工具。
 //
 // 它同时是"两种实现可互换"这一验收条件的第二个实现。
 type DirectAgent struct {
-	LLM          llm.LLM
-	SystemPrompt string
+	LLM llm.LLM
+	// Assembler 是必填的消息装配器：消息布局由它拥有，agent 不自己拼。
+	Assembler MessageAssembler
 }
 
 // Run 实现 Agent。
@@ -96,12 +119,10 @@ func (a *DirectAgent) Run(ctx context.Context, in Input) (*Output, error) {
 	if a == nil || a.LLM == nil {
 		return out, ErrNoLLM
 	}
-	messages := make([]llm.Message, 0, len(in.History)+2)
-	if a.SystemPrompt != "" {
-		messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: a.SystemPrompt})
+	if a.Assembler == nil {
+		return out, ErrNoAssembler
 	}
-	messages = append(messages, in.History...)
-	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: in.Query})
+	messages := a.Assembler.Build(in.History, "", in.Query)
 
 	resp, err := a.LLM.Chat(ctx, &llm.ChatRequest{Messages: messages})
 	if err != nil {

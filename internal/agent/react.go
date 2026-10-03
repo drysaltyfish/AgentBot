@@ -46,9 +46,11 @@ const (
 // 协议选择遵循 ADR-0001：**原生 tool_calls 是唯一执行通道**，F-39 的文本解析器
 // 只在模型把动作吐在文本里时作为抢救通道（scavenge）。
 type ReactAgent struct {
-	LLM          llm.LLM
-	Tools        *tool.Registry
-	SystemPrompt string
+	LLM   llm.LLM
+	Tools *tool.Registry
+	// Assembler 是必填的消息装配器：不可变前缀 / 记忆位置 / 呈现窗口 /
+	// 环境消息压缩都由它拥有（见 ADR-0002），agent 不自己拼消息。
+	Assembler MessageAssembler
 
 	// MaxIterations <= 0 时取 DefaultMaxIterations。
 	MaxIterations int
@@ -84,30 +86,30 @@ func (a *ReactAgent) Run(ctx context.Context, in Input) (*Output, error) {
 	if a.Tools == nil {
 		return out, ErrNoToolRegistry
 	}
+	if a.Assembler == nil {
+		return out, ErrNoAssembler
+	}
 
 	// F-47：记忆必须按会话隔离。把它放进 ctx，工具执行与记忆注入都能看到同一个作用域。
 	ctx = WithMemoryScope(ctx, in.SessionKey.String())
 
-	messages := make([]llm.Message, 0, len(in.History)+3)
-	if a.SystemPrompt != "" {
-		messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: a.SystemPrompt})
-	}
-	// ADR-0002：记忆是独立消息，放在 system 之后、历史之前。
-	// 不进 system 是为了保住 system 段的全局缓存；不放到最后是为了让记忆本身也能被缓存。
+	// 记忆在跑模型之前召回；它按 ADR-0002 位于 system 之后、历史之前，
+	// 由装配器放进消息序列——agent 只负责取回正文并留下指纹。
+	memoryBlock := ""
 	if a.Memory != nil {
 		items, err := a.Memory.Recall(ctx)
 		if err != nil {
 			a.warnf("cannot recall memory: %v", err)
-		} else if block := RenderMemory(items); block != "" {
-			memMsg := llm.Message{Role: llm.RoleSystem, Content: block}
-			messages = append(messages, memMsg)
-			// 记下记忆块的指纹：记忆一变它之后的内容必然失效，那是**预期**变化，
-			// 必须能让上层与"意外前缀分歧"区分开（否则告警会一直响）。
-			out.MemoryDigest = llm.Digest([]llm.Message{memMsg})[0]
+		} else {
+			memoryBlock = RenderMemory(items)
 		}
 	}
-	messages = append(messages, in.History...)
-	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: in.Query})
+	messages := a.Assembler.Build(in.History, memoryBlock, in.Query)
+	if memoryBlock != "" {
+		// 记下记忆块的指纹：记忆一变它之后的内容必然失效，那是**预期**变化，
+		// 必须能让上层与"意外前缀分歧"区分开（否则告警会一直响）。
+		out.MemoryDigest = llm.Digest([]llm.Message{{Role: llm.RoleSystem, Content: memoryBlock}})[0]
+	}
 
 	specs := a.Tools.Definitions()
 	max := a.maxIterations()

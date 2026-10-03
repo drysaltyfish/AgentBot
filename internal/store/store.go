@@ -153,11 +153,6 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 // Path 返回数据库文件路径。
 func (s *Store) Path() string { return s.path }
 
-// DB 暴露底层句柄，供只读查询使用。
-//
-// 写**必须**走 Write：直接写会绕开单写者纪律与重试。
-func (s *Store) DB() *sql.DB { return s.db }
-
 // Close 关闭存储。
 func (s *Store) Close() error {
 	s.mu.Lock()
@@ -233,11 +228,6 @@ func (s *Store) afterWrite(ctx context.Context) {
 	// PASSIVE 不阻塞读者，也不强制截断；只是把已提交页刷回主库。
 	// 用调用方的 ctx：checkpoint 不该比触发它的那次写活得更久。
 	_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
-}
-
-// Read 在只读路径上执行查询。
-func (s *Store) Read(ctx context.Context, fn func(context.Context, *sql.DB) error) error {
-	return fn(ctx, s.db)
 }
 
 // isBusy 判断错误是否为"数据库忙"。

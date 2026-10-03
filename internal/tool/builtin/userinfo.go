@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/drysaltyfish/agentbot/internal/scope"
 	"github.com/drysaltyfish/agentbot/internal/tool"
 	"github.com/drysaltyfish/agentbot/internal/transport"
 )
@@ -56,7 +57,7 @@ func (t getUserInfo) Execute(ctx context.Context, args json.RawMessage) (tool.Re
 		return tool.Failure("平台 API 通道不可用，暂时查不到用户信息"), nil
 	}
 
-	groupID := groupIDFromScope(tool.ScopeFrom(ctx))
+	groupID := groupIDFromScope(scope.ScopeFrom(ctx))
 	if groupID != 0 {
 		return t.groupMember(ctx, groupID, in.QQ)
 	}

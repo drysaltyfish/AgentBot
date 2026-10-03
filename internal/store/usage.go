@@ -180,14 +180,3 @@ func (s *Store) TopSessions(ctx context.Context, limit int) ([]Usage, error) {
 	}
 	return out, nil
 }
-
-// ResetUsage 清空台账（导出/维护用）。
-func (s *Store) ResetUsage(ctx context.Context) error {
-	return s.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `DELETE FROM sessions`)
-		if err != nil {
-			return fmt.Errorf("reset usage: %w", err)
-		}
-		return nil
-	})
-}

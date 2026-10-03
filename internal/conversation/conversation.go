@@ -81,13 +81,23 @@ func (a *Assembler) Prefix() string { return a.prefix }
 // PrefixHash 返回不可变前缀的短摘要，用于在日志里证明前缀跨轮未变。
 func (a *Assembler) PrefixHash() string { return a.hash }
 
-// Build 装配 [不可变前缀] + [只追加历史] + [当前输入]。
+// Build 装配 [不可变前缀] + [记忆] + [只追加历史] + [当前输入]。
 //
-// 顺序即不变量：前缀永远在最先，当前输入永远在最后，中间只有按原顺序追加的历史。
-func (a *Assembler) Build(hist []history.Item, user string) []llm.Message {
+// 顺序即不变量：前缀永远在最先，当前输入永远在最后；记忆紧随前缀，
+// 历史只按原顺序追加（见 ADR-0002）。
+//
+// **这是消息序列的唯一装配点。** agent 不再自己拼消息：一旦它自己拼，
+// 窗口与环境消息预算就只会在测试里生效，而线上永远不生效——
+// 这个模块被绕开过一次，真机上就是这么坏掉的。
+func (a *Assembler) Build(hist []history.Item, memoryBlock, user string) []llm.Message {
 	items := a.compress(hist)
-	out := make([]llm.Message, 0, len(items)+2)
+	out := make([]llm.Message, 0, len(items)+3)
 	out = append(out, llm.Message{Role: llm.RoleSystem, Content: a.prefix})
+	// ADR-0002：记忆是独立消息，放在 system 之后、历史之前。
+	// 不进 system 是为了保住 system 段的全局缓存；不放到最后是为了让记忆本身也能被缓存。
+	if memoryBlock != "" {
+		out = append(out, llm.Message{Role: llm.RoleSystem, Content: memoryBlock})
+	}
 	out = append(out, ToMessages(items)...)
 	out = append(out, llm.Message{Role: llm.RoleUser, Content: user})
 	return out
@@ -172,8 +182,8 @@ func finalizeAmbient(items []history.Item, opts AmbientOptions) []history.Item {
 
 // ToMessages 把历史条目转成消息序列。
 //
-// 导出是因为走 ReAct 时组合根也要做同样的映射——映射规则必须只有一份，
-// 否则两条路径的历史形状会悄悄漂移，而历史形状又直接影响前缀缓存。
+// 只供本包的装配使用（也包括测试）。映射规则必须只有一份：
+// 历史形状一旦漂移，前缀缓存就会静默失效。
 func ToMessages(items []history.Item) []llm.Message {
 	out := make([]llm.Message, 0, len(items))
 	for _, it := range items {
