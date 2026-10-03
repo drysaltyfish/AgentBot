@@ -146,7 +146,7 @@ func systemPrompt(cfg *config.Config) (string, error) {
 // 因此调用方对两条路径完全同形，不需要分支。
 func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, hist history.History, st *store.Store, caller builtin.CallerProvider, lg *observe.Logger, auditLog *audit.Logger) (agent.Agent, agent.Memory, error) {
 	if !cfg.Agent.Enabled {
-		return &agent.DirectAgent{LLM: model, Assembler: asm}, nil, nil
+		return wrapParadigm(cfg, model, &agent.DirectAgent{LLM: model, Assembler: asm}, lg), nil, nil
 	}
 
 	registry := tool.New(tool.WithWarnFunc(func(msg string) {
@@ -285,7 +285,7 @@ func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, 
 		"memory_file", strings.TrimSpace(cfg.Agent.MemoryFile),
 		"history_file", strings.TrimSpace(cfg.History.File),
 		"approval", cfg.Agent.ApprovalEnabled)
-	return react, mem, nil
+	return wrapParadigm(cfg, model, react, lg), mem, nil
 }
 
 // sandboxPolicyFromConfig 把配置映射成工具沙箱策略（F-46）。

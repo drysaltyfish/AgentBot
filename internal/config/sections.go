@@ -20,6 +20,10 @@ type History struct {
 
 // Agent 描述 ReAct 循环与工具系统的接入方式（F-35 / F-41 / F-44 / F-45）。
 type Agent struct {
+	// Paradigm 是 Agent 范式：空/react（默认，基础实现）、reflexion、orchestrator。
+	Paradigm *string `yaml:"paradigm"`
+	// Reflexion 是反思范式的参数（F-36）。
+	Reflexion Reflexion `yaml:"reflexion"`
 	// Enabled 为 true 时回复链路走 ReAct 循环（带工具）；为 false 时直连 LLM。
 	Enabled bool `yaml:"enabled"`
 	// MaxIterations <= 0 时用 agent.DefaultMaxIterations。
@@ -380,4 +384,36 @@ type Ops struct {
 	ReadyCacheTTL *Duration `yaml:"ready_cache_ttl"`
 	// ProbeTimeout 是单次依赖检查的超时；未配置或非正时取默认 1s。
 	ProbeTimeout *Duration `yaml:"probe_timeout"`
+}
+
+// Reflexion 是反思范式参数（F-36）。
+type Reflexion struct {
+	// MaxReflections 是最大反思轮数；未配置或非正时取 1。
+	MaxReflections *int `yaml:"max_reflections"`
+	// Threshold 是"够好就停"的分数阈值；未配置或非正时取 1.0。
+	Threshold *float64 `yaml:"threshold"`
+}
+
+// EffectiveParadigm 返回 Agent 范式；未配置时为空串（表示用基础实现）。
+func (a Agent) EffectiveParadigm() string {
+	if a.Paradigm == nil {
+		return ""
+	}
+	return *a.Paradigm
+}
+
+// EffectiveMaxReflections 返回最大反思轮数；未配置或非正时取 1。
+func (a Agent) EffectiveMaxReflections() int {
+	if a.Reflexion.MaxReflections == nil || *a.Reflexion.MaxReflections <= 0 {
+		return 1
+	}
+	return *a.Reflexion.MaxReflections
+}
+
+// EffectiveThreshold 返回反思停止阈值；未配置或非正时取 1.0。
+func (a Agent) EffectiveThreshold() float64 {
+	if a.Reflexion.Threshold == nil || *a.Reflexion.Threshold <= 0 {
+		return 1.0
+	}
+	return *a.Reflexion.Threshold
 }
