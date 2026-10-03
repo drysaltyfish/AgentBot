@@ -29,6 +29,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/reply"
 	"github.com/drysaltyfish/agentbot/internal/router"
+	"github.com/drysaltyfish/agentbot/internal/scoped"
 	"github.com/drysaltyfish/agentbot/internal/secrets"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/store"
@@ -366,11 +367,30 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		lg.Component("llm").Info("pricing is not configured; cost stays 0 (token usage is still recorded)")
 	}
 
+	// F-63：语义缓存（默认关闭）。接在回复链路而不是 LLM 装饰器上——
+	// 只有这里同时拿得到会话键、人格指纹、出口过滤链与历史追加。
+	semCache, serr := buildSemcache(cfg, chain, lg)
+	if serr != nil {
+		lifecycle.Error("cannot build the semantic cache", "error", serr)
+		return 1
+	}
+
 	pipeline := reply.New(reply.Deps{
 		Brain: brain, Sender: sender, Sessions: sessions, Assembler: asm,
 		Memory: mem, AutoMem: autoMem, Timeout: timeout, Shape: shape,
 		Store: st, Price: price, Log: lg,
 		Audit: auditLog, Catalog: catalog,
+		Semcache: semCache,
+		SemcacheFingerprint: func(ctx context.Context, key session.Key) string {
+			if personaMgr == nil {
+				return ""
+			}
+			fp, perr := personaMgr.Fingerprint(ctx, scoped.SessionRefForKey(key))
+			if perr != nil {
+				return ""
+			}
+			return fp
+		},
 	})
 
 	// 回复策略是**规则**，不是 handler 里的分支：路由层就能回答"什么时候回复"。

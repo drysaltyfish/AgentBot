@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/drysaltyfish/agentbot/internal/semcache"
 )
 
 // 本文件的取值访问器把“未设置（nil 或零值）→ 模块默认”的解析收进模块内部，
@@ -233,6 +235,33 @@ func (m Moderation) EffectiveSpamWindow() time.Duration {
 // EffectiveSpamMaxMessages 返回窗口内允许的最大消息数；未配置或非正时取默认 20。
 func (m Moderation) EffectiveSpamMaxMessages() int {
 	return orPositive(m.AntiSpam.MaxMessages, defaultModerationSpamMaxMessages)
+}
+
+// EffectiveEnabled 返回是否启用语义缓存；未配置时默认关闭。
+func (s Semcache) EffectiveEnabled() bool { return orBool(s.Enabled, false) }
+
+// EffectiveThreshold 返回命中阈值；未配置或非正时取 semcache 的默认值。
+func (s Semcache) EffectiveThreshold() float64 {
+	if s.Threshold == nil || *s.Threshold <= 0 {
+		return semcache.DefaultThreshold
+	}
+	return *s.Threshold
+}
+
+// EffectiveTTL 返回条目生存时间；未配置或非正时取 semcache 的默认值。
+func (s Semcache) EffectiveTTL() time.Duration {
+	if s.TTLSeconds == nil || *s.TTLSeconds <= 0 {
+		return semcache.DefaultTTL
+	}
+	return time.Duration(*s.TTLSeconds) * time.Second
+}
+
+// EffectiveMaxEntries 返回容量上限；未配置或非正时取 semcache 的默认值。
+func (s Semcache) EffectiveMaxEntries() int {
+	if s.MaxEntries == nil || *s.MaxEntries <= 0 {
+		return semcache.DefaultMaxEntries
+	}
+	return *s.MaxEntries
 }
 
 // EffectiveBanDuration 返回临时封禁时长；未配置或非正时取默认 60s。

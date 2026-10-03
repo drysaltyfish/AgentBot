@@ -1842,7 +1842,7 @@
 **验收**
 - 相同问题第二次直接命中（无 LLM 调用）。
 - 不同人格下同一问题不命中。
-- 命中率与节省 token 数计入指标。
+- 命中率与节省 token 数计入指标：`semcache_hits_total`、`semcache_misses_total`、`semcache_saved_tokens_total`。
 
 ---
 

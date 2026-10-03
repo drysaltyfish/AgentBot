@@ -250,6 +250,25 @@ type Singleflight struct {
 	Notice *bool `yaml:"notice"`
 }
 
+// Semcache 描述语义缓存（F-63）。默认关闭。
+//
+// 关闭是刻意的默认：缓存会改变"同一句话在不同时刻得到什么回答"，
+// 而它省下的只是重复问题的 token。要开就明确开。
+type Semcache struct {
+	// Enabled 为 true 时启用；未配置时默认关闭。
+	Enabled *bool `yaml:"enabled"`
+	// Threshold 是命中所需的最低相似度（0,1]；<=0 时用 0.95。
+	Threshold *float64 `yaml:"threshold"`
+	// TTLSeconds 是条目生存时间；<=0 时用 3600 秒。
+	TTLSeconds *int `yaml:"ttl_seconds"`
+	// MaxEntries 是容量上限；<=0 时用 4096。
+	MaxEntries *int `yaml:"max_entries"`
+	// SkipWords 是易变话题关键词（子串匹配），在**内置跳过列表之外**追加。
+	SkipWords []string `yaml:"skip_words"`
+	// SkipPatterns 是附加的正则跳过规则；语法错误会让启动失败（fail-fast）。
+	SkipPatterns []string `yaml:"skip_patterns"`
+}
+
 // Cost 描述成本统计与配额（F-66）。默认关闭。
 type Cost struct {
 	Enabled *bool `yaml:"enabled"`
