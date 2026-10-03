@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/drysaltyfish/agentbot/internal/llm"
+	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/tool"
 )
 
@@ -99,7 +100,9 @@ func Test_F40_SaveMemoryLandsInNextRunPrompt(t *testing.T) {
 func Test_F40_MemoryInjectionPosition(t *testing.T) {
 	t.Parallel()
 	mem := NewMemoryStore(0)
-	if err := mem.Save(context.Background(), "记忆A"); err != nil {
+	// 记忆按会话作用域隔离（F-47），因此保存时的作用域必须与运行时一致。
+	key := session.Key{SelfID: 1, UserID: 100}
+	if err := mem.Save(WithMemoryScope(context.Background(), key.String()), "记忆A"); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	fake := &scriptedLLM{replies: []*llm.ChatResponse{{Content: "ok", FinishReason: "stop"}}}
@@ -107,8 +110,9 @@ func Test_F40_MemoryInjectionPosition(t *testing.T) {
 		LLM: fake, Tools: tool.New(), SystemPrompt: "系统提示词", Memory: mem,
 	}
 	if _, err := a.Run(context.Background(), Input{
-		Query:   "当前问题",
-		History: []llm.Message{{Role: llm.RoleUser, Content: "历史1"}, {Role: llm.RoleAssistant, Content: "历史2"}},
+		Query:      "当前问题",
+		SessionKey: key,
+		History:    []llm.Message{{Role: llm.RoleUser, Content: "历史1"}, {Role: llm.RoleAssistant, Content: "历史2"}},
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}

@@ -8,8 +8,9 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/tool"
 )
 
-// MemoryTextLimit 是单条记忆的长度上限（与 ADR-0002 的 2 KiB 一致）。
-const MemoryTextLimit = 2048
+// MemoryTextLimit 是单条记忆的长度上限（字符）。
+// 取值对齐 F-47 的"单条记忆长度上限（默认 500 字符）"。
+const MemoryTextLimit = 500
 
 type memorySave struct{ deps Deps }
 

@@ -85,6 +85,9 @@ func (a *ReactAgent) Run(ctx context.Context, in Input) (*Output, error) {
 		return out, ErrNoToolRegistry
 	}
 
+	// F-47：记忆必须按会话隔离。把它放进 ctx，工具执行与记忆注入都能看到同一个作用域。
+	ctx = WithMemoryScope(ctx, in.SessionKey.String())
+
 	messages := make([]llm.Message, 0, len(in.History)+3)
 	if a.SystemPrompt != "" {
 		messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: a.SystemPrompt})
