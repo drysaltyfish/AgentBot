@@ -223,8 +223,13 @@ type LLM struct {
 	// 长人格提示词放文件更易维护；启动时读一次并固定，保证前缀逐字节稳定。
 	SystemPromptFile *string `yaml:"system_prompt_file"`
 	// HistoryTurns 是最多回灌多少条历史；<=0 或未设置时用默认值。
-	Pricing      Pricing
 	HistoryTurns *int `yaml:"history_turns"`
+	// AmbientTokenBudget 是环境消息（群里没被 @ 的）的 token 预算。
+	// 0 用默认值；负数表示不压缩。
+	AmbientTokenBudget *int `yaml:"ambient_token_budget"`
+	// AmbientMaxChars 是单条环境消息的字符上限，超出截断并提示可回溯。
+	AmbientMaxChars *int `yaml:"ambient_max_chars"`
+	Pricing         Pricing
 }
 
 // Prompt 描述提示词资产位置（F-33 / F-82）。
@@ -470,6 +475,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Store.BusyTimeout != nil && c.Store.BusyTimeout.D <= 0 {
 		add("store.busy_timeout", "必须为正")
+	}
+	if c.LLM.AmbientMaxChars != nil && *c.LLM.AmbientMaxChars < 1 {
+		add("llm.ambient_max_chars", "必须 >= 1（负数表示不截断）")
 	}
 	if c.History.Retention != nil && *c.History.Retention < 1 {
 		add("history.retention", "必须 >= 1")

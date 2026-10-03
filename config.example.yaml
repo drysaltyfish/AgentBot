@@ -26,6 +26,15 @@ llm:
   # 留空或全 0 = 不计成本，但 token 与请求数仍然照记——
   # "花了多少 token"与"花了多少钱"是两件事，前者不依赖价格表。
   # 价格要填**当时**的价：台账会记录 pricing_version，改价后老数据仍可解释。
+  # 环境消息（群里**没被 @** 的）的压缩预算。
+  # 为什么要单独一套：群里刷屏几分钟就能把真正的对话挤出窗口。
+  # 环境是背景，受 token 预算约束；与机器人的对话才是主体，按 history_turns 保留。
+  # 负数 = 不压缩。
+  ambient_token_budget: 1200
+  # 单条环境消息的字符上限；超出会截断并提示模型可用 recall_history 看完整内容。
+  ambient_max_chars: 200
+
+  # 模型单价（每百万 token 的美元价），用于台账的成本统计（F-85）。
   pricing:
     version: ""
     input_per_million: 0

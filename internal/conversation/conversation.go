@@ -45,13 +45,18 @@ type Options struct {
 	// 注意：如果调用方已有存储层裁剪，这里应保持 0。在本层逐轮裁剪会让前缀逐轮
 	// 变化，从而让前缀缓存彻底失效——实测命中率会从 ~90% 掉到 0%。
 	MaxHistory int
+	// AmbientTokenBudget 是环境消息的 token 预算；0 用默认值，负数表示不压缩。
+	AmbientTokenBudget int
+	// AmbientMaxChars 是单条环境消息的字符上限；0 用默认值。
+	AmbientMaxChars int
 }
 
 // Assembler 把三段装配成消息序列。
 type Assembler struct {
-	prefix string
-	hash   string
-	max    int
+	prefix  string
+	hash    string
+	max     int
+	ambient AmbientOptions
 }
 
 // New 构造 Assembler；前缀在此固定，之后不再改变。
@@ -60,7 +65,14 @@ func New(opts Options) *Assembler {
 	if system == "" {
 		system = DefaultSystemPrompt
 	}
-	return &Assembler{prefix: system, hash: shortHash(system), max: opts.MaxHistory}
+	ambient := AmbientOptions{TokenBudget: opts.AmbientTokenBudget, MaxCharsPerMessage: opts.AmbientMaxChars}
+	if ambient.TokenBudget == 0 {
+		ambient.TokenBudget = DefaultAmbientTokenBudget
+	}
+	if ambient.MaxCharsPerMessage == 0 {
+		ambient.MaxCharsPerMessage = DefaultAmbientMaxChars
+	}
+	return &Assembler{prefix: system, hash: shortHash(system), max: opts.MaxHistory, ambient: ambient}
 }
 
 // Prefix 返回不可变前缀正文。
@@ -73,11 +85,88 @@ func (a *Assembler) PrefixHash() string { return a.hash }
 //
 // 顺序即不变量：前缀永远在最先，当前输入永远在最后，中间只有按原顺序追加的历史。
 func (a *Assembler) Build(hist []history.Item, user string) []llm.Message {
-	items := trimHistory(hist, a.max)
+	items := a.compress(hist)
 	out := make([]llm.Message, 0, len(items)+2)
 	out = append(out, llm.Message{Role: llm.RoleSystem, Content: a.prefix})
 	out = append(out, ToMessages(items)...)
 	out = append(out, llm.Message{Role: llm.RoleUser, Content: user})
+	return out
+}
+
+// compress 按"对话按轮次、环境按 token 预算"分别裁剪，再按**原序**合并。
+//
+// 两类分开是刻意的：群里刷屏几分钟就能把真正的对话挤出窗口。
+// 环境消息是背景，它该受 token 预算约束；与机器人的对话才是主体，按轮次保留。
+//
+// 用两遍扫描而不是各裁各的再拼接：拼接会让两类消息的相对顺序错乱，
+// 而顺序本身就是模型理解"谁先说的"的依据。
+func (a *Assembler) compress(items []history.Item) []history.Item {
+	if len(items) == 0 {
+		return items
+	}
+	var convo, ambient []history.Item
+	for _, it := range items {
+		if !it.Ambient {
+			convo = append(convo, it)
+			continue
+		}
+		ambient = append(ambient, it)
+	}
+
+	keptConvo := trimHistory(convo, a.max)
+	convoDropped := len(convo) - len(keptConvo)
+
+	_, ambientDropped := CompressAmbient(ambient, a.ambient)
+
+	// 第二遍：按原序输出，对话与环境的裁剪线各按各的。
+	out := make([]history.Item, 0, len(items))
+	convoSeen, ambientSeen := 0, 0
+	for _, it := range items {
+		if !it.Ambient {
+			convoSeen++
+			if convoSeen > convoDropped {
+				out = append(out, it)
+			}
+			continue
+		}
+		ambientSeen++
+		if ambientSeen > ambientDropped {
+			out = append(out, it)
+		}
+	}
+	// 环境消息还要走一遍截断与刷屏合并（它们只影响渲染，不影响保留决策）。
+	return finalizeAmbient(out, a.ambient)
+}
+
+// finalizeAmbient 对环境消息做截断与刷屏合并，对话消息原样保留。
+func finalizeAmbient(items []history.Item, opts AmbientOptions) []history.Item {
+	var convo, ambient []history.Item
+	for _, it := range items {
+		if !it.Ambient {
+			convo = append(convo, it)
+			continue
+		}
+		ambient = append(ambient, it)
+	}
+	if len(ambient) == 0 {
+		return items
+	}
+	compressed, _ := CompressAmbient(ambient, opts)
+	// 按原序重新拼接：用内容+时间做键恢复相对位置过于脆弱，
+	// 因此这里直接遍历原序列，遇到环境条目就按消费顺序取压缩结果。
+	out := make([]history.Item, 0, len(convo)+len(compressed))
+	ai := 0
+	for _, it := range items {
+		if !it.Ambient {
+			out = append(out, it)
+			continue
+		}
+		if ai < len(compressed) {
+			out = append(out, compressed[ai])
+			ai++
+		}
+		// 被合并掉的重复条目在此跳过——它们已经计入上一条的计数。
+	}
 	return out
 }
 

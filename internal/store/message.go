@@ -32,6 +32,8 @@ type Message struct {
 	TokenCount  int64
 	CreatedAt   int64
 	Fingerprint string
+	// Ambient 表示这条消息不是在跟机器人说话（环境消息，F-84）。
+	Ambient bool
 	// SpeakerID / SpeakerName 标识发言人（群聊才有）。
 	// 与正文分开存：正文保持干净，标签在渲染时拼。
 	SpeakerID   int64
@@ -47,7 +49,7 @@ type MessageHit struct {
 	After   *Message
 }
 
-const messageCols = "id, session_key, seq, role, kind, content, name, tool_call_id, tool_calls, token_count, created_at, fingerprint, speaker_id, speaker_name"
+const messageCols = "id, session_key, seq, role, kind, content, name, tool_call_id, tool_calls, token_count, created_at, fingerprint, speaker_id, speaker_name, ambient"
 
 // messageColsQ 是带表名前缀的列清单。
 //
@@ -56,13 +58,13 @@ const messageCols = "id, session_key, seq, role, kind, content, name, tool_call_
 const messageColsQ = "messages.id, messages.session_key, messages.seq, messages.role, messages.kind, " +
 	"messages.content, messages.name, messages.tool_call_id, messages.tool_calls, " +
 	"messages.token_count, messages.created_at, messages.fingerprint, " +
-	"messages.speaker_id, messages.speaker_name"
+	"messages.speaker_id, messages.speaker_name, messages.ambient"
 
 func scanMessage(sc interface{ Scan(...any) error }) (Message, error) {
 	var m Message
 	err := sc.Scan(&m.ID, &m.SessionKey, &m.Seq, &m.Role, &m.Kind, &m.Content,
 		&m.Name, &m.ToolCallID, &m.ToolCalls, &m.TokenCount, &m.CreatedAt, &m.Fingerprint,
-		&m.SpeakerID, &m.SpeakerName)
+		&m.SpeakerID, &m.SpeakerName, &m.Ambient)
 	return m, err
 }
 
@@ -117,7 +119,7 @@ func (s *Store) AppendMessage(ctx context.Context, m Message) (int64, bool, erro
 			 (session_key, seq, role, kind, content, name, tool_call_id, tool_calls, token_count, created_at, fingerprint, speaker_id, speaker_name)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			m.SessionKey, seq, m.Role, m.Kind, m.Content, m.Name, m.ToolCallID, m.ToolCalls,
-			m.TokenCount, m.CreatedAt, m.Fingerprint, m.SpeakerID, m.SpeakerName)
+			m.TokenCount, m.CreatedAt, m.Fingerprint, m.SpeakerID, m.SpeakerName, m.Ambient)
 		if err != nil {
 			return fmt.Errorf("insert message: %w", err)
 		}
@@ -309,7 +311,7 @@ func (s *Store) searchFTS(ctx context.Context, sessionKey, needle string, limit 
 		)
 		if err := rows.Scan(&m.ID, &m.SessionKey, &m.Seq, &m.Role, &m.Kind, &m.Content,
 			&m.Name, &m.ToolCallID, &m.ToolCalls, &m.TokenCount, &m.CreatedAt, &m.Fingerprint,
-			&m.SpeakerID, &m.SpeakerName, &snippet); err != nil {
+			&m.SpeakerID, &m.SpeakerName, &m.Ambient, &snippet); err != nil {
 			return nil, fmt.Errorf("scan fts hit: %w", err)
 		}
 		out = append(out, MessageHit{Message: m, Snippet: snippet})
