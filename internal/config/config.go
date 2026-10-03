@@ -49,6 +49,7 @@ func (d Duration) String() string { return d.D.String() }
 type Config struct {
 	Transport Transport `yaml:"transport"`
 	LLM       LLM       `yaml:"llm"`
+	Agent     Agent     `yaml:"agent"`
 	Behavior  Behavior  `yaml:"behavior"`
 	Prompt    Prompt    `yaml:"prompt"`
 	Policy    Policy    `yaml:"policy"`
@@ -65,6 +66,35 @@ const (
 	// ReplyOnMention 仅在 @ 机器人时回复（群聊默认，避免刷屏）。
 	ReplyOnMention = "on_mention"
 )
+
+// Agent 描述 ReAct 循环与工具系统的接入方式（F-35 / F-41 / F-44 / F-45）。
+type Agent struct {
+	// Enabled 为 true 时回复链路走 ReAct 循环（带工具）；为 false 时直连 LLM。
+	Enabled bool `yaml:"enabled"`
+	// MaxIterations <= 0 时用 agent.DefaultMaxIterations。
+	MaxIterations *int `yaml:"max_iterations"`
+	// StepTimeout <= 0 时用 agent.DefaultStepTimeout。
+	StepTimeout *Duration `yaml:"step_timeout"`
+	// Protocol 为 native 或 auto（默认 auto）。
+	Protocol string `yaml:"protocol"`
+	// Tools 是要注册的内置工具名；为空表示全部注册。
+	Tools []string `yaml:"tools"`
+	// VirtualActions 为 true 时注册 end_action / save_memory / noop。
+	VirtualActions *bool `yaml:"virtual_actions"`
+	// Memory 为 true 时启用进程内长期记忆（F-48 的完整实现在 M3）。
+	Memory *bool `yaml:"memory"`
+	// MemoryMax 是记忆条数上限，默认 64。
+	MemoryMax *int `yaml:"memory_max"`
+	// ApprovalTimeout 是人工审批的独立预算，默认 60s。
+	ApprovalTimeout *Duration `yaml:"approval_timeout"`
+	// ApprovalEnabled 为 true 时启用 F-45 权限闸门。
+	// 默认关闭：空权限表是 fail-closed 的（所有工具都需要审批），
+	// 没配审批通道就打开会导致工具全部不可用。
+	ApprovalEnabled bool `yaml:"approval_enabled"`
+	// Allow 是「工具 -> 角色」的放行表，仅在 ApprovalEnabled 时生效。
+	// 形如 {calculator: [member], json_query: [member]}：列出的角色可直接执行。
+	Allow map[string][]string `yaml:"allow"`
+}
 
 // Behavior 描述回复行为（F-13 路由策略的配置面）。
 type Behavior struct {
@@ -149,6 +179,12 @@ func Default() *Config {
 	queue := 1024
 	sdTimeout := Duration{D: 10 * time.Second}
 	historyTurns := 20
+	maxIterations := 10
+	stepTimeout := Duration{D: 30 * time.Second}
+	approvalTimeout := Duration{D: 60 * time.Second}
+	virtualActions := true
+	memoryOn := true
+	memoryMax := 64
 	splitOnBlank := true
 	splitDelay := Duration{D: 400 * time.Millisecond}
 	maxSegments := 4
@@ -157,6 +193,12 @@ func Default() *Config {
 		LLM: LLM{
 			Provider: "openai", BaseURL: "https://api.openai.com/v1", Timeout: &timeout,
 			HistoryTurns: &historyTurns,
+		},
+		Agent: Agent{
+			MaxIterations: &maxIterations, StepTimeout: &stepTimeout,
+			Protocol: "auto", VirtualActions: &virtualActions,
+			Memory: &memoryOn, MemoryMax: &memoryMax,
+			ApprovalTimeout: &approvalTimeout,
 		},
 		Behavior: Behavior{
 			Private: ReplyAlways, Group: ReplyOnMention,
@@ -331,6 +373,26 @@ func (c *Config) Validate() error {
 	case "", ReplyAlways, ReplyNever, ReplyOnMention:
 	default:
 		add("behavior.group", "必须是 always / on_mention / never 之一，实际为 "+strconv.Quote(c.Behavior.Group))
+	}
+	switch c.Agent.Protocol {
+	case "", "native", "auto":
+	default:
+		add("agent.protocol", "必须是 native / auto 之一，实际为 "+strconv.Quote(c.Agent.Protocol))
+	}
+	if c.Agent.MaxIterations != nil && *c.Agent.MaxIterations <= 0 {
+		add("agent.max_iterations", "必须为正")
+	}
+	if c.Agent.StepTimeout != nil && c.Agent.StepTimeout.D <= 0 {
+		add("agent.step_timeout", "必须为正")
+	}
+	if c.Agent.ApprovalTimeout != nil && c.Agent.ApprovalTimeout.D <= 0 {
+		add("agent.approval_timeout", "必须为正")
+	}
+	if c.Agent.MemoryMax != nil && *c.Agent.MemoryMax < 1 {
+		add("agent.memory_max", "必须 >= 1")
+	}
+	if c.Agent.ApprovalEnabled && len(c.Agent.Allow) == 0 {
+		add("agent.allow", "启用审批但没有放行表时，所有工具都会等待审批；请至少列出只读工具")
 	}
 	if c.Behavior.SplitDelay != nil {
 		if c.Behavior.SplitDelay.D < 0 {

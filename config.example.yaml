@@ -35,6 +35,33 @@ llm:
   # 最多回灌多少条历史（一轮约两条）；存储层用高水位批量裁剪，避免每轮裁剪破坏前缀
   history_turns: 20
 
+agent:
+  # 开启后回复走 ReAct 循环（F-35），可调用工具；关闭则直连 LLM。
+  enabled: true
+  max_iterations: 10
+  # 单个工具的执行超时。注意：F-45 的人工审批等待占用**独立预算**，不计入这里。
+  step_timeout: 30s
+  # native：只消费 provider 原生的 tool_calls；
+  # auto：原生为主，模型把动作吐在文本里时用 F-39 的解析器抢救（见 ADR-0001）。
+  protocol: auto
+  # 注册 end_action / save_memory / noop 三个虚拟动作（F-40）。
+  virtual_actions: true
+  # 进程内长期记忆；F-48 的完整实现（持久化、向量召回）在 M3。
+  memory: true
+  memory_max: 64
+  # 要注册的内置工具（F-44）；留空表示全部注册。
+  # 可选：calculator / current_time / json_query / http_fetch / memory_save / memory_recall
+  tools: []
+  # F-45 权限闸门。**默认关闭**：权限表是 fail-closed 的，
+  # 没配好审批通道就打开会让所有未放行工具都被拒绝。
+  approval_enabled: false
+  # 启用审批时的放行表（工具 -> 角色）。角色：owner / admin / member / private。
+  # allow:
+  #   calculator: [member, private]
+  #   current_time: [member, private]
+  #   json_query: [member, private]
+  approval_timeout: 60s
+
 behavior:
   # 私聊策略：always / never
   private: always

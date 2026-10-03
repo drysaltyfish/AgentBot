@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/drysaltyfish/agentbot/internal/agent"
 	"github.com/drysaltyfish/agentbot/internal/bot"
 	"github.com/drysaltyfish/agentbot/internal/config"
 	"github.com/drysaltyfish/agentbot/internal/conversation"
@@ -27,6 +29,8 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/retry"
 	"github.com/drysaltyfish/agentbot/internal/router"
 	"github.com/drysaltyfish/agentbot/internal/session"
+	"github.com/drysaltyfish/agentbot/internal/tool"
+	"github.com/drysaltyfish/agentbot/internal/tool/builtin"
 	"github.com/drysaltyfish/agentbot/internal/transport"
 )
 
@@ -217,6 +221,121 @@ func llmTimeout(cfg *config.Config) time.Duration {
 	return 30 * time.Second
 }
 
+func intOr(p *int, fallback int) int {
+	if p != nil && *p > 0 {
+		return *p
+	}
+	return fallback
+}
+
+func boolOr(p *bool, fallback bool) bool {
+	if p != nil {
+		return *p
+	}
+	return fallback
+}
+
+func durationOr(p *config.Duration, fallback time.Duration) time.Duration {
+	if p != nil && p.D > 0 {
+		return p.D
+	}
+	return fallback
+}
+
+// agentRole 把平台上报的成员角色映射成 F-45 的权限角色。
+func agentRole(ev *event.Event) agent.Role {
+	if ev.GroupID == 0 {
+		return agent.RolePrivate
+	}
+	switch ev.Sender.Role {
+	case "owner":
+		return agent.RoleOwner
+	case "admin":
+		return agent.RoleAdmin
+	default:
+		return agent.RoleMember
+	}
+}
+
+// buildAgent 按配置装配 Agent（F-35 + F-41 + F-44 + F-45）。
+//
+// 返回的是 agent.Agent 接口：未启用 ReAct 时返回 DirectAgent，
+// 因此调用方对两条路径完全同形，不需要分支。
+func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, lg *observe.Logger) (agent.Agent, error) {
+	if !cfg.Agent.Enabled {
+		return &agent.DirectAgent{LLM: model, SystemPrompt: sysPrompt}, nil
+	}
+
+	registry := tool.New(tool.WithWarnFunc(func(msg string) {
+		lg.Component("tool").Warn(msg)
+	}))
+
+	var mem *agent.MemoryStore
+	if boolOr(cfg.Agent.Memory, true) {
+		mem = agent.NewMemoryStore(intOr(cfg.Agent.MemoryMax, 64))
+	}
+
+	// 内置工具：先全量注册再按配置裁剪，这样顺序始终等于内置顺序（前缀缓存需要稳定）。
+	deps := builtin.Deps{Memory: mem, HTTP: httpx.Defaults(), Now: time.Now}
+	if err := builtin.Register(registry, deps); err != nil {
+		return nil, fmt.Errorf("register builtin tools: %w", err)
+	}
+	if len(cfg.Agent.Tools) > 0 {
+		keep := map[string]bool{}
+		for _, n := range cfg.Agent.Tools {
+			keep[n] = true
+		}
+		for _, n := range registry.Names() {
+			if !keep[n] {
+				registry.Remove(n)
+			}
+		}
+	}
+
+	if boolOr(cfg.Agent.VirtualActions, true) {
+		if err := agent.RegisterVirtual(registry, mem); err != nil {
+			return nil, fmt.Errorf("register virtual actions: %w", err)
+		}
+	}
+
+	react := &agent.ReactAgent{
+		LLM:             model,
+		Tools:           registry,
+		SystemPrompt:    sysPrompt,
+		MaxIterations:   intOr(cfg.Agent.MaxIterations, agent.DefaultMaxIterations),
+		StepTimeout:     durationOr(cfg.Agent.StepTimeout, agent.DefaultStepTimeout),
+		Protocol:        agent.Protocol(strings.ToLower(strings.TrimSpace(cfg.Agent.Protocol))),
+		Memory:          mem,
+		ApprovalTimeout: durationOr(cfg.Agent.ApprovalTimeout, agent.DefaultApprovalTimeout),
+		Warn:            func(msg string) { lg.Component("agent").Warn(msg) },
+	}
+
+	if cfg.Agent.ApprovalEnabled {
+		gate := agent.NewTableGate()
+		for toolName, roles := range cfg.Agent.Allow {
+			for _, r := range roles {
+				gate.Set(toolName, agent.Role(r), agent.VerdictAllow)
+			}
+		}
+		react.Gate = gate
+		// M2 尚未接入交互式审批通道：未放行的调用会被明确拒绝并回灌原因，
+		// 而不是静默放行——这是 fail-closed 的正确表现。
+		react.Approver = agent.ApproverFunc(func(ctx context.Context, req agent.ApprovalRequest) (agent.Decision, error) {
+			return agent.Decision{}, fmt.Errorf("该部署未配置人工审批通道")
+		})
+		lg.Component("agent").Warn("tool approval is enabled but no interactive approver is wired; non-allowed calls will be denied")
+	}
+
+	lg.Component("agent").Info("react agent enabled",
+		"tools", registry.Names(),
+		"max_iterations", react.MaxIterations,
+		"protocol", string(react.Protocol),
+		"step_timeout", react.StepTimeout.String(),
+		"memory", mem != nil,
+		"approval", cfg.Agent.ApprovalEnabled)
+	return react, nil
+}
+
 // sendShape 描述回复的发送形态（是否按空行拆分、连发间隔、最多几条）。
 type sendShape struct {
 	splitOnBlank bool
@@ -246,6 +365,7 @@ type replyJob struct {
 	userID  int64
 	text    string
 	traceID string
+	role    agent.Role
 }
 
 // namedComponent 把裸函数适配成 bot.Component。
@@ -308,6 +428,13 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	lg.Component("llm").Info("cache-first layout pinned",
 		"prefix_hash", asm.PrefixHash(), "prefix_runes", len([]rune(sysPrompt)),
 		"history_items", histItems, "trim_high_water", histItems, "trim_low_water", histItems*3/4)
+
+	// Agent：启用时走 ReAct（带工具），否则是直连 LLM。调用方对两条路径同形。
+	brain, err := buildAgent(cfg, model, sysPrompt, lg)
+	if err != nil {
+		lifecycle.Error("cannot build agent", "error", err)
+		return 1
+	}
 
 	routes := router.NewRouter(router.WithWarnFunc(func(msg string) {
 		lg.Component("router").Warn(msg)
@@ -389,6 +516,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 				userID:  c.Event.UserID,
 				text:    text,
 				traceID: observe.TraceID(c),
+				role:    agentRole(c.Event),
 			}:
 			default:
 				inflight.Done()
@@ -410,7 +538,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 								lg.Component("reply").Error("worker panic", "panic", fmt.Sprint(rec))
 							}
 						}()
-						handleReply(ctx, lg, model, sender, sessions, asm, timeout, shape, j)
+						handleReply(ctx, lg, brain, sender, sessions, asm, timeout, shape, j)
 					}()
 				}
 			}
@@ -528,7 +656,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 //
 // 这里落实"缓存优先"：消息序列固定为 [不可变前缀] + [只追加历史] + [当前输入]，
 // 并记录 DeepSeek 返回的缓存命中计量，让命中率可观测、可回归。
-func handleReply(ctx context.Context, lg *observe.Logger, model llm.LLM, sender *outbound.Sender,
+func handleReply(ctx context.Context, lg *observe.Logger, brain agent.Agent, sender *outbound.Sender,
 	sessions *session.Manager, asm *conversation.Assembler, timeout time.Duration, shape sendShape, j replyJob) {
 	rlog := lg.Component("reply")
 	callCtx, cancel := context.WithTimeout(observe.WithTraceID(ctx, j.traceID), timeout)
@@ -542,15 +670,31 @@ func handleReply(ctx context.Context, lg *observe.Logger, model llm.LLM, sender 
 		rlog.Warn("cannot read history; falling back to a single turn", "error", err)
 	}
 
-	req := &llm.ChatRequest{Messages: asm.Build(items, j.text)}
-	resp, err := model.Chat(callCtx, req)
-	if err != nil {
-		rlog.Error("llm call failed", "error", err)
+	// 两条路径（ReAct / 直连）在调用方看完全同形。
+	// 走 ReAct 时，记忆的注入位置由 Agent 按 ADR-0002 处理（system 之后、历史之前）。
+	out, runErr := brain.Run(callCtx, agent.Input{
+		Query:      j.text,
+		History:    conversation.ToMessages(items),
+		SessionKey: j.key,
+		Role:       j.role,
+	})
+
+	// F-40：模型主动结束本轮。这**不是失败**，但也不发任何消息。
+	if errors.Is(runErr, agent.ErrEndOfTurn) {
+		if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindUser, Content: j.text}); err != nil {
+			rlog.Warn("cannot append user turn", "error", err)
+		}
+		rlog.Info("turn ended by end_action", "group_id", j.groupID, "user_id", j.userID)
 		return
 	}
-	reply := strings.TrimSpace(resp.Content)
+	if runErr != nil {
+		rlog.Error("agent run failed", "error", runErr, "steps", len(out.Steps))
+		return
+	}
+
+	reply := strings.TrimSpace(out.Text)
 	if reply == "" {
-		rlog.Warn("llm returned empty content", "reasoning_runes", len([]rune(resp.ReasoningContent)))
+		rlog.Warn("agent returned empty text", "steps", len(out.Steps), "finish_reason", out.FinishReason)
 		return
 	}
 
@@ -564,13 +708,14 @@ func handleReply(ctx context.Context, lg *observe.Logger, model llm.LLM, sender 
 
 	rlog.Info("llm call",
 		"prefix_hash", asm.PrefixHash(),
-		"messages", len(req.Messages),
-		"prompt_tokens", resp.Usage.PromptTokens,
-		"completion_tokens", resp.Usage.CompletionTokens,
-		"reasoning_tokens", resp.Usage.ReasoningTokens,
-		"cache_hit_tokens", resp.Usage.PromptCacheHitTokens,
-		"cache_miss_tokens", resp.Usage.PromptCacheMissTokens,
-		"cache_hit_ratio", fmt.Sprintf("%.1f%%", resp.Usage.CacheHitRatio()*100),
+		"steps", len(out.Steps),
+		"tool_calls", len(out.ToolCalls),
+		"prompt_tokens", out.Usage.PromptTokens,
+		"completion_tokens", out.Usage.CompletionTokens,
+		"reasoning_tokens", out.Usage.ReasoningTokens,
+		"cache_hit_tokens", out.Usage.PromptCacheHitTokens,
+		"cache_miss_tokens", out.Usage.PromptCacheMissTokens,
+		"cache_hit_ratio", fmt.Sprintf("%.1f%%", out.Usage.CacheHitRatio()*100),
 	)
 
 	target := outbound.PrivateTarget(j.userID)
@@ -595,9 +740,9 @@ func handleReply(ctx context.Context, lg *observe.Logger, model llm.LLM, sender 
 	// 每条讯息都带上它自己的缓存命中率：这是"缓存优先"是否生效的唯一客观指标。
 	rlog.Info("replied", "group_id", j.groupID, "user_id", j.userID,
 		"runes", len([]rune(reply)), "segments", len(parts),
-		"cache_hit_ratio", fmt.Sprintf("%.1f%%", resp.Usage.CacheHitRatio()*100),
-		"cache_hit_tokens", resp.Usage.PromptCacheHitTokens,
-		"cache_miss_tokens", resp.Usage.PromptCacheMissTokens)
+		"cache_hit_ratio", fmt.Sprintf("%.1f%%", out.Usage.CacheHitRatio()*100),
+		"cache_hit_tokens", out.Usage.PromptCacheHitTokens,
+		"cache_miss_tokens", out.Usage.PromptCacheMissTokens)
 }
 
 // segmentDetail 渲染非文本段的全部字段，用于确认平台真实载荷。

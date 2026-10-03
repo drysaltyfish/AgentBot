@@ -76,12 +76,22 @@ func (a *Assembler) Build(hist []history.Item, user string) []llm.Message {
 	items := trimHistory(hist, a.max)
 	out := make([]llm.Message, 0, len(items)+2)
 	out = append(out, llm.Message{Role: llm.RoleSystem, Content: a.prefix})
+	out = append(out, ToMessages(items)...)
+	out = append(out, llm.Message{Role: llm.RoleUser, Content: user})
+	return out
+}
+
+// ToMessages 把历史条目转成消息序列。
+//
+// 导出是因为走 ReAct 时组合根也要做同样的映射——映射规则必须只有一份，
+// 否则两条路径的历史形状会悄悄漂移，而历史形状又直接影响前缀缓存。
+func ToMessages(items []history.Item) []llm.Message {
+	out := make([]llm.Message, 0, len(items))
 	for _, it := range items {
 		if m, ok := toMessage(it); ok {
 			out = append(out, m)
 		}
 	}
-	out = append(out, llm.Message{Role: llm.RoleUser, Content: user})
 	return out
 }
 
