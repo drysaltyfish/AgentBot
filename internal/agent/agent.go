@@ -54,7 +54,12 @@ type Output struct {
 	Usage llm.Usage
 	// LLMCalls 是本次运行实际发生的 LLM 调用次数（ReAct 每轮一次）。
 	// 台账需要"请求数"而不是"步数"：步数把思考与动作分开计，不是请求数。
-	LLMCalls     int
+	LLMCalls int
+	// PromptDigest 是**最后一次调用**实际发送的消息序列的逐条指纹（F-89）。
+	//
+	// 只记指纹不记正文：正文可能含隐私，而前缀稳定性只需要判断"这一段是否相同"。
+	// 逐条指纹还让"分歧发生在哪一条"可以直接算出，而不是只知道整体不同。
+	PromptDigest []string
 	ToolCalls    []llm.ToolCall
 	FinishReason string
 }
@@ -98,6 +103,7 @@ func (a *DirectAgent) Run(ctx context.Context, in Input) (*Output, error) {
 	out.Text = resp.Content
 	out.Usage = resp.Usage
 	out.LLMCalls = 1
+	out.PromptDigest = llm.Digest(messages)
 	out.ToolCalls = resp.ToolCalls
 	out.FinishReason = resp.FinishReason
 	out.AddStep(Step{Type: StepThought, Content: resp.Content})

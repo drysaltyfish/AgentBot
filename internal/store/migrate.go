@@ -35,7 +35,7 @@ var schemaSQL = append([]string{
 		version INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL
 	)`,
-}, append(append(append(messagesSchema, sessionsSchema...), memoriesSchema...), pendingSchema...)...)
+}, append(append(append(append(messagesSchema, sessionsSchema...), memoriesSchema...), pendingSchema...), promptSnapshotSchema...)...)
 
 // columnSpec 描述一个声明式维护的列。
 type columnSpec struct {

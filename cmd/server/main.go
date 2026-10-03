@@ -464,6 +464,11 @@ func llmTimeout(cfg *config.Config) time.Duration {
 	return 30 * time.Second
 }
 
+// promptSnapshotKeep 是每个会话保留的提示词快照条数（F-89 的环形保留）。
+//
+// 200 轮足够回溯"前缀是从哪一轮开始不稳的"，而快照本身只存指纹，体积很小。
+const promptSnapshotKeep = 200
+
 func floatOr(p *float64, fallback float64) float64 {
 	if p != nil {
 		return *p
@@ -743,6 +748,17 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	}()
 	lg.Component("store").Info("persistence store is ready",
 		"path", st.Path(), "schema_version", store.SchemaVersion)
+
+	// F-89：提示词快照是**环形保留**的，启动时裁一次即可保证有界。
+	{
+		pruneCtx, cancelPrune := context.WithTimeout(context.Background(), 15*time.Second)
+		if n, perr := st.PrunePromptSnapshots(pruneCtx, promptSnapshotKeep); perr != nil {
+			lg.Component("store").Warn("cannot prune prompt snapshots", "error", perr)
+		} else if n > 0 {
+			lg.Component("store").Info("pruned old prompt snapshots", "count", n, "keep_per_session", promptSnapshotKeep)
+		}
+		cancelPrune()
+	}
 
 	histItems := historyTurns(cfg) * 2
 	// **存储**保留量远大于呈现窗口：否则 recall_history 只能返回已经出现在
@@ -1145,6 +1161,24 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 		})
 		if uerr != nil {
 			rlog.Warn("cannot record usage; metrics will be incomplete", "error", uerr)
+		}
+	}
+
+	// F-89：记录本轮实际发送的消息指纹，并判断前缀是否**意外**变化。
+	// 这是把"前缀为什么变了"从事后猜变成当场知道的那一步。
+	if p.store != nil && len(out.PromptDigest) > 0 {
+		snap, serr := p.store.RecordPromptSnapshot(callCtx, j.key.String(), out.PromptDigest)
+		switch {
+		case serr != nil:
+			rlog.Warn("cannot record prompt snapshot", "error", serr)
+		default:
+			rlog.Info("prompt snapshot", "relation", snap.Relation,
+				"messages", snap.MessageCount, "common_prefix", snap.CommonPrefix, "slid_by", snap.SlidBy)
+			if snap.Relation == llm.RelationDiverged {
+				// 追加与窗口滑动都不该报；报出来说明前缀被改写了（记忆变更、提示词变化等）。
+				rlog.Warn("prompt prefix diverged; prefix cache hits will drop for this session",
+					"common_prefix", snap.CommonPrefix, "messages", snap.MessageCount)
+			}
 		}
 	}
 
