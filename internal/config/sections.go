@@ -135,10 +135,14 @@ type Pricing struct {
 }
 
 type LLM struct {
-	Provider      string    `yaml:"provider"`
-	Model         string    `yaml:"model"`
-	BaseURL       string    `yaml:"base_url"`
-	APIKey        *string   `yaml:"api_key"`
+	Provider string  `yaml:"provider"`
+	Model    string  `yaml:"model"`
+	BaseURL  string  `yaml:"base_url"`
+	APIKey   *string `yaml:"api_key"`
+	// APIKeyEnv 是优先读取的环境变量名（F-61 的第一优先级）。
+	APIKeyEnv *string `yaml:"api_key_env"`
+	// APIKeyFile 是密钥文件路径（第二优先级）；Unix 下要求 0600，不合规只告警。
+	APIKeyFile    *string   `yaml:"api_key_file"`
 	Timeout       *Duration `yaml:"timeout"`
 	MaxIterations *int      `yaml:"max_iterations"`
 
