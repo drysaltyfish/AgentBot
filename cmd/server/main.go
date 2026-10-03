@@ -575,6 +575,13 @@ func llmTimeout(cfg *config.Config) time.Duration {
 // 200 轮足够回溯"前缀是从哪一轮开始不稳的"，而快照本身只存指纹，体积很小。
 const promptSnapshotKeep = 200
 
+func int64Or(p *int64, fallback int64) int64 {
+	if p != nil {
+		return *p
+	}
+	return fallback
+}
+
 func floatOr(p *float64, fallback float64) float64 {
 	if p != nil {
 		return *p
@@ -824,6 +831,8 @@ type replyJob struct {
 	// 它们**不进正文**：正文保持干净，标签在装配时渲染（见 history.Item.RenderText）。
 	speakerID   int64
 	speakerName string
+	// shouldReply 由规则层判定；为 false 时只记录不回复。
+	shouldReply bool
 	// message 是原始消息：引用解析要在 worker 里做，sink 里调 API 会死锁。
 	message event.Message
 	// caller 用于调用平台 API（get_msg）。
@@ -968,6 +977,10 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		sysPrompt = agent.ComposeSystemPrompt(sysPrompt,
 			agent.ProactiveMemoryInstruction(cfg.Agent.ProactiveMemory.Instruction))
 	}
+	// 自我介绍：模型必须知道自己是哪个号，否则认不出别人在 @ 它。
+	if ident := agent.SelfIdentity(int64Or(cfg.Transport.SelfID, 0), ""); ident != "" {
+		sysPrompt = agent.ComposeSystemPrompt(sysPrompt, ident)
+	}
 	// 工具使用提示：被引用内容只有一句，很久远时缺上下文——
 	// 告诉模型它可以用 recall_history 回溯，否则它不会想到这个手段。
 	if cfg.Agent.Enabled && boolOr(cfg.Agent.ToolHint.Enabled, true) {
@@ -1095,9 +1108,11 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		store: st, price: price, quoted: quoted,
 	}
 
-	// 回复策略来自配置：私聊 always/never，群聊 always/on_mention/never（见 behavior）。
-	routes.OnMessage(replyRule(cfg)).
-		Named("reply").
+	// **所有**消息都入队：群里没被 @ 的内容也是上下文。
+	// 否则历史里只有"被叫到时的那一句"，模型对群里发生过什么一片空白。
+	// 是否回复由 worker 按 behavior 判定（私聊 always/never，群聊 always/on_mention/never）。
+	routes.OnMessage(router.Always()).
+		Named("record-and-reply").
 		Priority(router.PriorityNormal).
 		Handle(func(c *router.Ctx) {
 			// 用 Summary 而不是 PlainText：纯表情/纯图片消息也要能被回复，
@@ -1109,12 +1124,14 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 			inflight.Add(1)
 			select {
 			case jobs <- replyJob{
-				key:         sessions.KeyFor(c.Event.SelfID, c.Event.GroupID, c.Event.UserID),
-				groupID:     c.Event.GroupID,
-				userID:      c.Event.UserID,
-				text:        text,
-				traceID:     observe.TraceID(c),
-				role:        agentRole(c.Event),
+				key:     sessions.KeyFor(c.Event.SelfID, c.Event.GroupID, c.Event.UserID),
+				groupID: c.Event.GroupID,
+				userID:  c.Event.UserID,
+				text:    text,
+				traceID: observe.TraceID(c),
+				role:    agentRole(c.Event),
+				// 规则在这里求值：路由已放行全部消息，是否回复由这里决定。
+				shouldReply: replyRule(cfg)(c),
 				speakerID:   groupScopedUserID(c.Event.UserID, c.Event.GroupID),
 				speakerName: speakerDisplayName(c.Event.Sender, c.Event.GroupID),
 				message:     c.Event.Message,
@@ -1315,10 +1332,26 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 	//nolint:contextcheck // 会话回收时的在途收尾走后台 ctx，与本次请求的生命周期无关
 	sess := p.sessions.GetOrCreate(j.key)
 	histKey := j.key.String()
+
+	// **先记录**：无论是否回复，这条消息都是后续对话的上下文。
+	// 群里绝大多数消息不会被 @，但它们构成了模型理解"刚才在聊什么"的全部依据。
+	if err := sess.Hist.Append(callCtx, histKey, turn); err != nil {
+		rlog.Warn("cannot append user turn", "error", err)
+	}
+	if !j.shouldReply {
+		rlog.Debug("message recorded without replying",
+			"group_id", j.groupID, "user_id", j.userID)
+		return
+	}
+
 	items, err := sess.Hist.Messages(callCtx, histKey)
 	if err != nil {
 		// 读不到历史不该拒绝服务：退化成单轮，但要留下痕迹。
 		rlog.Warn("cannot read history; falling back to a single turn", "error", err)
+	}
+	// 当前这条已经在历史里；取出来单独作为 Query，避免同一句在提示词里出现两次。
+	if n := len(items); n > 0 {
+		items = items[:n-1]
 	}
 
 	// 两条路径（ReAct / 直连）在调用方看完全同形。
@@ -1379,9 +1412,6 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 
 	// F-40：模型主动结束本轮。这**不是失败**，但也不发任何消息。
 	if errors.Is(runErr, agent.ErrEndOfTurn) {
-		if err := sess.Hist.Append(callCtx, histKey, turn); err != nil {
-			rlog.Warn("cannot append user turn", "error", err)
-		}
 		rlog.Info("turn ended by end_action", "group_id", j.groupID, "user_id", j.userID)
 		return
 	}
@@ -1397,9 +1427,7 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 	}
 
 	// 只追加、绝不改写：这是下一轮还能命中前缀缓存的前提。
-	if err := sess.Hist.Append(callCtx, histKey, turn); err != nil {
-		rlog.Warn("cannot append user turn", "error", err)
-	}
+	// 用户那一轮已在开头记录，这里只补助手回复。
 	if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindAssistant, Content: reply}); err != nil {
 		rlog.Warn("cannot append assistant turn", "error", err)
 	}
