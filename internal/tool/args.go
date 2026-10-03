@@ -91,7 +91,7 @@ func parseArgs[T any](raw json.RawMessage, strict bool) (T, error) {
 		rawVal, present := fields[name]
 		if !present || isJSONNull(rawVal) {
 			if def != "" {
-				if err := setField(rv.Field(i), json.RawMessage(def)); err != nil {
+				if err := setField(rv.Field(i), defaultLiteral(sf.Type.Kind(), def)); err != nil {
 					problems = append(problems, &ArgError{Field: name, Rule: "default=" + def, Got: def})
 				}
 				continue
@@ -156,6 +156,20 @@ func parseArgTag(sf reflect.StructField) (name string, required bool, enum []str
 		}
 	}
 	return name, required, enum, def, false
+}
+
+// defaultLiteral 把 tag 里的默认值转成合法的 JSON 字面量。
+//
+// 关键：字符串字段的默认值必须加引号。直接把 default=rfc3339 当 JSON 会解析失败，
+// 表现为"只要写了字符串默认值就报参数错误"——这个 bug 是被 builtin 的测试抓出来的。
+func defaultLiteral(k reflect.Kind, def string) json.RawMessage {
+	if k == reflect.String {
+		b, err := json.Marshal(def)
+		if err == nil {
+			return b
+		}
+	}
+	return json.RawMessage(def)
 }
 
 // setField 赋值；失败时先尝试宽松转换。
