@@ -1,6 +1,9 @@
 package agent
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // DefaultProactiveMemoryInstruction 是要求模型主动保存长期记忆的系统提示词片段。
 //
@@ -49,4 +52,22 @@ func ToolUsageInstruction(custom string) string {
 		return s
 	}
 	return DefaultToolUsageInstruction
+}
+
+// SelfIdentity 生成"你是谁"的说明，让模型能认出 @ 自己。
+//
+// 缺了它，模型看到 "@10001" 只会当成一串陌生数字——
+// 表现为"它不知道别人在叫它"，也不会意识到那是自己的话。
+func SelfIdentity(selfID int64, nickname string) string {
+	if selfID <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "你的 QQ 号是 %d。", selfID)
+	if n := strings.TrimSpace(nickname); n != "" {
+		fmt.Fprintf(&b, "你在群里的昵称是「%s」。", n)
+	}
+	fmt.Fprintf(&b, "消息里出现 @%d、或有人引用你的话，都是在跟你说话；", selfID)
+	fmt.Fprintf(&b, "看到 %d 这个号说话，那是你自己刚才说的。", selfID)
+	return b.String()
 }
