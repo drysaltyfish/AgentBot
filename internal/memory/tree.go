@@ -437,7 +437,7 @@ func (t *SummaryTree) cluster(local map[int64]*SummaryNode, current []int64) [][
 func commitLevel(local map[int64]*SummaryNode, byLevel map[int][]int64, nextID *int64, level int, pending []*SummaryNode) []int64 {
 	ids := make([]int64, 0, len(pending))
 	for _, n := range pending {
-		*nextID = *nextID + 1
+		*nextID++
 		n.ID = *nextID
 		for _, cid := range n.Children {
 			if child, ok := local[cid]; ok {

@@ -58,7 +58,7 @@ func askOnce(t *testing.T, c *Cache, calls *int, question, fingerprint string) s
 	if ans, ok := c.Get(question, fingerprint); ok {
 		return ans
 	}
-	*calls = *calls + 1
+	*calls++
 	ans := "answer:" + question
 	c.Put(question, fingerprint, ans)
 	return ans
