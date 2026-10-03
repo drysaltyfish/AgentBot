@@ -261,9 +261,9 @@ func agentRole(ev *event.Event) agent.Role {
 //
 // 返回的是 agent.Agent 接口：未启用 ReAct 时返回 DirectAgent，
 // 因此调用方对两条路径完全同形，不需要分支。
-func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist history.History, lg *observe.Logger) (agent.Agent, error) {
+func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist history.History, lg *observe.Logger) (agent.Agent, agent.Memory, error) {
 	if !cfg.Agent.Enabled {
-		return &agent.DirectAgent{LLM: model, SystemPrompt: sysPrompt}, nil
+		return &agent.DirectAgent{LLM: model, SystemPrompt: sysPrompt}, nil, nil
 	}
 
 	registry := tool.New(tool.WithWarnFunc(func(msg string) {
@@ -292,7 +292,7 @@ func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist histor
 	// 内置工具：先全量注册再按配置裁剪，这样顺序始终等于内置顺序（前缀缓存需要稳定）。
 	deps := builtin.Deps{Memory: mem, HTTP: httpx.Defaults(), Now: time.Now, History: hist}
 	if err := builtin.Register(registry, deps); err != nil {
-		return nil, fmt.Errorf("register builtin tools: %w", err)
+		return nil, nil, fmt.Errorf("register builtin tools: %w", err)
 	}
 	if len(cfg.Agent.Tools) > 0 {
 		keep := map[string]bool{}
@@ -308,7 +308,7 @@ func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist histor
 
 	if boolOr(cfg.Agent.VirtualActions, true) {
 		if err := agent.RegisterVirtual(registry, mem); err != nil {
-			return nil, fmt.Errorf("register virtual actions: %w", err)
+			return nil, nil, fmt.Errorf("register virtual actions: %w", err)
 		}
 	}
 
@@ -349,7 +349,22 @@ func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist histor
 		"memory_file", strings.TrimSpace(cfg.Agent.MemoryFile),
 		"history_file", strings.TrimSpace(cfg.History.File),
 		"approval", cfg.Agent.ApprovalEnabled)
-	return react, nil
+	return react, mem, nil
+}
+
+// replyPipeline 收拢回复链路的依赖。
+//
+// 收成一个结构体是因为参数已经涨到九个——继续加下去，调用点会变成一长串位置参数，
+// 既容易传错顺序，也让"这条链路到底依赖什么"看不清楚。
+type replyPipeline struct {
+	brain    agent.Agent
+	sender   *outbound.Sender
+	sessions *session.Manager
+	asm      *conversation.Assembler
+	memory   agent.Memory
+	autoMem  *agent.MemoryCommand
+	timeout  time.Duration
+	shape    sendShape
 }
 
 // sendShape 描述回复的发送形态（是否按空行拆分、连发间隔、最多几条）。
@@ -467,7 +482,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		"history_items", histItems, "trim_high_water", histItems, "trim_low_water", histItems*3/4)
 
 	// Agent：启用时走 ReAct（带工具），否则是直连 LLM。调用方对两条路径同形。
-	brain, err := buildAgent(cfg, model, sysPrompt, hist, lg)
+	brain, mem, err := buildAgent(cfg, model, sysPrompt, hist, lg)
 	if err != nil {
 		lifecycle.Error("cannot build agent", "error", err)
 		return 1
@@ -534,6 +549,19 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		}),
 	)
 
+	// F-48 的规则触发：用户说"记住：xxx"时自动写入记忆，不依赖模型是否调工具。
+	var autoMem *agent.MemoryCommand
+	if boolOr(cfg.Agent.AutoMemory.Enabled, true) {
+		autoMem = agent.NewMemoryCommand(cfg.Agent.AutoMemory.Triggers)
+		lg.Component("agent").Info("explicit memory commands are auto-saved",
+			"triggers", autoMem.Triggers())
+	}
+
+	pipeline := replyPipeline{
+		brain: brain, sender: sender, sessions: sessions, asm: asm,
+		memory: mem, autoMem: autoMem, timeout: timeout, shape: shape,
+	}
+
 	// 回复策略来自配置：私聊 always/never，群聊 always/on_mention/never（见 behavior）。
 	routes.OnMessage(replyRule(cfg)).
 		Named("reply").
@@ -575,7 +603,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 								lg.Component("reply").Error("worker panic", "panic", fmt.Sprint(rec))
 							}
 						}()
-						handleReply(ctx, lg, brain, sender, sessions, asm, timeout, shape, j)
+						handleReply(ctx, lg, pipeline, j)
 					}()
 				}
 			}
@@ -693,13 +721,25 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 //
 // 这里落实"缓存优先"：消息序列固定为 [不可变前缀] + [只追加历史] + [当前输入]，
 // 并记录 DeepSeek 返回的缓存命中计量，让命中率可观测、可回归。
-func handleReply(ctx context.Context, lg *observe.Logger, brain agent.Agent, sender *outbound.Sender,
-	sessions *session.Manager, asm *conversation.Assembler, timeout time.Duration, shape sendShape, j replyJob) {
+func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j replyJob) {
 	rlog := lg.Component("reply")
-	callCtx, cancel := context.WithTimeout(observe.WithTraceID(ctx, j.traceID), timeout)
+	callCtx, cancel := context.WithTimeout(observe.WithTraceID(ctx, j.traceID), p.timeout)
 	defer cancel()
 
-	sess := sessions.GetOrCreate(j.key)
+	// F-48 的规则触发：显式说"记住：xxx"时无条件写入，不取决于模型是否调用工具。
+	// 写在跑模型之前，因此这一轮的提示词里就已经带上它。
+	if p.autoMem != nil && p.memory != nil {
+		if fact, ok := p.autoMem.Extract(j.text); ok {
+			saveCtx := agent.WithMemoryScope(callCtx, j.key.String())
+			if err := p.memory.Save(saveCtx, fact); err != nil {
+				rlog.Warn("auto memory save failed", "error", err, "runes", len([]rune(fact)))
+			} else {
+				rlog.Info("memory auto-saved from an explicit command", "runes", len([]rune(fact)))
+			}
+		}
+	}
+
+	sess := p.sessions.GetOrCreate(j.key)
 	histKey := j.key.String()
 	items, err := sess.Hist.Messages(callCtx, histKey)
 	if err != nil {
@@ -709,7 +749,7 @@ func handleReply(ctx context.Context, lg *observe.Logger, brain agent.Agent, sen
 
 	// 两条路径（ReAct / 直连）在调用方看完全同形。
 	// 走 ReAct 时，记忆的注入位置由 Agent 按 ADR-0002 处理（system 之后、历史之前）。
-	out, runErr := brain.Run(callCtx, agent.Input{
+	out, runErr := p.brain.Run(callCtx, agent.Input{
 		Query:      j.text,
 		History:    conversation.ToMessages(items),
 		SessionKey: j.key,
@@ -744,7 +784,7 @@ func handleReply(ctx context.Context, lg *observe.Logger, brain agent.Agent, sen
 	}
 
 	rlog.Info("llm call",
-		"prefix_hash", asm.PrefixHash(),
+		"prefix_hash", p.asm.PrefixHash(),
 		"steps", len(out.Steps),
 		"tool_calls", len(out.ToolCalls),
 		"tools", toolNames(out.ToolCalls),
@@ -763,14 +803,14 @@ func handleReply(ctx context.Context, lg *observe.Logger, brain agent.Agent, sen
 
 	// 真人是一条一条发的：按空行拆成多条分别发送，而不是一整块砸过去。
 	parts := []string{reply}
-	if shape.splitOnBlank {
-		parts = outbound.SplitParagraphs(reply, shape.maxSegments)
+	if p.shape.splitOnBlank {
+		parts = outbound.SplitParagraphs(reply, p.shape.maxSegments)
 	}
 	if len(parts) == 0 {
 		rlog.Warn("reply became empty after splitting")
 		return
 	}
-	sent, err := sender.SendMany(callCtx, target, parts, shape.delay)
+	sent, err := p.sender.SendMany(callCtx, target, parts, p.shape.delay)
 	if err != nil {
 		rlog.Error("send failed", "error", err, "sent", sent, "segments", len(parts))
 		return
