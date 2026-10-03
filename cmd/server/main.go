@@ -740,6 +740,7 @@ type replyPipeline struct {
 	autoMem  *agent.MemoryCommand
 	store    *store.Store
 	price    llm.Price
+	quoted   *quotedResolver
 	timeout  time.Duration
 	shape    sendShape
 }
@@ -774,6 +775,10 @@ type replyJob struct {
 	text    string
 	traceID string
 	role    agent.Role
+	// message 是原始消息：引用解析要在 worker 里做，sink 里调 API 会死锁。
+	message event.Message
+	// caller 用于调用平台 API（get_msg）。
+	caller transport.Caller
 }
 
 // namedComponent 把裸函数适配成 bot.Component。
@@ -1022,10 +1027,13 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		lg.Component("llm").Info("pricing is not configured; cost stays 0 (token usage is still recorded)")
 	}
 
+	// F-84：引用消息的内容要查一次平台 API；解析在 worker 里做，见 handleReply。
+	quoted := newQuotedResolver()
+
 	pipeline := replyPipeline{
 		brain: brain, sender: sender, sessions: sessions, asm: asm,
 		memory: mem, autoMem: autoMem, timeout: timeout, shape: shape,
-		store: st, price: price,
+		store: st, price: price, quoted: quoted,
 	}
 
 	// 回复策略来自配置：私聊 always/never，群聊 always/on_mention/never（见 behavior）。
@@ -1048,6 +1056,8 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 				text:    text,
 				traceID: observe.TraceID(c),
 				role:    agentRole(c.Event),
+				message: c.Event.Message,
+				caller:  c.Caller(),
 			}:
 			default:
 				inflight.Done()
@@ -1076,7 +1086,6 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		})
 	}
 
-	quoted := newQuotedResolver()
 	sink := func(raw []byte, caller transport.Caller) {
 		ev := event.NewEvent(raw)
 		tlog := lg.Component("transport")
@@ -1096,19 +1105,9 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		if detail := segmentDetail(ev.Message); detail != "" {
 			tlog.Debug("non-text segment fields", "detail", detail)
 		}
-		// 引用解析：OneBot 只给被引用消息的 id，内容必须查一次。
-		if ids := ev.Message.ReplyIDs(); len(ids) > 0 {
-			qctx, cancelQuote := context.WithTimeout(listenCtx, 5*time.Second)
-			filled := quoted.resolve(qctx, caller, ev.Message)
-			cancelQuote()
-			if filled < len(ids) {
-				// 解析不全必须可见：这正是"看不懂你在回哪句"的现场证据。
-				tlog.Warn("could not resolve every quoted message",
-					"quoted", len(ids), "resolved", filled, "summary", ev.Message.Summary())
-			} else {
-				tlog.Debug("quoted messages resolved", "count", filled, "summary", ev.Message.Summary())
-			}
-		}
+		// 注意：**不能在 sink 里调用平台 API**。Listen 读完帧后是同步调用 sink 的，
+		// 而 API 的响应也只能由同一个读循环读回来——在这里 Call 必然死锁。
+		// 引用解析因此放在回复 worker 里做（见 handleReply）。
 		// F-15：会话级临时路由优先于常规路由。命中即消费，不再进入常规路由——
 		// 否则 Await 等待的那条消息会同时被常规路由处理一遍。
 		//nolint:contextcheck // Offer 只在过期清理时做后台收尾，事件循环本身没有请求 ctx
@@ -1219,6 +1218,25 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 			}
 			// 标记本轮已捕获：模型随后若再调 save_memory，会被告知无需重复保存。
 			callCtx = agent.WithMemoryCaptured(callCtx)
+		}
+	}
+
+	// F-84 的引用解析放在这里：worker 是独立 goroutine，不会卡住传输层的读循环。
+	if ids := j.message.ReplyIDs(); len(ids) > 0 {
+		if p.quoted != nil && j.caller != nil {
+			qctx, cancelQuote := context.WithTimeout(callCtx, 8*time.Second)
+			filled := p.quoted.resolve(qctx, j.caller, j.message)
+			cancelQuote()
+			if filled < len(ids) {
+				rlog.Warn("could not resolve every quoted message",
+					"quoted", len(ids), "resolved", filled, "summary", j.message.Summary())
+			} else {
+				rlog.Info("quoted messages resolved", "count", filled)
+			}
+			// 解析后重算：被引用的内容现在进入了这一轮的输入。
+			if resolved := strings.TrimSpace(j.message.Summary()); resolved != "" {
+				j.text = resolved
+			}
 		}
 	}
 
