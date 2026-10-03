@@ -120,7 +120,10 @@ func (a *ReactAgent) Run(ctx context.Context, in Input) (*Output, error) {
 		}
 		out.Usage = addUsage(out.Usage, resp.Usage)
 		out.LLMCalls++
-		out.PromptDigest = llm.Digest(messages)
+		// 只记第一次：那才是"这一轮的输入"，跨轮可比。
+		if out.PromptDigest == nil {
+			out.PromptDigest = llm.Digest(messages)
+		}
 
 		calls := resp.ToolCalls
 		if len(calls) == 0 {

@@ -88,7 +88,14 @@ func (m Message) Summary() string {
 		case TypeFace:
 			b.WriteString(placeholder("表情", faceLabel(seg)))
 		case TypeReply:
-			b.WriteString("[回复]")
+			// 被引用的内容由上层解析后写回 data["text"]（见 SetReplyText）。
+			// 没有解析到就退回占位符——**宁可显示"有引用但不知道内容"，
+			// 也不要假装引用不存在**：那会让模型误以为对方只是随口一说。
+			if quoted := strings.TrimSpace(seg.Data["text"]); quoted != "" {
+				b.WriteString("[回复 " + quoted + "]")
+			} else {
+				b.WriteString("[回复]")
+			}
 		case TypeRecord:
 			b.WriteString("[语音]")
 		case TypeVideo:
@@ -389,4 +396,37 @@ func isBase64ish(v string) bool {
 		}
 	}
 	return true
+}
+
+// ReplyIDs 返回消息里引用段的被引用消息 id（按出现顺序）。
+func (m Message) ReplyIDs() []string {
+	var out []string
+	for _, seg := range m {
+		if seg.Type == TypeReply && seg.Data["id"] != "" {
+			out = append(out, seg.Data["id"])
+		}
+	}
+	return out
+}
+
+// SetReplyText 把解析出的被引用内容写回对应的引用段（原地修改）。
+//
+// 就地修改而不是另建结构：Summary()、规则、历史记录都会读同一份 Message，
+// 只有一处写、处处可见，才不会出现"日志里有、提示词里没有"这类不一致。
+// 返回被填充的段数。
+func (m Message) SetReplyText(id, text string) int {
+	if id == "" || strings.TrimSpace(text) == "" {
+		return 0
+	}
+	n := 0
+	for i := range m {
+		if m[i].Type == TypeReply && m[i].Data["id"] == id {
+			if m[i].Data == nil {
+				m[i].Data = map[string]string{}
+			}
+			m[i].Data["text"] = strings.TrimSpace(text)
+			n++
+		}
+	}
+	return n
 }

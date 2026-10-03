@@ -151,6 +151,7 @@ var promptSnapshotSchema = []string{
 		session_key   TEXT    NOT NULL,
 		seq           INTEGER NOT NULL,
 		digest        TEXT    NOT NULL,
+		memory_digest TEXT    NOT NULL DEFAULT '',
 		message_count INTEGER NOT NULL DEFAULT 0,
 		relation      TEXT    NOT NULL DEFAULT '',
 		common_prefix INTEGER NOT NULL DEFAULT 0,
@@ -159,4 +160,8 @@ var promptSnapshotSchema = []string{
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_snapshots_session_seq
 		ON prompt_snapshots(session_key, seq)`,
+}
+
+var promptSnapshotColumns = []columnSpec{
+	{Table: "prompt_snapshots", Name: "memory_digest", DDL: "memory_digest TEXT NOT NULL DEFAULT ''"},
 }
