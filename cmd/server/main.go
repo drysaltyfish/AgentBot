@@ -172,6 +172,91 @@ func runStats(cfg *config.Config, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// quotedResolver 解析引用消息的内容（QQ 的"回复"功能）。
+//
+// 为什么需要它：OneBot 的 reply 段只给一个 message_id，**被引用的内容不在事件里**。
+// 不解析的话，模型只看到 "[回复]"，根本不知道对方在回哪句话——
+// 表现为"机器人看不懂我在回复它过去的话"。
+//
+// 缓存：同一条消息常被反复引用，缓存能省掉绝大部分 get_msg；
+// TTL：消息可以被撤回，缓存过期后重新解析，避免长期显示已撤回的内容。
+type quotedResolver struct {
+	mu    sync.Mutex
+	cache map[string]quotedEntry
+}
+
+type quotedEntry struct {
+	text string
+	at   time.Time
+}
+
+// quotedCacheTTL 是引用解析结果的缓存时长。
+const quotedCacheTTL = 10 * time.Minute
+
+func newQuotedResolver() *quotedResolver {
+	return &quotedResolver{cache: map[string]quotedEntry{}}
+}
+
+// resolve 把消息里所有引用段的内容填好，返回成功填充的段数。
+//
+// 失败**不阻断**消息处理：解析不到就保留 "[回复]" 占位符并告警，
+// 宁可信息少一点，也不能因为一次 API 调用失败就丢掉整条消息。
+func (r *quotedResolver) resolve(ctx context.Context, caller transport.Caller, msg event.Message) int {
+	ids := msg.ReplyIDs()
+	if len(ids) == 0 {
+		return 0
+	}
+	filled := 0
+	for _, id := range ids {
+		text, ok := r.lookup(id)
+		if !ok {
+			var err error
+			text, err = transport.GetMsgText(ctx, caller, id)
+			if err != nil {
+				// 调用方负责记日志；这里只保证不阻断。
+				continue
+			}
+			if text == "" {
+				continue
+			}
+			r.store(id, text)
+		}
+		filled += msg.SetReplyText(id, text)
+	}
+	return filled
+}
+
+func (r *quotedResolver) lookup(id string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.cache[id]
+	if !ok || time.Since(e.at) > quotedCacheTTL {
+		return "", false
+	}
+	return e.text, true
+}
+
+func (r *quotedResolver) store(id, text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// 有界：引用解析是热路径，缓存不能无界增长。
+	const maxEntries = 512
+	if len(r.cache) >= maxEntries {
+		for k, e := range r.cache {
+			if time.Since(e.at) > quotedCacheTTL {
+				delete(r.cache, k)
+			}
+		}
+		if len(r.cache) >= maxEntries {
+			for k := range r.cache {
+				delete(r.cache, k)
+				break
+			}
+		}
+	}
+	r.cache[id] = quotedEntry{text: text, at: time.Now()}
+}
+
 // pendingStoreAdapter 把持久层适配成会话层的在途记录接口（F-86）。
 //
 // 中间隔一层是因为会话层不该知道 SQL 长什么样：它只需要"存一条等待 / 结束一条等待"。
@@ -991,6 +1076,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		})
 	}
 
+	quoted := newQuotedResolver()
 	sink := func(raw []byte, caller transport.Caller) {
 		ev := event.NewEvent(raw)
 		tlog := lg.Component("transport")
@@ -1009,6 +1095,19 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 			"segments", segmentTypes(ev.Message), "summary", ev.Message.Summary())
 		if detail := segmentDetail(ev.Message); detail != "" {
 			tlog.Debug("non-text segment fields", "detail", detail)
+		}
+		// 引用解析：OneBot 只给被引用消息的 id，内容必须查一次。
+		if ids := ev.Message.ReplyIDs(); len(ids) > 0 {
+			qctx, cancelQuote := context.WithTimeout(listenCtx, 5*time.Second)
+			filled := quoted.resolve(qctx, caller, ev.Message)
+			cancelQuote()
+			if filled < len(ids) {
+				// 解析不全必须可见：这正是"看不懂你在回哪句"的现场证据。
+				tlog.Warn("could not resolve every quoted message",
+					"quoted", len(ids), "resolved", filled, "summary", ev.Message.Summary())
+			} else {
+				tlog.Debug("quoted messages resolved", "count", filled, "summary", ev.Message.Summary())
+			}
 		}
 		// F-15：会话级临时路由优先于常规路由。命中即消费，不再进入常规路由——
 		// 否则 Await 等待的那条消息会同时被常规路由处理一遍。
@@ -1167,16 +1266,22 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 	// F-89：记录本轮实际发送的消息指纹，并判断前缀是否**意外**变化。
 	// 这是把"前缀为什么变了"从事后猜变成当场知道的那一步。
 	if p.store != nil && len(out.PromptDigest) > 0 {
-		snap, serr := p.store.RecordPromptSnapshot(callCtx, j.key.String(), out.PromptDigest)
+		snap, serr := p.store.RecordPromptSnapshot(callCtx, j.key.String(), out.PromptDigest, out.MemoryDigest)
 		switch {
 		case serr != nil:
 			rlog.Warn("cannot record prompt snapshot", "error", serr)
 		default:
 			rlog.Info("prompt snapshot", "relation", snap.Relation,
 				"messages", snap.MessageCount, "common_prefix", snap.CommonPrefix, "slid_by", snap.SlidBy)
-			if snap.Relation == llm.RelationDiverged {
-				// 追加与窗口滑动都不该报；报出来说明前缀被改写了（记忆变更、提示词变化等）。
-				rlog.Warn("prompt prefix diverged; prefix cache hits will drop for this session",
+			switch snap.Relation {
+			case store.RelationMemoryChanged:
+				// 记忆块变了：这是 ADR-0002 接受的代价，只需要知道"代价发生在这里"，
+				// 不该当成异常告警——否则告警会一直响，等于没有告警。
+				rlog.Info("prompt prefix changed because the memory block changed",
+					"common_prefix", snap.CommonPrefix, "messages", snap.MessageCount)
+			case llm.RelationDiverged:
+				// 既不是追加、不是窗口滑动、也不是记忆变更：前缀被改写了，这才值得报。
+				rlog.Warn("prompt prefix diverged unexpectedly; prefix cache hits will drop",
 					"common_prefix", snap.CommonPrefix, "messages", snap.MessageCount)
 			}
 		}

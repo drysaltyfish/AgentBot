@@ -19,7 +19,10 @@ type PromptSnapshot struct {
 	Digest string
 	// MessageCount 是本轮发送的消息条数。
 	MessageCount int64
-	// Relation 是与上一条快照的关系：identical / extended / slid / diverged。
+	// MemoryDigest 是本轮记忆块的指纹（无记忆时为空）。
+	MemoryDigest string
+	// Relation 是与上一条快照的关系：
+	// identical / extended / slid / memory_changed / diverged。
 	Relation string
 	// CommonPrefix 是与上一条从头相同的条数。
 	CommonPrefix int64
@@ -32,28 +35,35 @@ type PromptSnapshot struct {
 //
 // 比较结果**落库**：只记录指纹而不记录"和上一条比怎么样了"，事后就没法回答
 // "前缀是从哪一轮开始不稳的"。
-func (s *Store) RecordPromptSnapshot(ctx context.Context, sessionKey string, digest []string) (PromptSnapshot, error) {
+func (s *Store) RecordPromptSnapshot(ctx context.Context, sessionKey string, digest []string, memoryDigest string) (PromptSnapshot, error) {
 	if strings.TrimSpace(sessionKey) == "" {
 		return PromptSnapshot{}, fmt.Errorf("record prompt snapshot: session key must not be empty")
 	}
 	encoded := strings.Join(digest, ",")
-	snap := PromptSnapshot{SessionKey: sessionKey, Digest: encoded, MessageCount: int64(len(digest))}
+	snap := PromptSnapshot{
+		SessionKey: sessionKey, Digest: encoded,
+		MessageCount: int64(len(digest)), MemoryDigest: memoryDigest,
+	}
 
 	err := s.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		snap = PromptSnapshot{SessionKey: sessionKey, Digest: encoded, MessageCount: int64(len(digest))}
+		snap = PromptSnapshot{
+			SessionKey: sessionKey, Digest: encoded,
+			MessageCount: int64(len(digest)), MemoryDigest: memoryDigest,
+		}
 
 		var (
-			prevSeq    int64
-			prevDigest string
+			prevSeq       int64
+			prevDigest    string
+			prevMemDigest string
 		)
 		err := tx.QueryRowContext(ctx,
-			`SELECT seq, digest FROM prompt_snapshots WHERE session_key = ?
-			 ORDER BY seq DESC LIMIT 1`, sessionKey).Scan(&prevSeq, &prevDigest)
+			`SELECT seq, digest, memory_digest FROM prompt_snapshots WHERE session_key = ?
+			 ORDER BY seq DESC LIMIT 1`, sessionKey).Scan(&prevSeq, &prevDigest, &prevMemDigest)
 		switch {
 		case err == nil:
 			// 比较放在存储层之外会更干净，但那样要么多一次查询、要么把比较结果
 			// 又传回来——放这里可以在同一事务里保证"取上一条 + 写这一条"是原子的。
-			rel := compareDigest(prevDigest, encoded)
+			rel := compareDigest(prevDigest, encoded, prevMemDigest, memoryDigest)
 			snap.Relation = rel.relation
 			snap.CommonPrefix = int64(rel.commonPrefix)
 			snap.SlidBy = int64(rel.slidBy)
@@ -67,9 +77,9 @@ func (s *Store) RecordPromptSnapshot(ctx context.Context, sessionKey string, dig
 
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO prompt_snapshots
-			 (session_key, seq, digest, message_count, relation, common_prefix, slid_by, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			snap.SessionKey, snap.Seq, snap.Digest, snap.MessageCount,
+			 (session_key, seq, digest, memory_digest, message_count, relation, common_prefix, slid_by, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			snap.SessionKey, snap.Seq, snap.Digest, snap.MemoryDigest, snap.MessageCount,
 			snap.Relation, snap.CommonPrefix, snap.SlidBy, nowMillis())
 		if err != nil {
 			return fmt.Errorf("insert prompt snapshot: %w", err)
@@ -91,7 +101,13 @@ type digestRelation struct {
 
 // compareDigest 判定两次快照的关系。与 conversation.ComparePrefix 同一套语义，
 // 但作用在编码后的字符串上——存储层不该依赖表示层。
-func compareDigest(prevEncoded, nextEncoded string) digestRelation {
+// MemoryBlockIndex 是记忆块在消息序列里的位置（ADR-0002：system 之后、历史之前）。
+//
+// 记忆变化会让它**之后**的全部内容失效，因此"分歧点不超过这个位置"
+// 正是"记忆变更导致的分歧"的特征。
+const MemoryBlockIndex = 1
+
+func compareDigest(prevEncoded, nextEncoded, prevMem, nextMem string) digestRelation {
 	prev := splitDigest(prevEncoded)
 	next := splitDigest(nextEncoded)
 	cp := commonPrefix(prev, next)
@@ -106,6 +122,13 @@ func compareDigest(prevEncoded, nextEncoded string) digestRelation {
 		if prefixOf(prev[k:], next) {
 			return digestRelation{relation: "slid", commonPrefix: cp, slidBy: k}
 		}
+	}
+	// 记忆块变了，且分歧点就在记忆块处或之前 —— 这是**预期**变化（ADR-0002）。
+	//
+	// 真机实测：写入一条记忆后的下一轮必定走到这里，common_prefix 恰为 1
+	// （只剩 system 相同）。若把它报成"意外分歧"，告警就永远在响，等于没有告警。
+	if prevMem != nextMem && cp <= MemoryBlockIndex {
+		return digestRelation{relation: RelationMemoryChanged, commonPrefix: cp}
 	}
 	return digestRelation{relation: "diverged", commonPrefix: cp}
 }
@@ -137,13 +160,16 @@ func prefixOf(prefix, full []string) bool {
 	return commonPrefix(prefix, full) == len(prefix)
 }
 
+// RelationMemoryChanged 表示前缀因记忆块变化而改变——**预期**行为（ADR-0002）。
+const RelationMemoryChanged = "memory_changed"
+
 // ListPromptSnapshots 返回会话最近的快照（按 seq 升序）。
 func (s *Store) ListPromptSnapshots(ctx context.Context, sessionKey string, limit int) ([]PromptSnapshot, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, session_key, seq, digest, message_count, relation, common_prefix, slid_by, created_at
+		`SELECT id, session_key, seq, digest, memory_digest, message_count, relation, common_prefix, slid_by, created_at
 		 FROM prompt_snapshots WHERE session_key = ? ORDER BY seq DESC LIMIT ?`, sessionKey, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list prompt snapshots: %w", err)
@@ -152,7 +178,7 @@ func (s *Store) ListPromptSnapshots(ctx context.Context, sessionKey string, limi
 	out := make([]PromptSnapshot, 0, limit)
 	for rows.Next() {
 		var p PromptSnapshot
-		if err := rows.Scan(&p.ID, &p.SessionKey, &p.Seq, &p.Digest, &p.MessageCount,
+		if err := rows.Scan(&p.ID, &p.SessionKey, &p.Seq, &p.Digest, &p.MemoryDigest, &p.MessageCount,
 			&p.Relation, &p.CommonPrefix, &p.SlidBy, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan prompt snapshot: %w", err)
 		}

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -265,3 +266,44 @@ var (
 	_ Caller = (*RateLimitedCaller)(nil)
 	_ Caller = (*RetryCaller)(nil)
 )
+
+// GetMsgText 通过 OneBot 的 get_msg 取回被引用消息的纯文本（F-84 的引用解析）。
+//
+// 为什么必须查一次而不是"记在本地"：引用的可能是机器人没参与、没存过的消息；
+// 而 OneBot 只给一个 message_id，内容不在事件里。
+//
+// 返回的文本已按段渲染（文本原样、图片/表情等变占位符），可直接给模型看。
+func GetMsgText(ctx context.Context, c Caller, id string) (string, error) {
+	if strings.TrimSpace(id) == "" {
+		return "", errors.New("get_msg: empty message id")
+	}
+	resp, err := c.Call(ctx, Request{Action: "get_msg", Params: map[string]any{
+		"message_id": id,
+	}})
+	if err != nil {
+		return "", fmt.Errorf("get_msg %s: %w", id, err)
+	}
+	if resp.RetCode != 0 {
+		return "", fmt.Errorf("get_msg %s: retcode %d %s", id, resp.RetCode, resp.Message)
+	}
+	var payload struct {
+		Message json.RawMessage `json:"message"`
+	}
+	if err := json.Unmarshal(resp.Data, &payload); err != nil {
+		return "", fmt.Errorf("decode get_msg data: %w", err)
+	}
+	if len(payload.Message) == 0 {
+		return "", nil
+	}
+	// message 可能是段数组，也可能是纯字符串（取决于平台配置）。
+	// 复用 event.Message 的容错解析，不另写一套。
+	var msg event.Message
+	if err := json.Unmarshal(payload.Message, &msg); err == nil && len(msg) > 0 {
+		return msg.Summary(), nil
+	}
+	var plain string
+	if err := json.Unmarshal(payload.Message, &plain); err == nil {
+		return plain, nil
+	}
+	return "", errors.New("decode get_msg message: unsupported shape")
+}

@@ -50,7 +50,7 @@ type columnSpec struct {
 // 因为 ALTER TABLE 表达不了，需要重建表或回填数据。
 var desiredColumns = append([]columnSpec{
 	// 各功能表由后续 ticket 追加（F-85 台账、F-87 记忆、F-86 在途、F-89 快照）。
-}, append(append(messagesColumns, sessionsColumns...), memoriesColumns...)...)
+}, append(append(append(messagesColumns, sessionsColumns...), memoriesColumns...), promptSnapshotColumns...)...)
 
 // migrations 是版本门控链，按版本升序。
 //
