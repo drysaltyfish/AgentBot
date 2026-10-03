@@ -27,6 +27,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/reply"
 	"github.com/drysaltyfish/agentbot/internal/router"
+	"github.com/drysaltyfish/agentbot/internal/scoped"
 	"github.com/drysaltyfish/agentbot/internal/secrets"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/store"
@@ -227,6 +228,23 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	// Agent：启用时走 ReAct（带工具），否则是直连 LLM。调用方对两条路径同形。
 	// 平台 API 通道：ws 稍后才创建，因此用迟到绑定的盒子。
 	apiCaller := &callerBox{}
+	// F-82：人格定义在启动期加载并校验——人格名写错要在启动时失败，
+	// 而不是等第一个用户来聊天才发现。
+	if personaReg, perr := scoped.Load(cfg.Prompt.EffectivePersonasDir()); perr != nil {
+		lifecycle.Error("cannot load personas", "error", perr, "dir", cfg.Prompt.EffectivePersonasDir())
+		return 1
+	} else {
+		var refs []string
+		if cfg.Prompt.Persona != nil && strings.TrimSpace(*cfg.Prompt.Persona) != "" {
+			refs = append(refs, *cfg.Prompt.Persona)
+		}
+		if vErr := personaReg.ValidateRefs(refs...); vErr != nil {
+			lifecycle.Error("invalid persona reference", "error", vErr)
+			return 1
+		}
+		lifecycle.Info("personas loaded", "dir", cfg.Prompt.EffectivePersonasDir(), "count", personaReg.Len())
+	}
+
 	brain, mem, err := buildAgent(cfg, model, asm, hist, st, apiCaller, lg, auditLog)
 	if err != nil {
 		lifecycle.Error("cannot build agent", "error", err)

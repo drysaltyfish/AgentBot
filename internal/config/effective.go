@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -200,6 +201,18 @@ func (s Singleflight) EffectiveKey() string {
 
 // EffectiveNotice 返回拒绝时是否回提示；未配置时默认关闭。
 func (s Singleflight) EffectiveNotice() bool { return orBool(s.Notice, defaultSingleflightNotice) }
+
+// EffectivePersonasDir 返回人格定义目录（F-82）；未配置时取 prompt.dir 下的 personas。
+func (p Prompt) EffectivePersonasDir() string {
+	if p.PersonasDir != nil && strings.TrimSpace(*p.PersonasDir) != "" {
+		return *p.PersonasDir
+	}
+	dir := strings.TrimSpace(p.Dir)
+	if dir == "" {
+		dir = "prompts"
+	}
+	return filepath.Join(dir, "personas")
+}
 
 // EffectiveEnabled 返回是否启用入站审查；未配置时默认关闭。
 func (m Moderation) EffectiveEnabled() bool { return orBool(m.Enabled, false) }

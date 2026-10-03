@@ -171,6 +171,8 @@ type LLM struct {
 type Prompt struct {
 	Dir     string  `yaml:"dir"`
 	Persona *string `yaml:"persona"`
+	// PersonasDir 是人格定义目录（F-82）；为空时取 Dir 下的 personas 子目录。
+	PersonasDir *string `yaml:"personas_dir"`
 }
 
 // Policy 描述权限表位置（F-53）。

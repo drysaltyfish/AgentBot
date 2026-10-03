@@ -242,3 +242,10 @@ moderation:
     max_messages: 20
     ban_duration: 60s
     duplicate_repeat: 5
+
+# ---- 人格定义目录（F-82）----
+# 每个 <name>.yml 定义一个人格；name 必须与文件名一致。
+# 留空时默认取 prompt.dir 下的 personas 子目录（即 prompts/personas）。
+#   prompt:
+#     dir: prompts
+#     personas_dir: prompts/personas
