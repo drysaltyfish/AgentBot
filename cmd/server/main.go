@@ -29,6 +29,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/retry"
 	"github.com/drysaltyfish/agentbot/internal/router"
 	"github.com/drysaltyfish/agentbot/internal/session"
+	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/tool"
 	"github.com/drysaltyfish/agentbot/internal/tool/builtin"
 	"github.com/drysaltyfish/agentbot/internal/transport"
@@ -460,6 +461,26 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		lg.Component("session").Warn("conversation history is in-process only; it will be lost on restart (set history.file to persist)",
 			"retention", retention, "prompt_window", histItems)
 	}
+	// F-83：持久层。打不开就启动失败——不得静默降级为内存（那会悄悄丢数据）。
+	// 打开与迁移给一个独立预算：卡住时要在启动阶段暴露，而不是拖到第一条消息。
+	openCtx, cancelOpen := context.WithTimeout(context.Background(), 30*time.Second)
+	st, err := store.Open(openCtx, store.Options{
+		Path:        cfg.Store.Path,
+		BusyTimeout: durationOr(cfg.Store.BusyTimeout, store.DefaultBusyTimeout),
+	})
+	cancelOpen()
+	if err != nil {
+		lifecycle.Error("cannot open the persistence store", "error", err, "path", cfg.Store.Path)
+		return 1
+	}
+	defer func() {
+		if cerr := st.Close(); cerr != nil {
+			lifecycle.Warn("cannot close the persistence store", "error", cerr)
+		}
+	}()
+	lg.Component("store").Info("persistence store is ready",
+		"path", st.Path(), "schema_version", store.SchemaVersion)
+
 	sessions := session.New(
 		session.WithHistory(hist),
 		session.WithTTL(session.DefaultTTL),
