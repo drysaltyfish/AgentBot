@@ -14,7 +14,7 @@
 - HEAD = 21059e7，已推送；工作区干净，本轮本地 build/vet/test/gofmt 全绿，CI 走 `gh run watch`。
 - **功能：87/89 完成**；剩下两条（F-07 多账号、F-27 多供应商）在目标范围之外。
   范围内全部完成：F-65 三段式前缀（21059e7）、F-23 定期回收接线（本轮）。
-- **接线：12/15 完成**（含 F-36/F-37、F-71、F-65、F-82、F-23，以及本轮补齐的 F-66 会话维度与持久化）。这是最大的缺口：按仓库自己的 **F-79**，未接线 = 未交付。
+- **接线：13/15 完成**（含 F-36/F-37、F-71、F-65、F-82、F-23、F-66 会话维度与持久化，以及 F-72 出站传播）。这是最大的缺口：按仓库自己的 **F-79**，未接线 = 未交付。
 
 ### 已完成的接线（7 处）
 
@@ -31,6 +31,7 @@
 | F-82（剩余） | SQLite 会话人格持久化 + `/persona` 切换 + RouteKey/Fingerprint 喂半静态段 | Test_F82_PersonaPersistsAcrossReopen、Test_F82_PersonaSwitchChangesPromptHash、Test_F82_DefaultPersonaDoesNotDuplicateTheStaticSegment |
 | F-23 | 定期回收接入 Bot 生命周期（`app.Go`，不再是没人启动的 `StartReclaimer`） | Test_F23_ReclaimerIsOwnedByBotLifecycle（100 会话回收 + Shutdown 后回收器确实停止） |
 | F-49（持久化） | `memory.SQLiteTierStore`：分层记忆落 SQLite（id 走 tier_ids 统一分配器，scope 全程参与） | Test_F49_SQLiteTierStoreSurvivesReopen、Test_F49_TieredMemoryOverSQLiteEndToEnd |
+| F-72（传播） | W3C trace 上下文：入站事件建立 span、日志 trace_id 与之一致、httpx 自动带 traceparent | Test_F72_TraceparentIsPropagated、Test_F72_EventTraceContextCarriesW3CIdentity、Test_F72_ExplicitHeaderIsPreserved |
 | F-66（剩余） | 会话/用户维度归因经 ctx 进 LLM 链、调用前强制 deny、SQLite 快照持久化、`/cost` 报本会话 | Test_F66_QuotaDenyHappensBeforeSpending、Test_F66_SessionQuotaIsPerSession、Test_F66_CostSnapshotPersistsThroughAdapter、Test_F66_QuotaDenialRepliesWithANotice |
 
 ## 3. 剩余工作
@@ -46,10 +47,14 @@
 范围内的功能全部完成。剩余工作只有 §3.2 的接线；
 F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 
-### 3.2 接线（剩 6 处，按建议顺序）
+### 3.2 接线（剩 5 处，按建议顺序）
 
-~~#1 admin 命令入口~~、~~#2 cost 会话维度~~、~~#3 agent.paradigm~~、~~#10 F-82 剩余~~
-均已完成，不再列出。
+~~#1 admin 命令入口~~、~~#2 cost 会话维度~~、~~#3 agent.paradigm~~、~~#8 trace~~、
+~~#10 F-82 剩余~~ 均已完成，不再列出。
+
+#4 分层记忆：SQLite TierStore 已完成，剩「切换 + MemoryAdmin + 迁移」。
+#7 stream→outbound：`StreamSplitter`/`StreamSender` 已就绪且有互连测试，
+剩的是把它接进回复路径（ReAct 每轮用非流式 Chat，需先定「哪些轮可以边流边发」）。
 
 | # | 项 | 入口 | 前置条件 / 风险 |
 |---|---|---|---|
@@ -58,7 +63,6 @@ F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 | 5 | semcache（F-63） | LLM 请求路径 | 需要 Vectorize（embedding 或二值哈希）+ 出口过滤（F-55）。可接在 observedLLM 层 |
 | 6 | tree 摘要树（F-52） | 摄入路径 | 需要注入 Summarizer / Embedder |
 | 7 | stream -> outbound（F-64） | 发送路径 | llm.NewStreamSplitter{Flush: outbound.NewStreamSender(...).Handler(ctx)}；不要改动请求侧（前缀缓存） |
-| 8 | trace（F-72） | 入站上下文 + 出站 HTTP 头 | internal/trace 是自包含 traceparent 子集（**无 OTLP**）。serve 已有 observe.WithTraceID 机制，可桥接 |
 | 9 | reload 其余资产（F-24） | 提示词/开关/限速 | 目前只接了敏感词表；提示词热加载要重建 Assembler，需评估前缀缓存语义 |
 
 ## 4. 已知偏离与诚实标注（不要当成"已完成"）

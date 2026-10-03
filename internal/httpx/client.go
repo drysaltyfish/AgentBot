@@ -182,8 +182,9 @@ func NewClient(cfg Config) *http.Client {
 	}
 
 	client := &http.Client{
-		Timeout:   c.Timeout,
-		Transport: transport,
+		Timeout: c.Timeout,
+		// F-72：出站带上 traceparent（ctx 里没有 span 时是恒等操作）。
+		Transport: traceTripper{next: transport},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > c.MaxRedirects {
 				return fmt.Errorf("%w: %d", ErrTooManyRedirects, len(via))

@@ -595,7 +595,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 			return
 		}
 
-		ectx := observe.WithTraceID(listenCtx, traceID(ev))
+		ectx := eventTraceContext(listenCtx, ev)
 		eventQueue.Submit(eventJob{ctx: ectx, event: ev, caller: caller})
 	}
 
