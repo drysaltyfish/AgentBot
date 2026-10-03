@@ -1,0 +1,5 @@
+| 功能 | action | params | data |
+|---|---|---|---|
+| 发送消息 | send_msg | text |  |
+
+列表中没有的 action 不允许调用。

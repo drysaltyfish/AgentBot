@@ -32,6 +32,11 @@ type OpenAIConfig struct {
 	// IncludeStreamUsage 在流式请求里带上 stream_options.include_usage，
 	// 否则拿不到 usage（也就没有缓存命中计量）。
 	IncludeStreamUsage bool
+	// OnWarn 接收流式聚合中的异常告警（如同一 index 的 tool_call name 重复）；可为 nil。
+	OnWarn func(string)
+	// DisableJSONSchema 声明该端点不支持 response_format.type=json_schema（F-31）。
+	// 置位时自动降级为 json_object，并把 schema 文本附到消息末尾。
+	DisableJSONSchema bool
 }
 
 // OpenAI 是 OpenAI 兼容实现。
@@ -171,11 +176,15 @@ func (o *OpenAI) toWire(req *ChatRequest, stream bool) wireRequest {
 			out.Temperature = req.Temperature
 		}
 		out.MaxTokens = req.MaxTokens
+		var schemaText string
 		if req.ResponseFormat != nil {
-			out.ResponseFormat = &wireResponseFormat{Type: req.ResponseFormat.Type}
-			if len(req.ResponseFormat.Schema) > 0 {
-				out.ResponseFormat.JSONSchema = req.ResponseFormat.Schema
+			// F-31：端点不支持 json_schema 时降级为 json_object，并附 schema 文本。
+			format, text := AdaptResponseFormat(*req.ResponseFormat, !o.cfg.DisableJSONSchema)
+			out.ResponseFormat = &wireResponseFormat{Type: format.Type}
+			if format.Type == TypeJSONSchema && len(format.Schema) > 0 {
+				out.ResponseFormat.JSONSchema = format.Schema
 			}
+			schemaText = text
 		}
 		for _, m := range req.Messages {
 			wm := wireMessage{
@@ -201,6 +210,10 @@ func (o *OpenAI) toWire(req *ChatRequest, stream bool) wireRequest {
 			wt.Function.Description = t.Description
 			wt.Function.Parameters = t.Parameters
 			out.Tools = append(out.Tools, wt)
+		}
+		if schemaText != "" {
+			// 附在消息末尾而不是改写开头 system：ADR-0002 的稳定前缀不被打断。
+			out.Messages = append(out.Messages, wireMessage{Role: string(RoleSystem), Content: schemaText})
 		}
 	}
 	return out
@@ -314,6 +327,8 @@ func (o *OpenAI) pumpSSE(ctx context.Context, body io.Reader, ch chan<- Chunk) {
 	scanner.Buffer(make([]byte, 0, 64*1024), o.cfg.MaxBytes64())
 	finish := ""
 	var usage *Usage
+	agg := NewToolCallAggregator()
+	agg.OnWarn = o.cfg.OnWarn
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, ":") {
@@ -324,8 +339,8 @@ func (o *OpenAI) pumpSSE(ctx context.Context, body io.Reader, ch chan<- Chunk) {
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
-			// 终止分片必须带上此前收到的 usage，否则流式路径拿不到缓存命中计量。
-			SendChunk(ctx, ch, Chunk{Done: true, FinishReason: finish, Usage: usage})
+			// 终止分片携带 usage 与聚合后的完整工具调用（F-29）。
+			SendChunk(ctx, ch, Chunk{Done: true, FinishReason: finish, ToolCalls: agg.Finalize(), Usage: usage})
 			return
 		}
 		var parsed wireResponse
@@ -348,14 +363,21 @@ func (o *OpenAI) pumpSSE(ctx context.Context, body io.Reader, ch chan<- Chunk) {
 				Reasoning:    choice.Delta.ReasoningContent,
 				FinishReason: choice.FinishReason,
 			}
-			// 说明：F-29 的"按 index 分片聚合"属 M3；这里只透传服务端已给出的完整调用。
-			for _, tc := range choice.Delta.ToolCalls {
-				if tc.ID == "" {
-					continue
+			// F-29：分片只聚合、不逐片上报，避免消费者执行半截 arguments；
+			// 完整调用在终止分片上一次性给出。
+			for i, tc := range choice.Delta.ToolCalls {
+				index := i
+				if tc.Index != nil {
+					index = *tc.Index
 				}
-				chunk.ToolCalls = append(chunk.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+				agg.Add(ToolCallDelta{
+					Index:     index,
+					ID:        tc.ID,
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				})
 			}
-			if chunk.Content == "" && chunk.Reasoning == "" && len(chunk.ToolCalls) == 0 && chunk.FinishReason == "" {
+			if chunk.Content == "" && chunk.Reasoning == "" && chunk.FinishReason == "" {
 				continue
 			}
 			if !SendChunk(ctx, ch, chunk) {
@@ -364,11 +386,12 @@ func (o *OpenAI) pumpSSE(ctx context.Context, body io.Reader, ch chan<- Chunk) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		// 中途出错：丢弃已聚合的调用，避免执行半截参数（F-29 边界：默认丢弃）。
 		SendChunk(ctx, ch, Chunk{Done: true, Err: fmt.Errorf("read llm stream: %w", err)})
 		return
 	}
-	// 终止分片携带 usage，让调用方拿到缓存命中计量。
-	SendChunk(ctx, ch, Chunk{Done: true, FinishReason: finish, Usage: usage})
+	// 终止分片携带 usage 与聚合后的完整工具调用（F-29）。
+	SendChunk(ctx, ch, Chunk{Done: true, FinishReason: finish, ToolCalls: agg.Finalize(), Usage: usage})
 }
 
 // MaxBytes64 返回扫描缓冲上限。

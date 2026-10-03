@@ -47,6 +47,11 @@ type Message struct {
 	Name             string
 	ToolCalls        []ToolCall
 	ToolCallID       string
+	// Pinned 标记该消息在 F-32 的上下文裁剪中**永不被裁掉**。
+	//
+	// system 提示词契约（ADR-0002 的稳定前缀）应置为 true；
+	// 零值 false 表示可按需裁剪，因此存量构造不受影响。
+	Pinned bool
 }
 
 // ToolSpec 是导出给模型的工具 schema。

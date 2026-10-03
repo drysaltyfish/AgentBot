@@ -1,0 +1,30 @@
+calculator
+  desc: 计算一个算术表达式，支持加 减 乘 除 取余 与括号
+  params: {"properties":{"expr":{"description":"算术表达式，例如 (1+2)*3","type":"string"}},"required":["expr"],"type":"object"}
+current_time
+  desc: 获取当前时间，可指定时区
+  params: {"properties":{"format":{"description":"rfc3339（默认）或 unix","enum":["rfc3339","unix"],"type":"string"},"timezone":{"description":"IANA 时区名，例如 Asia/Shanghai；默认为 UTC","type":"string"}},"type":"object"}
+json_query
+  desc: 按路径从 JSON 里取值，只读，不执行任何代码
+  params: {"properties":{"json":{"description":"JSON 文本","type":"string"},"path":{"description":"路径，例如 a.b[0].c","type":"string"}},"required":["json","path"],"type":"object"}
+http_fetch
+  desc: 抓取一个 http/https 链接的文本内容；私网地址会被拒绝
+  params: {"properties":{"url":{"description":"要抓取的 http/https 链接","type":"string"}},"required":["url"],"type":"object"}
+memory_save
+  desc: 把一条值得长期记住的信息写进记忆，必须是单行文本
+  params: {"properties":{"text":{"description":"要记住的内容，必须单行","type":"string"}},"required":["text"],"type":"object"}
+memory_recall
+  desc: 读取已保存的长期记忆
+  params: {"properties":{},"type":"object"}
+recall_history
+  desc: 检索本次会话之前聊过的内容；可给关键词，也可留空取最近几条
+  params: {"properties":{"limit":{"description":"最多返回几条，默认 10，上限 50","type":"integer"},"query":{"description":"关键词，留空则返回最近几条","type":"string"}},"type":"object"}
+forget_memory
+  desc: 忘掉一条记忆（给 id），或忘掉本次会话的全部记忆（all=true）。只在对方明确要求忘记时使用
+  params: {"properties":{"all":{"description":"为 true 时忘掉本次会话的全部记忆；仅在对方明确要求时使用","type":"boolean"},"id":{"description":"要忘掉的记忆 id（用 list_memories 查看）","type":"integer"}},"type":"object"}
+list_memories
+  desc: 列出当前会话记住了哪些事，每行带 id
+  params: {"properties":{"limit":{"description":"最多列出几条，默认 20，上限 50","type":"integer"}},"type":"object"}
+get_user_info
+  desc: 按 QQ 号查询这个人的群名片、昵称、头像链接与群内身份；用于确认消息里的 QQ 号是谁
+  params: {"properties":{"qq":{"description":"要查询的 QQ 号","type":"integer"}},"required":["qq"],"type":"object"}
