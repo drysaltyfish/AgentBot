@@ -63,6 +63,23 @@ type Usage struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	// PromptCacheHitTokens / PromptCacheMissTokens 是 DeepSeek 前缀缓存的命中与未命中
+	// 输入 token 数（见 api-docs.deepseek.com/guides/kv_cache）。其它供应商不返回时为 0。
+	PromptCacheHitTokens  int
+	PromptCacheMissTokens int
+	// ReasoningTokens 是思考模式下思维链占用的 token（供应商未提供时为 0）。
+	ReasoningTokens int
+}
+
+// CacheHitRatio 返回输入侧的前缀缓存命中率（0~1）。
+//
+// 这是"缓存优先"设计的唯一客观指标：命中率低说明前缀被改写或注入了易变内容。
+func (u Usage) CacheHitRatio() float64 {
+	total := u.PromptCacheHitTokens + u.PromptCacheMissTokens
+	if total <= 0 {
+		return 0
+	}
+	return float64(u.PromptCacheHitTokens) / float64(total)
 }
 
 // ChatRequest 是一次对话请求。
@@ -85,19 +102,26 @@ func (r *ChatRequest) Validate() error {
 
 // ChatResponse 是一次对话结果。
 type ChatResponse struct {
-	Content      string
-	ToolCalls    []ToolCall
-	FinishReason string
-	Usage        Usage
+	Content string
+	// ReasoningContent 是思考模式的思维链。无 tools 时无需回传，也不应写入历史
+	// （回传也会被服务端忽略），否则只是白白拉长上下文、拉低缓存命中。
+	ReasoningContent string
+	ToolCalls        []ToolCall
+	FinishReason     string
+	Usage            Usage
 }
 
 // Chunk 是流式分片；错误也走 channel（F-28）。
 type Chunk struct {
-	Content      string
+	Content string
+	// Reasoning 是思考模式的思维链增量。
+	Reasoning    string
 	ToolCalls    []ToolCall
 	FinishReason string
 	Done         bool
 	Err          error
+	// Usage 仅在终止分片上可能非空（需要 stream_options.include_usage）。
+	Usage *Usage
 }
 
 // LLM 是统一的对话接口。

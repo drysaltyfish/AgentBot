@@ -49,10 +49,37 @@ func (d Duration) String() string { return d.D.String() }
 type Config struct {
 	Transport Transport `yaml:"transport"`
 	LLM       LLM       `yaml:"llm"`
+	Behavior  Behavior  `yaml:"behavior"`
 	Prompt    Prompt    `yaml:"prompt"`
 	Policy    Policy    `yaml:"policy"`
 	Log       Log       `yaml:"log"`
 	Shutdown  Shutdown  `yaml:"shutdown"`
+}
+
+// 回复策略取值。
+const (
+	// ReplyAlways 无条件回复。
+	ReplyAlways = "always"
+	// ReplyNever 永不回复。
+	ReplyNever = "never"
+	// ReplyOnMention 仅在 @ 机器人时回复（群聊默认，避免刷屏）。
+	ReplyOnMention = "on_mention"
+)
+
+// Behavior 描述回复行为（F-13 路由策略的配置面）。
+type Behavior struct {
+	// Private 是私聊策略：always / never。
+	Private string `yaml:"private"`
+	// Group 是群聊策略：always / on_mention / never。
+	Group string `yaml:"group"`
+
+	// SplitOnBlankLine 为 true 时，回复里的空行会被拆成多条消息分别发送。
+	// 聊天窗口里一大块文字读起来很累，真人是一条一条发的。默认 true。
+	SplitOnBlankLine *bool `yaml:"split_on_blank_line"`
+	// SplitDelay 是连发之间的间隔，默认 400ms。
+	SplitDelay *Duration `yaml:"split_delay"`
+	// MaxSegments 是单次回复最多拆成几条，默认 4；超出部分合并进最后一条。
+	MaxSegments *int `yaml:"max_segments"`
 }
 
 // Transport 描述事件接入方式与入站鉴权（F-04 / F-80）。
@@ -74,6 +101,20 @@ type LLM struct {
 	APIKey        *string   `yaml:"api_key"`
 	Timeout       *Duration `yaml:"timeout"`
 	MaxIterations *int      `yaml:"max_iterations"`
+
+	// Thinking 控制思考模式；nil 表示不下发该字段。
+	Thinking *bool `yaml:"thinking"`
+	// ReasoningEffort 是思考强度：low / high / max。
+	ReasoningEffort string `yaml:"reasoning_effort"`
+
+	// SystemPrompt 是不可变前缀的正文（缓存优先的关键：每个会话逐字节相同）。
+	// 为空时使用内置默认。
+	SystemPrompt *string `yaml:"system_prompt"`
+	// SystemPromptFile 从文件读取不可变前缀正文，优先级高于 SystemPrompt。
+	// 长人格提示词放文件更易维护；启动时读一次并固定，保证前缀逐字节稳定。
+	SystemPromptFile *string `yaml:"system_prompt_file"`
+	// HistoryTurns 是最多回灌多少条历史；<=0 或未设置时用默认值。
+	HistoryTurns *int `yaml:"history_turns"`
 }
 
 // Prompt 描述提示词资产位置（F-33 / F-82）。
@@ -107,13 +148,24 @@ func Default() *Config {
 	timeout := Duration{D: 30 * time.Second}
 	queue := 1024
 	sdTimeout := Duration{D: 10 * time.Second}
+	historyTurns := 20
+	splitOnBlank := true
+	splitDelay := Duration{D: 400 * time.Millisecond}
+	maxSegments := 4
 	return &Config{
 		Transport: Transport{Mode: "wsclient", Backoff: &backoff},
-		LLM:       LLM{Provider: "openai", BaseURL: "https://api.openai.com/v1", Timeout: &timeout},
-		Prompt:    Prompt{Dir: "prompts"},
-		Policy:    Policy{File: "actions.yaml"},
-		Log:       Log{Level: "info", Format: "json", Components: map[string]string{}, QueueSize: &queue},
-		Shutdown:  Shutdown{Timeout: &sdTimeout},
+		LLM: LLM{
+			Provider: "openai", BaseURL: "https://api.openai.com/v1", Timeout: &timeout,
+			HistoryTurns: &historyTurns,
+		},
+		Behavior: Behavior{
+			Private: ReplyAlways, Group: ReplyOnMention,
+			SplitOnBlankLine: &splitOnBlank, SplitDelay: &splitDelay, MaxSegments: &maxSegments,
+		},
+		Prompt:   Prompt{Dir: "prompts"},
+		Policy:   Policy{File: "actions.yaml"},
+		Log:      Log{Level: "info", Format: "json", Components: map[string]string{}, QueueSize: &queue},
+		Shutdown: Shutdown{Timeout: &sdTimeout},
 	}
 }
 
@@ -134,7 +186,55 @@ func Parse(raw []byte) (*Config, error) {
 	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	if err := cfg.expandSecrets(); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
 	return cfg, nil
+}
+
+// expandSecrets 就地展开敏感字段里的 ${VAR} 引用，让密钥不必落盘。
+func (c *Config) expandSecrets() error {
+	fields := []struct {
+		path string
+		ptr  **string
+	}{
+		{"transport.access_token", &c.Transport.AccessToken},
+		{"transport.signature_secret", &c.Transport.SignatureSecret},
+		{"llm.api_key", &c.LLM.APIKey},
+	}
+	for _, f := range fields {
+		if f.ptr == nil || *f.ptr == nil {
+			continue
+		}
+		v, err := expandSecret(f.path, **f.ptr)
+		if err != nil {
+			return err
+		}
+		**f.ptr = v
+	}
+	return nil
+}
+
+// expandSecret 解析 ${VAR} 形态的引用。
+//
+// 未设置的环境变量直接报错而不是静默变成空串——否则会表现为"密钥没生效"，
+// 排查成本远高于启动即失败。
+func expandSecret(path, raw string) (string, error) {
+	if !strings.Contains(raw, "${") {
+		return raw, nil
+	}
+	var missing []string
+	out := os.Expand(raw, func(name string) string {
+		v, ok := os.LookupEnv(name)
+		if !ok {
+			missing = append(missing, name)
+		}
+		return v
+	})
+	if len(missing) > 0 {
+		return "", fmt.Errorf("%s 引用了未设置的环境变量: %s", path, strings.Join(missing, ", "))
+	}
+	return out, nil
 }
 
 // Problem 是一条配置问题。
@@ -207,6 +307,40 @@ func (c *Config) Validate() error {
 	}
 	if c.LLM.MaxIterations != nil && *c.LLM.MaxIterations <= 0 {
 		add("llm.max_iterations", "必须为正")
+	}
+	switch c.LLM.ReasoningEffort {
+	case "", "low", "high", "max":
+	default:
+		add("llm.reasoning_effort", "必须是 low / high / max 之一，实际为 "+strconv.Quote(c.LLM.ReasoningEffort))
+	}
+	if c.LLM.HistoryTurns != nil && *c.LLM.HistoryTurns < 0 {
+		add("llm.history_turns", "不能为负")
+	}
+	if c.LLM.SystemPromptFile != nil && strings.TrimSpace(*c.LLM.SystemPromptFile) != "" {
+		if _, err := os.Stat(*c.LLM.SystemPromptFile); err != nil {
+			add("llm.system_prompt_file", "无法读取: "+err.Error())
+		}
+	}
+
+	switch c.Behavior.Private {
+	case "", ReplyAlways, ReplyNever:
+	default:
+		add("behavior.private", "必须是 always / never 之一，实际为 "+strconv.Quote(c.Behavior.Private))
+	}
+	switch c.Behavior.Group {
+	case "", ReplyAlways, ReplyNever, ReplyOnMention:
+	default:
+		add("behavior.group", "必须是 always / on_mention / never 之一，实际为 "+strconv.Quote(c.Behavior.Group))
+	}
+	if c.Behavior.SplitDelay != nil {
+		if c.Behavior.SplitDelay.D < 0 {
+			add("behavior.split_delay", "不能为负")
+		} else if c.Behavior.SplitDelay.D > 10*time.Second {
+			add("behavior.split_delay", "超过 10s；连发间隔过大会让回复显得断续")
+		}
+	}
+	if c.Behavior.MaxSegments != nil && *c.Behavior.MaxSegments < 1 {
+		add("behavior.max_segments", "必须 >= 1")
 	}
 
 	switch c.Log.Level {

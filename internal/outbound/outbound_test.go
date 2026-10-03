@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/transport"
@@ -230,5 +231,119 @@ func Test_F55_NonTextSegmentsPassThrough(t *testing.T) {
 	// 去噪只做右侧裁剪与空行折叠，保留前导缩进。
 	if sent[1].Data["text"] != "  hi" {
 		t.Fatalf("text segment not filtered: actual=%q expected=%q", sent[1].Data["text"], "  hi")
+	}
+}
+
+func Test_SplitParagraphsSplitsOnBlankLinesOnly(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"single paragraph", "就一句话", []string{"就一句话"}},
+		{"single newline is not a split", "第一行\n第二行", []string{"第一行\n第二行"}},
+		{"one blank line", "第一段\n\n第二段", []string{"第一段", "第二段"}},
+		{"many blank lines collapse", "第一段\n\n\n\n第二段", []string{"第一段", "第二段"}},
+		{"crlf", "第一段\r\n\r\n第二段", []string{"第一段", "第二段"}},
+		{"leading and trailing blanks", "\n\n第一段\n\n第二段\n\n", []string{"第一段", "第二段"}},
+		{"whitespace-only lines", "第一段\n   \n第二段", []string{"第一段", "第二段"}},
+		{"three paragraphs", "一\n\n二\n\n三", []string{"一", "二", "三"}},
+		{"empty", "", nil},
+		{"only blanks", "\n\n   \n", nil},
+	}
+	for _, tc := range cases {
+		got := SplitParagraphs(tc.in, 0)
+		if len(got) != len(tc.want) {
+			t.Fatalf("%s: got %d parts %q, want %d", tc.name, len(got), got, len(tc.want))
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Fatalf("%s: part %d = %q, want %q", tc.name, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+// Test_SplitParagraphsMergesTailBeyondMax 保证不会一次刷屏。
+func Test_SplitParagraphsMergesTailBeyondMax(t *testing.T) {
+	t.Parallel()
+	in := "一\n\n二\n\n三\n\n四\n\n五\n\n六"
+	got := SplitParagraphs(in, 3)
+	if len(got) != 3 {
+		t.Fatalf("segments: got %d %q, want 3", len(got), got)
+	}
+	if got[0] != "一" || got[1] != "二" {
+		t.Fatalf("head segments changed: %q", got[:2])
+	}
+	if !strings.Contains(got[2], "三") || !strings.Contains(got[2], "六") {
+		t.Fatalf("tail must be merged into the last segment: %q", got[2])
+	}
+}
+
+func Test_SplitParagraphsDefaultMaxWhenNonPositive(t *testing.T) {
+	t.Parallel()
+	var b strings.Builder
+	for i := 0; i < DefaultMaxSegments+3; i++ {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("段")
+	}
+	if got := SplitParagraphs(b.String(), 0); len(got) != DefaultMaxSegments {
+		t.Fatalf("non-positive max must fall back to DefaultMaxSegments: got %d", len(got))
+	}
+}
+
+// Test_SendManyKeepsOrderAndPaces 覆盖连发的顺序与间隔。
+func Test_SendManyKeepsOrderAndPaces(t *testing.T) {
+	t.Parallel()
+	caller := &recordingCaller{}
+	s := NewSender(caller, New())
+
+	parts := []string{"第一条", "第二条", "第三条"}
+	start := time.Now()
+	sent, err := s.SendMany(context.Background(), PrivateTarget(42), parts, 30*time.Millisecond)
+	if err != nil {
+		t.Fatalf("SendMany: %v", err)
+	}
+	if sent != len(parts) {
+		t.Fatalf("sent=%d want=%d", sent, len(parts))
+	}
+	if caller.count() != len(parts) {
+		t.Fatalf("caller saw %d calls, want %d", caller.count(), len(parts))
+	}
+	// 顺序必须保持：这是聊天里"一条一条发"的基本要求。
+	for i, part := range parts {
+		got := sentMessage(t, caller.reqs[i]).PlainText()
+		if got != part {
+			t.Fatalf("message %d out of order: got %q want %q", i, got, part)
+		}
+	}
+	if elapsed := time.Since(start); elapsed < 2*30*time.Millisecond {
+		t.Fatalf("pacing not applied: elapsed=%v", elapsed)
+	}
+}
+
+// Test_SendManyStopsOnContextCancel 保证连发等待是 ctx 感知的。
+func Test_SendManyStopsOnContextCancel(t *testing.T) {
+	t.Parallel()
+	caller := &recordingCaller{}
+	s := NewSender(caller, New())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	sent, err := s.SendMany(ctx, PrivateTarget(42), []string{"一", "二", "三", "四"}, time.Second)
+	if err == nil {
+		t.Fatalf("cancelled context must abort the pacing wait")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error should wrap context.Canceled: %v", err)
+	}
+	if sent != 1 {
+		t.Fatalf("only the first message should have been sent: sent=%d", sent)
 	}
 }

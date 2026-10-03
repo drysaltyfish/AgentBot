@@ -22,6 +22,9 @@ coverage.html
 # 运行时产物（config.yaml 可能含密钥，绝不入库）
 /data/
 /config.yaml
+
+# 人格提示词属私有资产，不入库；示例见 prompts/README.md
+/prompts/xiangcheng-niang.md
 *.log
 
 # 编辑器

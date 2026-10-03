@@ -2,6 +2,8 @@ package config
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -168,5 +170,190 @@ func Test_F25_RedactedYAMLDoesNotLeakSecrets(t *testing.T) {
 	orig, err := Default().RedactedYAML()
 	if err != nil || orig == "" {
 		t.Fatalf("RedactedYAML on defaults: actual=%v", err)
+	}
+}
+
+const deepseekBaseYAML = `transport:
+  mode: wsclient
+  url: ws://127.0.0.1:3001
+llm:
+  provider: deepseek
+  model: deepseek-flash
+`
+
+func Test_ConfigSecretsExpandFromEnvironment(t *testing.T) {
+	t.Setenv("AGENTBOT_TEST_KEY", "sk-from-env")
+	cfg, err := Parse([]byte(deepseekBaseYAML + `  api_key: ${AGENTBOT_TEST_KEY}
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.LLM.APIKey == nil || *cfg.LLM.APIKey != "sk-from-env" {
+		t.Fatalf("env expansion failed: %v", cfg.LLM.APIKey)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func Test_ConfigUnsetEnvVarFailsLoudly(t *testing.T) {
+	_, err := Parse([]byte(deepseekBaseYAML + `  api_key: ${AGENTBOT_SURELY_UNSET_VAR}
+`))
+	if err == nil {
+		t.Fatalf("referencing an unset env var must fail instead of silently becoming empty")
+	}
+	if !strings.Contains(err.Error(), "AGENTBOT_SURELY_UNSET_VAR") {
+		t.Fatalf("error must name the missing variable: %v", err)
+	}
+}
+
+func Test_ConfigBehaviorDefaultsToGroupOnMention(t *testing.T) {
+	cfg, err := Parse([]byte(deepseekBaseYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Behavior.Private != ReplyAlways {
+		t.Fatalf("private default: %q", cfg.Behavior.Private)
+	}
+	if cfg.Behavior.Group != ReplyOnMention {
+		t.Fatalf("group default: %q", cfg.Behavior.Group)
+	}
+}
+
+func Test_ConfigRejectsUnknownReplyPolicyAndEffort(t *testing.T) {
+	cfg, err := Parse([]byte(deepseekBaseYAML + `behavior:
+  private: sometimes
+  group: shouting
+llm2: {}
+`))
+	_ = cfg
+	if err == nil {
+		t.Fatalf("unknown field llm2 should be rejected by KnownFields")
+	}
+
+	cfg2, err := Parse([]byte(deepseekBaseYAML + `behavior:
+  private: sometimes
+  group: shouting
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = cfg2.Validate()
+	if err == nil {
+		t.Fatalf("invalid reply policy must be rejected")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error type: %T", err)
+	}
+	if !ve.Has("behavior.private") || !ve.Has("behavior.group") {
+		t.Fatalf("expected both behavior paths to be reported: %v", ve.Problems)
+	}
+}
+
+func Test_ConfigRejectsUnknownReasoningEffort(t *testing.T) {
+	cfg, err := Parse([]byte(deepseekBaseYAML + `  reasoning_effort: extreme
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatalf("invalid reasoning_effort must be rejected")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) || !ve.Has("llm.reasoning_effort") {
+		t.Fatalf("expected llm.reasoning_effort problem: %v", err)
+	}
+}
+
+func Test_ConfigAcceptsDeepSeekThinkingSettings(t *testing.T) {
+	cfg, err := Parse([]byte(deepseekBaseYAML + `  thinking: true
+  reasoning_effort: low
+  history_turns: 12
+  system_prompt: "你是助手"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if cfg.LLM.Thinking == nil || !*cfg.LLM.Thinking {
+		t.Fatalf("thinking not parsed")
+	}
+	if cfg.LLM.ReasoningEffort != "low" || cfg.LLM.HistoryTurns == nil || *cfg.LLM.HistoryTurns != 12 {
+		t.Fatalf("deepseek settings not parsed: %+v", cfg.LLM)
+	}
+}
+
+func Test_ConfigSystemPromptFileMustExist(t *testing.T) {
+	cfg, err := Parse([]byte(deepseekBaseYAML + `  system_prompt_file: prompts/definitely-missing-file.md
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatalf("a missing system_prompt_file must fail validation")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) || !ve.Has("llm.system_prompt_file") {
+		t.Fatalf("expected llm.system_prompt_file problem: %v", err)
+	}
+}
+
+func Test_ConfigSystemPromptFileAccepted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "persona.md")
+	if err := os.WriteFile(path, []byte("你是香橙娘"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	cfg, err := Parse([]byte(deepseekBaseYAML + "  system_prompt_file: " + path + "\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if cfg.LLM.SystemPromptFile == nil || *cfg.LLM.SystemPromptFile != path {
+		t.Fatalf("system_prompt_file not parsed: %v", cfg.LLM.SystemPromptFile)
+	}
+}
+
+func Test_ConfigRejectsBadSplitSettings(t *testing.T) {
+	cfg, err := Parse([]byte(deepseekBaseYAML + `behavior:
+  split_delay: 30s
+  max_segments: 0
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatalf("invalid split settings must be rejected")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error type: %T", err)
+	}
+	if !ve.Has("behavior.split_delay") || !ve.Has("behavior.max_segments") {
+		t.Fatalf("expected both split problems: %v", ve.Problems)
+	}
+}
+
+func Test_ConfigSplitDefaultsAreOn(t *testing.T) {
+	cfg, err := Parse([]byte(deepseekBaseYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Behavior.SplitOnBlankLine == nil || !*cfg.Behavior.SplitOnBlankLine {
+		t.Fatalf("split_on_blank_line should default to true")
+	}
+	if cfg.Behavior.MaxSegments == nil || *cfg.Behavior.MaxSegments != 4 {
+		t.Fatalf("max_segments default: %v", cfg.Behavior.MaxSegments)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("defaults must validate: %v", err)
 	}
 }

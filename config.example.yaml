@@ -7,12 +7,48 @@ transport:
   self_id: 0
 
 llm:
-  provider: openai
-  model: gpt-4o-mini
-  base_url: https://api.openai.com/v1
-  # api_key 建议走环境变量；此处留空表示未设置
-  timeout: 30s
+  # provider: echo / openai / deepseek
+  #   echo     —— 联调用假模型，回复固定模板，不访问网络
+  #   deepseek —— DeepSeek 官方端点，支持思考模式与前缀缓存计量
+  provider: deepseek
+  model: deepseek-flash
+  base_url: https://api.deepseek.com
+  # 支持 ${VAR} 引用环境变量：未设置时启动即失败，而不是静默变成空串。
+  api_key: ${DEEPSEEK_API_KEY}
+  timeout: 60s
   max_iterations: 10
+
+  # 思考模式（DeepSeek）：默认开启，effort 默认 high。
+  thinking: true
+  reasoning_effort: low        # low / high / max
+
+  # 缓存优先：system_prompt(_file) 是整个会话的不可变前缀，启动时读一次就固定。
+  # 逐字节不变才能命中前缀缓存；严禁写入时间戳/随机数等易变内容。
+  #
+  # 实测（deepseek-flash）：前缀 53~77 token 时命中率恒为 0%；约 1658 token 时，
+  # 完全相同的第二次请求命中 84.9%，追加一轮后 91.9%。所以前缀越长收益越大，
+  # 而这段前缀是所有会话共享的——只付一次未命中的钱。
+  # 方式一：从文件读取（推荐长人格）。文件在启动时读一次并固定为不可变前缀。
+  # system_prompt_file: prompts/my-persona.md
+  # 方式二：直接内联；system_prompt_file 优先级更高。
+  system_prompt: "你是一个运行在聊天平台上的助手。回答要简洁、口语化，适合在聊天窗口阅读。"
+  # 最多回灌多少条历史（一轮约两条）；存储层用高水位批量裁剪，避免每轮裁剪破坏前缀
+  history_turns: 20
+
+behavior:
+  # 私聊策略：always / never
+  private: always
+  # 群聊策略：always / on_mention / never
+  #   on_mention 是默认值——群里不 @ 机器人就不回复，避免刷屏
+  group: on_mention
+
+  # 回复里的空行会被拆成多条消息分别发送。聊天窗口里一大块文字读起来很累，
+  # 真人是一条一条发的。段内的单个换行不会拆。
+  split_on_blank_line: true
+  # 连发之间的间隔
+  split_delay: 400ms
+  # 单次回复最多拆成几条；超出的尾部会合并进最后一条，避免刷屏
+  max_segments: 4
 
 prompt:
   dir: prompts

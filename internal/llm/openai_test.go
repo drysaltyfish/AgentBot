@@ -235,3 +235,170 @@ func Test_F26_EndpointIsBuiltFromBaseURL(t *testing.T) {
 		t.Fatalf("endpoint path: actual=%q expected suffix /chat/completions", path)
 	}
 }
+
+// newOpenAITestWith 与 newOpenAITest 相同，但允许自定义配置（思考档位等）。
+func newOpenAITestWith(t *testing.T, cfg OpenAIConfig, handler http.HandlerFunc) *OpenAI {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	cfg.BaseURL = srv.URL
+	cfg.APIKey = "test-key"
+	cfg.Model = "test-model"
+	cfg.Client = srv.Client()
+	return NewOpenAI(cfg)
+}
+
+const cacheUsageJSON = `{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_cache_hit_tokens":8,"prompt_cache_miss_tokens":2,"completion_tokens_details":{"reasoning_tokens":5}}`
+
+// Test_F26_ThinkingParamsAreSent 覆盖 DeepSeek 思考模式的线上形态与缓存计量解析。
+func Test_F26_ThinkingParamsAreSent(t *testing.T) {
+	t.Parallel()
+	thinking := true
+	var captured map[string]any
+	client := newOpenAITestWith(t, OpenAIConfig{Thinking: &thinking, ReasoningEffort: "low"},
+		func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&captured)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":` + cacheUsageJSON + `}`))
+		})
+
+	resp, err := client.Chat(context.Background(), &ChatRequest{
+		Messages:    []Message{{Role: RoleUser, Content: "hi"}},
+		Temperature: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	th, _ := captured["thinking"].(map[string]any)
+	if th == nil || th["type"] != "enabled" {
+		t.Fatalf("thinking not sent correctly: %+v", captured["thinking"])
+	}
+	if captured["reasoning_effort"] != "low" {
+		t.Fatalf("reasoning_effort: actual=%v", captured["reasoning_effort"])
+	}
+	// 思考模式不支持 temperature：传了不生效，所以不应下发。
+	if _, ok := captured["temperature"]; ok {
+		t.Fatalf("temperature must not be sent in thinking mode: %v", captured["temperature"])
+	}
+	if resp.Usage.PromptCacheHitTokens != 8 || resp.Usage.PromptCacheMissTokens != 2 {
+		t.Fatalf("cache usage: hit=%d miss=%d", resp.Usage.PromptCacheHitTokens, resp.Usage.PromptCacheMissTokens)
+	}
+	if resp.Usage.ReasoningTokens != 5 {
+		t.Fatalf("reasoning tokens: actual=%d", resp.Usage.ReasoningTokens)
+	}
+	if ratio := resp.Usage.CacheHitRatio(); ratio != 0.8 {
+		t.Fatalf("cache hit ratio: actual=%v expected=0.8", ratio)
+	}
+}
+
+// Test_F26_TemperatureSentWhenThinkingDisabled 保证非思考模式仍然下发 temperature。
+func Test_F26_TemperatureSentWhenThinkingDisabled(t *testing.T) {
+	t.Parallel()
+	thinking := false
+	var captured map[string]any
+	client := newOpenAITestWith(t, OpenAIConfig{Thinking: &thinking},
+		func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&captured)
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+		})
+	if _, err := client.Chat(context.Background(), &ChatRequest{
+		Messages:    []Message{{Role: RoleUser, Content: "hi"}},
+		Temperature: 0.7,
+	}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if captured["temperature"] != 0.7 {
+		t.Fatalf("temperature should be sent when thinking is disabled: %v", captured["temperature"])
+	}
+	th, _ := captured["thinking"].(map[string]any)
+	if th == nil || th["type"] != "disabled" {
+		t.Fatalf("thinking type: %+v", captured["thinking"])
+	}
+}
+
+// Test_F26_UnsetThinkingOmitsField 保证未配置时不发 thinking/effort。
+//
+// 其它 OpenAI 兼容端点（本地 Ollama、vLLM 等）不认这些字段，无条件下发会直接 400。
+func Test_F26_UnsetThinkingOmitsField(t *testing.T) {
+	t.Parallel()
+	var captured map[string]any
+	client := newOpenAITestWith(t, OpenAIConfig{}, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&captured)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	})
+	if _, err := client.Chat(context.Background(), &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	for _, k := range []string{"thinking", "reasoning_effort", "stream_options"} {
+		if _, ok := captured[k]; ok {
+			t.Fatalf("unset option must not be sent: %s=%v", k, captured[k])
+		}
+	}
+}
+
+// Test_F28_StreamCarriesCacheUsage 保证流式路径也能拿到缓存计量。
+func Test_F28_StreamCarriesCacheUsage(t *testing.T) {
+	t.Parallel()
+	var captured map[string]any
+	client := newOpenAITestWith(t, OpenAIConfig{Thinking: boolPtr(true), ReasoningEffort: "low", IncludeStreamUsage: true},
+		func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&captured)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"reasoning_content":"想一想"}}]}
+
+data: {"choices":[{"delta":{"content":"hi"}}]}
+
+data: {"choices":[],"usage":` + cacheUsageJSON + `}
+
+data: [DONE]
+
+`))
+		})
+
+	ch, err := client.ChatStream(context.Background(), &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	var reasoning, content string
+	var usage *Usage
+	var done bool
+	for c := range ch {
+		if c.Err != nil {
+			t.Fatalf("stream error: %v", c.Err)
+		}
+		reasoning += c.Reasoning
+		content += c.Content
+		if c.Usage != nil {
+			usage = c.Usage
+		}
+		if c.Done {
+			done = true
+		}
+	}
+	if !done {
+		t.Fatalf("stream did not terminate")
+	}
+	if reasoning != "想一想" || content != "hi" {
+		t.Fatalf("streamed content: reasoning=%q content=%q", reasoning, content)
+	}
+	if usage == nil || usage.PromptCacheHitTokens != 9-1 {
+		t.Fatalf("terminal chunk must carry cache usage: %+v", usage)
+	}
+	if captured["stream_options"] == nil {
+		t.Fatalf("include_usage must be requested when configured")
+	}
+}
+
+// Test_F26_CacheHitRatioWithoutData 覆盖无计量时的取值。
+func Test_F26_CacheHitRatioWithoutData(t *testing.T) {
+	t.Parallel()
+	if got := (Usage{}).CacheHitRatio(); got != 0 {
+		t.Fatalf("ratio without data: actual=%v", got)
+	}
+	if got := (Usage{PromptCacheHitTokens: 3, PromptCacheMissTokens: 1}).CacheHitRatio(); got != 0.75 {
+		t.Fatalf("ratio: actual=%v", got)
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
