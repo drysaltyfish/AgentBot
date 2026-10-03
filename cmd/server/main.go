@@ -603,18 +603,28 @@ func durationOr(p *config.Duration, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-// speakerLabel 返回群聊里用来标识发言人的标签。
+// groupScopedUserID 返回群聊里用于标识发言人的 QQ 号；私聊返回 0。
 //
-// **锚点是 QQ 号，不是昵称**：昵称与群名片随时会改，一改模型就认不出是同一个人，
-// 记忆归属也会跟着断。QQ 号不变，所以历史文本稳定、身份稳定（前缀缓存也顺带稳定）。
-// 要知道这个号是谁，用 get_user_info 查。
-//
-// 私聊返回空串——只有两个人，每句都加前缀是纯噪声。
-func speakerLabel(userID, groupID int64) string {
+// **锚点是 QQ 号而不是昵称**：昵称随时会改，一改模型就认不出是同一个人。
+// 私聊不标：只有两个人，每句都标是纯噪声。
+func groupScopedUserID(userID, groupID int64) int64 {
 	if groupID == 0 || userID <= 0 {
+		return 0
+	}
+	return userID
+}
+
+// speakerDisplayName 返回群聊里展示用的名字（群名片优先）。
+//
+// 只用于**可读性**：身份判定始终靠 QQ 号，所以昵称怎么改都不会认错人。
+func speakerDisplayName(sender event.Sender, groupID int64) string {
+	if groupID == 0 {
 		return ""
 	}
-	return fmt.Sprintf("[QQ%d]", userID)
+	if name := strings.TrimSpace(sender.Card); name != "" {
+		return name
+	}
+	return strings.TrimSpace(sender.Nickname)
 }
 
 // agentRole 把平台上报的成员角色映射成 F-45 的权限角色。
@@ -810,9 +820,10 @@ type replyJob struct {
 	text    string
 	traceID string
 	role    agent.Role
-	// speaker 是发言人在群里的标识（私聊为空）。
-	// 群里不加这个，模型就分不清 A 说的和 B 说的——记忆也会归错人。
-	speaker string
+	// speakerID / speakerName 标识发言人（群聊才有；私聊为 0）。
+	// 它们**不进正文**：正文保持干净，标签在装配时渲染（见 history.Item.RenderText）。
+	speakerID   int64
+	speakerName string
 	// message 是原始消息：引用解析要在 worker 里做，sink 里调 API 会死锁。
 	message event.Message
 	// caller 用于调用平台 API（get_msg）。
@@ -1098,15 +1109,16 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 			inflight.Add(1)
 			select {
 			case jobs <- replyJob{
-				key:     sessions.KeyFor(c.Event.SelfID, c.Event.GroupID, c.Event.UserID),
-				groupID: c.Event.GroupID,
-				userID:  c.Event.UserID,
-				text:    text,
-				traceID: observe.TraceID(c),
-				role:    agentRole(c.Event),
-				speaker: speakerLabel(c.Event.UserID, c.Event.GroupID),
-				message: c.Event.Message,
-				caller:  c.Caller(),
+				key:         sessions.KeyFor(c.Event.SelfID, c.Event.GroupID, c.Event.UserID),
+				groupID:     c.Event.GroupID,
+				userID:      c.Event.UserID,
+				text:        text,
+				traceID:     observe.TraceID(c),
+				role:        agentRole(c.Event),
+				speakerID:   groupScopedUserID(c.Event.UserID, c.Event.GroupID),
+				speakerName: speakerDisplayName(c.Event.Sender, c.Event.GroupID),
+				message:     c.Event.Message,
+				caller:      c.Caller(),
 			}:
 			default:
 				inflight.Done()
@@ -1289,10 +1301,16 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 		}
 	}
 
-	queryText := j.text
-	if j.speaker != "" {
-		queryText = j.speaker + "：" + j.text
+	// 这一轮的输入：正文保持**干净**，发言人/时间作为结构化字段。
+	// 渲染只发生在这里与装配层，因此检索返回的正文不带标签。
+	turn := history.Item{
+		Kind:        history.KindUser,
+		Content:     j.text,
+		SpeakerID:   j.speakerID,
+		SpeakerName: j.speakerName,
+		At:          time.Now(),
 	}
+	queryText := turn.RenderText()
 
 	//nolint:contextcheck // 会话回收时的在途收尾走后台 ctx，与本次请求的生命周期无关
 	sess := p.sessions.GetOrCreate(j.key)
@@ -1361,7 +1379,7 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 
 	// F-40：模型主动结束本轮。这**不是失败**，但也不发任何消息。
 	if errors.Is(runErr, agent.ErrEndOfTurn) {
-		if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindUser, Content: queryText}); err != nil {
+		if err := sess.Hist.Append(callCtx, histKey, turn); err != nil {
 			rlog.Warn("cannot append user turn", "error", err)
 		}
 		rlog.Info("turn ended by end_action", "group_id", j.groupID, "user_id", j.userID)
@@ -1379,7 +1397,7 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 	}
 
 	// 只追加、绝不改写：这是下一轮还能命中前缀缓存的前提。
-	if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindUser, Content: queryText}); err != nil {
+	if err := sess.Hist.Append(callCtx, histKey, turn); err != nil {
 		rlog.Warn("cannot append user turn", "error", err)
 	}
 	if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindAssistant, Content: reply}); err != nil {

@@ -55,13 +55,15 @@ func (h *SQLite) WithTrimmer(t Trimmer) *SQLite {
 // Append 追加一条条目，并在超出上限时按策略裁剪。
 func (h *SQLite) Append(ctx context.Context, key string, item Item) error {
 	m := store.Message{
-		SessionKey: key,
-		Role:       roleOf(item.Kind),
-		Kind:       string(item.Kind),
-		Content:    item.Content,
-		Name:       item.Name,
-		ToolCallID: item.ToolCallID,
-		CreatedAt:  atMillis(item.At),
+		SessionKey:  key,
+		Role:        roleOf(item.Kind),
+		Kind:        string(item.Kind),
+		Content:     item.Content,
+		Name:        item.Name,
+		ToolCallID:  item.ToolCallID,
+		CreatedAt:   atMillis(item.At),
+		SpeakerID:   item.SpeakerID,
+		SpeakerName: item.SpeakerName,
 	}
 	if len(item.ToolCalls) > 0 {
 		raw, err := json.Marshal(item.ToolCalls)
@@ -187,11 +189,13 @@ func atMillis(at time.Time) int64 {
 
 func toItem(m store.Message) (Item, error) {
 	it := Item{
-		Kind:       Kind(m.Kind),
-		Content:    m.Content,
-		Name:       m.Name,
-		ToolCallID: m.ToolCallID,
-		At:         time.UnixMilli(m.CreatedAt),
+		Kind:        Kind(m.Kind),
+		Content:     m.Content,
+		Name:        m.Name,
+		ToolCallID:  m.ToolCallID,
+		At:          time.UnixMilli(m.CreatedAt),
+		SpeakerID:   m.SpeakerID,
+		SpeakerName: m.SpeakerName,
 	}
 	if strings.TrimSpace(m.ToolCalls) != "" {
 		var calls []ToolCall
