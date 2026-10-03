@@ -270,9 +270,23 @@ func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, lg *observe
 		lg.Component("tool").Warn(msg)
 	}))
 
-	var mem *agent.MemoryStore
+	var mem agent.Memory
 	if boolOr(cfg.Agent.Memory, true) {
-		mem = agent.NewMemoryStore(intOr(cfg.Agent.MemoryMax, 64))
+		maxPerScope := intOr(cfg.Agent.MemoryMax, 64)
+		if path := strings.TrimSpace(cfg.Agent.MemoryFile); path != "" {
+			// 落盘：复用 F-38 的 JSONL 存储；裁剪用高水位批量进行，
+			// 避免每次写入都缩短记忆段（那会让记忆块每轮都变，白白失效缓存）。
+			file := history.NewFile(path, maxPerScope).WithTrimmer(history.HighWater{
+				Max: maxPerScope,
+				Low: maxPerScope * 3 / 4,
+			})
+			mem = agent.NewHistoryMemory(file)
+			lg.Component("agent").Info("memory is persisted to disk",
+				"path", path, "max_per_scope", maxPerScope)
+		} else {
+			mem = agent.NewMemoryStore(maxPerScope)
+			lg.Component("agent").Warn("memory is in-process only; it will be lost on restart (set agent.memory_file to persist)")
+		}
 	}
 
 	// 内置工具：先全量注册再按配置裁剪，这样顺序始终等于内置顺序（前缀缓存需要稳定）。
@@ -332,6 +346,7 @@ func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, lg *observe
 		"protocol", string(react.Protocol),
 		"step_timeout", react.StepTimeout.String(),
 		"memory", mem != nil,
+		"memory_file", strings.TrimSpace(cfg.Agent.MemoryFile),
 		"approval", cfg.Agent.ApprovalEnabled)
 	return react, nil
 }

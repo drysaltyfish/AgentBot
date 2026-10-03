@@ -46,9 +46,13 @@ agent:
   protocol: auto
   # 注册 end_action / save_memory / noop 三个虚拟动作（F-40）。
   virtual_actions: true
-  # 进程内长期记忆；F-48 的完整实现（持久化、向量召回）在 M3。
+  # 长期记忆。落盘用 JSONL（复用 F-38 的历史存储）；F-48 的完整实现（书签、
+  # 向量召回、Forget/List）在 M3。
   memory: true
+  # 每个作用域的条数上限（作用域即会话键，记忆严格按作用域隔离）。
   memory_max: 64
+  # 落盘路径。留空则仅进程内，重启即丢——启动时会有一条 WARN 提醒。
+  memory_file: ./data/memory.jsonl
   # 要注册的内置工具（F-44）；留空表示全部注册。
   # 可选：calculator / current_time / json_query / http_fetch / memory_save / memory_recall
   tools: []

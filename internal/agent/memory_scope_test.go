@@ -3,9 +3,11 @@ package agent
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/tool"
@@ -107,5 +109,116 @@ func Test_F47_MemoryLimitMatchesSpec(t *testing.T) {
 	}
 	if MemoryLimit != 500 {
 		t.Fatalf("上限应与 F-47 一致（500）: %d", MemoryLimit)
+	}
+}
+
+// Test_F47_PersistentMemorySurvivesRestart 是本次要补的核心验收。
+//
+// 用两个独立的 HistoryMemory 实例模拟"重启"：第一个写入，第二个（同一路径）必须读到。
+func Test_F47_PersistentMemorySurvivesRestart(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "memory.jsonl")
+	ctxA := WithMemoryScope(context.Background(), "group-111")
+
+	first := NewHistoryMemory(history.NewFile(path, 64))
+	if err := first.Save(ctxA, "主人喜欢橘子汁"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// 模拟重启：全新的存储实例，同一个文件。
+	second := NewHistoryMemory(history.NewFile(path, 64))
+	got, err := second.Recall(ctxA)
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if len(got) != 1 || got[0] != "主人喜欢橘子汁" {
+		t.Fatalf("重启后记忆丢失: %v", got)
+	}
+
+	// 落盘后依然按作用域隔离。
+	other, _ := second.Recall(WithMemoryScope(context.Background(), "group-222"))
+	if len(other) != 0 {
+		t.Fatalf("落盘实现也必须隔离作用域: %v", other)
+	}
+}
+
+func Test_F47_PersistentMemoryValidatesAndDedupes(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "memory.jsonl")
+	m := NewHistoryMemory(history.NewFile(path, 64))
+	ctx := WithMemoryScope(context.Background(), "s")
+
+	if err := m.Save(ctx, "   "); !errors.Is(err, ErrEmptyMemory) {
+		t.Fatalf("空记忆应被拒: %v", err)
+	}
+	if err := m.Save(ctx, "a\nb"); !errors.Is(err, ErrMultilineMemory) {
+		t.Fatalf("多行记忆应被拒: %v", err)
+	}
+	if err := m.Save(ctx, strings.Repeat("字", MemoryLimit+1)); !errors.Is(err, ErrMemoryTooLong) {
+		t.Fatalf("超长记忆应被拒: %v", err)
+	}
+
+	if err := m.Save(ctx, "同一条"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := m.Save(ctx, "同一条"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, _ := m.Recall(ctx)
+	if len(got) != 1 {
+		t.Fatalf("重复写入应去重: %v", got)
+	}
+}
+
+// Test_F47_PersistentMemoryWorksThroughVirtualAction 端到端：save_memory -> 重启 -> 注入。
+func Test_F47_PersistentMemoryWorksThroughVirtualAction(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "memory.jsonl")
+	key := session.Key{SelfID: 1, UserID: 100}
+	mem1 := NewHistoryMemory(history.NewFile(path, 64))
+
+	r := tool.New()
+	if err := RegisterVirtual(r, mem1); err != nil {
+		t.Fatalf("RegisterVirtual: %v", err)
+	}
+	save := &scriptedLLM{replies: []*llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{toolCall("c1", ActionSaveMemory, `{"text":"喜欢橘子汁"}`)}, FinishReason: llm.FinishReasonToolCalls},
+		{Content: "好", FinishReason: "stop"},
+	}}
+	a := &ReactAgent{LLM: save, Tools: r, SystemPrompt: "s", Memory: mem1}
+	if _, err := a.Run(context.Background(), Input{Query: "记住", SessionKey: key}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// 重启后：新的存储实例 + 新的 Agent，记忆必须出现在提示词里。
+	mem2 := NewHistoryMemory(history.NewFile(path, 64))
+	r2 := tool.New()
+	if err := RegisterVirtual(r2, mem2); err != nil {
+		t.Fatalf("RegisterVirtual: %v", err)
+	}
+	probe := &scriptedLLM{replies: []*llm.ChatResponse{{Content: "ok", FinishReason: "stop"}}}
+	b := &ReactAgent{LLM: probe, Tools: r2, SystemPrompt: "s", Memory: mem2}
+	if _, err := b.Run(context.Background(), Input{Query: "我喜欢什么", SessionKey: key}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	found := false
+	for _, m := range probe.request(0).Messages {
+		if strings.Contains(m.Content, "喜欢橘子汁") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("重启后记忆未注入提示词: %+v", probe.request(0).Messages)
+	}
+}
+
+func Test_F47_NoMemoryStoreFailsLoudly(t *testing.T) {
+	t.Parallel()
+	var m *HistoryMemory
+	if err := m.Save(context.Background(), "x"); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("未配置存储应明确失败: %v", err)
+	}
+	if _, err := m.Recall(context.Background()); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("未配置存储应明确失败: %v", err)
 	}
 }
