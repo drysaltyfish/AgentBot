@@ -20,12 +20,14 @@
 package conversation
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
+	"github.com/drysaltyfish/agentbot/internal/session"
 )
 
 // DefaultSystemPrompt 是默认的不可变前缀。
@@ -49,14 +51,26 @@ type Options struct {
 	AmbientTokenBudget int
 	// AmbientMaxChars 是单条环境消息的字符上限；0 用默认值。
 	AmbientMaxChars int
+	// HalfStatic 按会话返回"半静态段"正文（F-65：人格设定，小时级变化）。
+	//
+	// 为空表示没有该段。返回值必须逐字节稳定在 (会话, 人格) 上：同一人格的
+	// 不同会话得到同一段文本，跨会话共享前缀缓存的收益才不被破坏；因此
+	// **不要把 RouteKey/时间戳等每会话不同的内容写进正文**，它们只进日志与指标。
+	HalfStatic func(ctx context.Context, key session.Key) string
 }
 
 // Assembler 把三段装配成消息序列。
+//
+// 三段按变化频率排列（F-65）：静态段（进程启动期内逐字节稳定）→ 半静态段
+// （人格设定，小时级）→ 动态段（时间/最近对话/当前输入，每轮都变）。
+// 物理布局见 ADR-0002：半静态段的"人格设定"并入 system 消息头，
+// "长期记忆"作为紧随其后的独立消息——两者同属半静态频率类，但位置不同。
 type Assembler struct {
-	prefix  string
-	hash    string
-	max     int
-	ambient AmbientOptions
+	prefix     string
+	hash       string
+	max        int
+	ambient    AmbientOptions
+	halfStatic func(ctx context.Context, key session.Key) string
 }
 
 // New 构造 Assembler；前缀在此固定，之后不再改变。
@@ -72,7 +86,7 @@ func New(opts Options) *Assembler {
 	if ambient.MaxCharsPerMessage == 0 {
 		ambient.MaxCharsPerMessage = DefaultAmbientMaxChars
 	}
-	return &Assembler{prefix: system, hash: shortHash(system), max: opts.MaxHistory, ambient: ambient}
+	return &Assembler{prefix: system, hash: HashText(system), max: opts.MaxHistory, ambient: ambient, halfStatic: opts.HalfStatic}
 }
 
 // Prefix 返回不可变前缀正文。
@@ -81,18 +95,26 @@ func (a *Assembler) Prefix() string { return a.prefix }
 // PrefixHash 返回不可变前缀的短摘要，用于在日志里证明前缀跨轮未变。
 func (a *Assembler) PrefixHash() string { return a.hash }
 
-// Build 装配 [不可变前缀] + [记忆] + [只追加历史] + [当前输入]。
+// Build 是 BuildFor 的无会话上下文形式（测试与不关心人格的调用方使用）。
+func (a *Assembler) Build(hist []history.Item, memoryBlock, user string) []llm.Message {
+	return a.BuildFor(context.Background(), session.Key{}, hist, memoryBlock, user)
+}
+
+// BuildFor 装配 [静态段+半静态段] + [记忆] + [只追加历史] + [当前输入]。
 //
 // 顺序即不变量：前缀永远在最先，当前输入永远在最后；记忆紧随前缀，
 // 历史只按原顺序追加（见 ADR-0002）。
 //
+// key 决定半静态段的内容（F-65：当前会话的人格设定）。人格只改变静态段
+// **之后**的字节，因此不同人格的会话仍共享同一段静态前缀。
+//
 // **这是消息序列的唯一装配点。** agent 不再自己拼消息：一旦它自己拼，
 // 窗口与环境消息预算就只会在测试里生效，而线上永远不生效——
 // 这个模块被绕开过一次，真机上就是这么坏掉的。
-func (a *Assembler) Build(hist []history.Item, memoryBlock, user string) []llm.Message {
+func (a *Assembler) BuildFor(ctx context.Context, key session.Key, hist []history.Item, memoryBlock, user string) []llm.Message {
 	items := a.compress(hist)
 	out := make([]llm.Message, 0, len(items)+3)
-	out = append(out, llm.Message{Role: llm.RoleSystem, Content: a.prefix})
+	out = append(out, llm.Message{Role: llm.RoleSystem, Content: a.SystemFor(ctx, key)})
 	// ADR-0002：记忆是独立消息，放在 system 之后、历史之前。
 	// 不进 system 是为了保住 system 段的全局缓存；不放到最后是为了让记忆本身也能被缓存。
 	if memoryBlock != "" {
@@ -102,6 +124,48 @@ func (a *Assembler) Build(hist []history.Item, memoryBlock, user string) []llm.M
 	out = append(out, llm.Message{Role: llm.RoleUser, Content: user})
 	return out
 }
+
+// SystemFor 返回某会话本轮 system 消息的正文：静态段 + 半静态段（人格设定）。
+//
+// 半静态段为空时逐字节等于静态段——未配置人格的部署因此与旧行为完全一致。
+func (a *Assembler) SystemFor(ctx context.Context, key session.Key) string {
+	if a.halfStatic == nil {
+		return a.prefix
+	}
+	half := strings.TrimSpace(a.halfStatic(ctx, key))
+	if half == "" {
+		return a.prefix
+	}
+	return a.prefix + "\n\n" + half
+}
+
+// Segment 是一段提示词的名字与哈希（F-65 的 /prompt-hash 用它）。
+type Segment struct {
+	Name string
+	Hash string
+}
+
+// Segments 返回三段式提示词的哈希报告（F-65）。
+//
+// 静态段是 system 消息里的静态正文；工具 schema 不在其中——它随请求的
+// Tools 字段发送，顺序由 F-41 的注册顺序固定，因此不在本函数的职责内。
+// 半静态段含人格设定与长期记忆（同属小时级变化，合成一段报告）。
+// 动态段每轮都变，给它算"当前值"只会让人误以为可以比对，因此哈希固定为 "-"。
+func (a *Assembler) Segments(ctx context.Context, key session.Key, memoryBlock string) []Segment {
+	half := ""
+	if a.halfStatic != nil {
+		half = strings.TrimSpace(a.halfStatic(ctx, key))
+	}
+	halfHash := HashText(half + "\x00" + memoryBlock)
+	return []Segment{
+		{Name: "static", Hash: a.hash},
+		{Name: "half-static", Hash: halfHash},
+		{Name: "dynamic", Hash: "-"},
+	}
+}
+
+// HashText 返回文本的短摘要（供段哈希使用）。
+func HashText(s string) string { return shortHash(s) }
 
 // compress 按"对话按轮次、环境按 token 预算"分别裁剪，再按**原序**合并。
 //

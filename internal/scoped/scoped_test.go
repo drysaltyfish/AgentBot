@@ -2,6 +2,7 @@ package scoped
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -371,14 +372,14 @@ func Test_F82_PersistenceRoundTrip(t *testing.T) {
 	}
 
 	ref := SessionRef{Scope: GroupScope("g1"), User: "u1"}
-	if p, err := mgr.Persona(ref); err != nil || p != DefaultPersona {
+	if p, err := mgr.Persona(context.Background(), ref); err != nil || p != DefaultPersona {
 		t.Fatalf("initial persona=(%q,%v)", p, err)
 	}
-	changed, err := mgr.SetPersona(ref, "x")
+	changed, err := mgr.SetPersona(context.Background(), ref, "x")
 	if err != nil || !changed {
 		t.Fatalf("SetPersona x=(%v,%v), want (true,nil)", changed, err)
 	}
-	if p, _ := mgr.Persona(ref); p != "x" {
+	if p, _ := mgr.Persona(context.Background(), ref); p != "x" {
 		t.Fatalf("persona after switch=%q", p)
 	}
 	// 同一 store 的新 Manager 必须看到持久化结果（持久化往返）。
@@ -386,22 +387,22 @@ func Test_F82_PersistenceRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager2: %v", err)
 	}
-	if p, _ := mgr2.Persona(ref); p != "x" {
+	if p, _ := mgr2.Persona(context.Background(), ref); p != "x" {
 		t.Fatalf("persisted persona=%q, want x", p)
 	}
-	rk1, _ := mgr.RouteKey(ref)
-	rk2, _ := mgr2.RouteKey(ref)
+	rk1, _ := mgr.RouteKey(context.Background(), ref)
+	rk2, _ := mgr2.RouteKey(context.Background(), ref)
 	if rk1 != rk2 {
 		t.Fatalf("route key not stable across managers: %q vs %q", rk1, rk2)
 	}
 
 	// 切换人格必须让 F-65 半静态段哈希变化。
-	fpBefore, _ := mgr.Fingerprint(ref)
-	changed, err = mgr.SetPersona(ref, "default")
+	fpBefore, _ := mgr.Fingerprint(context.Background(), ref)
+	changed, err = mgr.SetPersona(context.Background(), ref, "default")
 	if err != nil || !changed {
 		t.Fatalf("SetPersona default=(%v,%v), want (true,nil)", changed, err)
 	}
-	fpAfter, _ := mgr.Fingerprint(ref)
+	fpAfter, _ := mgr.Fingerprint(context.Background(), ref)
 	if fpBefore == fpAfter {
 		t.Fatal("persona fingerprint did not change after switch")
 	}
@@ -410,14 +411,14 @@ func Test_F82_PersistenceRoundTrip(t *testing.T) {
 	}
 
 	// 设置同一人格不算变化。
-	if changed, err := mgr.SetPersona(ref, "default"); err != nil || changed {
+	if changed, err := mgr.SetPersona(context.Background(), ref, "default"); err != nil || changed {
 		t.Fatalf("re-set same persona=(%v,%v), want (false,nil)", changed, err)
 	}
 	// 非法或未定义的人格必须被拒绝。
-	if _, err := mgr.SetPersona(ref, "Bad"); err == nil {
+	if _, err := mgr.SetPersona(context.Background(), ref, "Bad"); err == nil {
 		t.Fatal("SetPersona(Bad) succeeded")
 	}
-	if _, err := mgr.SetPersona(ref, "nope"); err == nil {
+	if _, err := mgr.SetPersona(context.Background(), ref, "nope"); err == nil {
 		t.Fatal("SetPersona(unknown) succeeded")
 	}
 }
@@ -436,24 +437,24 @@ func Test_F82_DefaultPersonaStrategy(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 	ref := SessionRef{Scope: GroupScope("g1"), User: "u1"}
-	if p, _ := mgr.Persona(ref); p != DefaultPersona {
+	if p, _ := mgr.Persona(context.Background(), ref); p != DefaultPersona {
 		t.Fatalf("unconfigured persona=%q, want default", p)
 	}
-	k1, err := mgr.RouteKey(ref)
+	k1, err := mgr.RouteKey(context.Background(), ref)
 	if err != nil {
 		t.Fatalf("RouteKey: %v", err)
 	}
-	k2, _ := mgr.RouteKey(ref)
+	k2, _ := mgr.RouteKey(context.Background(), ref)
 	if k1 != k2 {
 		t.Fatal("route key unstable with default persona")
 	}
 	// 未注入 store 时拒绝切换，避免静默不落盘。
-	if _, err := mgr.SetPersona(ref, DefaultPersona); err == nil {
+	if _, err := mgr.SetPersona(context.Background(), ref, DefaultPersona); err == nil {
 		t.Fatal("SetPersona without store succeeded")
 	}
 	// 配置里引用的人格生效。
 	cfg.Set(ref.Scope, KeyPersona, DefaultPersona)
-	if p, _ := mgr.Persona(ref); p != DefaultPersona {
+	if p, _ := mgr.Persona(context.Background(), ref); p != DefaultPersona {
 		t.Fatalf("configured persona=%q", p)
 	}
 }

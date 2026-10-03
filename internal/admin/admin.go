@@ -333,6 +333,8 @@ type Builtins struct {
 	// Reload 提供 /config reload 的手动热加载（F-24）。
 	Reload ReloadFunc
 	// PromptHash 提供 /prompt-hash 的提示词分段哈希（F-65）。
+	// 它拿到 Invocation：半静态段随调用者所在会话的人格变化，
+	// 不告诉它"谁在问"就只能报告一个与实际不符的哈希。
 	PromptHash PromptHashFunc
 }
 
@@ -414,7 +416,7 @@ type HashSegment struct {
 }
 
 // PromptHashFunc 返回提示词各段哈希（F-65）。
-type PromptHashFunc func(ctx context.Context) ([]HashSegment, error)
+type PromptHashFunc func(ctx context.Context, inv Invocation) ([]HashSegment, error)
 
 // statusHandler 把 StatusFunc 适配成命令处理器。
 func statusHandler(fn StatusFunc) Handler {
@@ -471,8 +473,8 @@ func configHandler(fn ReloadFunc) Handler {
 
 // promptHashHandler 把 PromptHashFunc 适配成命令处理器。
 func promptHashHandler(fn PromptHashFunc) Handler {
-	return func(ctx context.Context, _ Invocation) (string, error) {
-		segs, err := fn(ctx)
+	return func(ctx context.Context, inv Invocation) (string, error) {
+		segs, err := fn(ctx, inv)
 		if err != nil {
 			return "", fmt.Errorf("admin: prompt-hash: %w", err)
 		}

@@ -29,7 +29,6 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/reply"
 	"github.com/drysaltyfish/agentbot/internal/router"
-	"github.com/drysaltyfish/agentbot/internal/scoped"
 	"github.com/drysaltyfish/agentbot/internal/secrets"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/store"
@@ -228,12 +227,23 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		sysPrompt = agent.ComposeSystemPrompt(sysPrompt,
 			agent.ToolUsageInstruction(cfg.Agent.ToolHint.Instruction))
 	}
+	// F-82：人格定义在启动期加载并校验——人格名写错要在启动时失败，
+	// 而不是等第一个用户来聊天才发现。F-65 的半静态段取自这里。
+	personaReg, personaMgr, personaErr := buildPersonas(cfg, personaStoreAdapter{st: st}, lg)
+	if personaErr != nil {
+		lifecycle.Error("cannot load personas", "error", personaErr, "dir", cfg.Prompt.EffectivePersonasDir())
+		return 1
+	}
 	asm := conversation.New(conversation.Options{
 		System:     sysPrompt,
 		MaxHistory: histItems,
 		// 环境消息（群里没被 @ 的）按 token 预算压缩，不跟对话争窗口。
 		AmbientTokenBudget: cfg.LLM.AmbientTokenBudgetOr(conversation.DefaultAmbientTokenBudget),
 		AmbientMaxChars:    cfg.LLM.AmbientMaxCharsOr(conversation.DefaultAmbientMaxChars),
+		// F-65 半静态段：会话人格设定。未配置人格时逐字节等于静态段。
+		HalfStatic: personaHalfStatic(personaReg, personaMgr, func(msg string) {
+			lg.Component("persona").Warn(msg)
+		}),
 	})
 	lg.Component("llm").Info("cache-first layout pinned",
 		"prefix_hash", asm.PrefixHash(), "prefix_runes", len([]rune(sysPrompt)),
@@ -242,28 +252,14 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	// Agent：启用时走 ReAct（带工具），否则是直连 LLM。调用方对两条路径同形。
 	// 平台 API 通道：ws 稍后才创建，因此用迟到绑定的盒子。
 	apiCaller := &callerBox{}
-	// F-82：人格定义在启动期加载并校验——人格名写错要在启动时失败，
-	// 而不是等第一个用户来聊天才发现。
-	if personaReg, perr := scoped.Load(cfg.Prompt.EffectivePersonasDir()); perr != nil {
-		lifecycle.Error("cannot load personas", "error", perr, "dir", cfg.Prompt.EffectivePersonasDir())
-		return 1
-	} else {
-		var refs []string
-		if cfg.Prompt.Persona != nil && strings.TrimSpace(*cfg.Prompt.Persona) != "" {
-			refs = append(refs, *cfg.Prompt.Persona)
-		}
-		if vErr := personaReg.ValidateRefs(refs...); vErr != nil {
-			lifecycle.Error("invalid persona reference", "error", vErr)
-			return 1
-		}
-		lifecycle.Info("personas loaded", "dir", cfg.Prompt.EffectivePersonasDir(), "count", personaReg.Len())
-	}
-
 	brain, mem, err := buildAgent(cfg, model, asm, hist, st, apiCaller, lg, auditLog)
 	if err != nil {
 		lifecycle.Error("cannot build agent", "error", err)
 		return 1
 	}
+
+	// F-65：/prompt-hash 的数据源——按调用者所在会话报告各段哈希。
+	promptHash := personaPromptHash(asm, personaMgr, mem, cfg.Transport.EffectiveSelfID(), lg)
 
 	routes := router.NewRouter(router.WithWarnFunc(func(msg string) {
 		lg.Component("router").Warn(msg)
@@ -413,7 +409,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	// F-71：管理命令（/help、/ban、/unban、/banlist）。
 	// 注意：/switch 已由既有路由处理，这里不重复注册——两条授权路径比没有更难维护。
 	// 只在配置了超管时才启用：没有授权者就没有"管理"可言。
-	if adminMod := buildAdminModule(cfg, auditLog, lg, modEngine, costTracker); len(cfg.Moderation.SuperUsers) > 0 {
+	if adminMod := buildAdminModule(cfg, auditLog, lg, modEngine, costTracker, personaMgr, promptHash); len(cfg.Moderation.SuperUsers) > 0 {
 		engine.UsePre(func(c *router.Ctx) bool {
 			if c == nil || c.Event == nil {
 				return true

@@ -94,7 +94,8 @@ type Agent interface {
 // 布局规则（不可变前缀 / 记忆位置 / 呈现窗口 / 环境消息压缩）由实现拥有，
 // 且**只能有一份**（见 docs/adr/0002 与 internal/conversation）。
 type MessageAssembler interface {
-	Build(hist []history.Item, memoryBlock, user string) []llm.Message
+	// BuildFor 按会话键装配本轮消息序列（半静态段随会话人格变化，F-65/F-82）。
+	BuildFor(ctx context.Context, key session.Key, hist []history.Item, memoryBlock, user string) []llm.Message
 	PrefixHash() string
 }
 
@@ -122,7 +123,7 @@ func (a *DirectAgent) Run(ctx context.Context, in Input) (*Output, error) {
 	if a.Assembler == nil {
 		return out, ErrNoAssembler
 	}
-	messages := a.Assembler.Build(in.History, "", in.Query)
+	messages := a.Assembler.BuildFor(ctx, in.SessionKey, in.History, "", in.Query)
 
 	resp, err := a.LLM.Chat(ctx, &llm.ChatRequest{Messages: messages})
 	if err != nil {

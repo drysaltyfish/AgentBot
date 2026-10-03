@@ -202,6 +202,21 @@ var tables = []tableDef{
 			{Table: "prompt_snapshots", Name: "memory_digest", DDL: "memory_digest TEXT NOT NULL DEFAULT ''"},
 		},
 	},
+	{
+		// 会话人格（F-82）：scoped.SessionRef.String() -> 人格名。
+		//
+		// 单独成表而不是并进会话台账：人格是**配置状态**，台账是**计量状态**，
+		// 两者的写入频率与保留策略都不同；混在一张表里，"清空用量"就会顺手
+		// 清掉人格，而那是用户显式设定的东西。
+		//
+		// 不设外键指向 prompts/personas 目录：人格是文件资产，不在库里，
+		// 引用是否有效由启动期校验负责（F-25 fail-fast）。
+		CreateSQL: `CREATE TABLE IF NOT EXISTS session_personas (
+			session_key TEXT PRIMARY KEY,
+			persona     TEXT NOT NULL,
+			updated_at  INTEGER NOT NULL
+		)`,
+	},
 }
 
 // schemaStatements 把 tables 展平成建表/建索引语句序列，顺序与注册顺序一致。

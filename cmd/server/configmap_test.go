@@ -352,7 +352,7 @@ func Test_F71_AdminModuleAuthorizesAndAudits(t *testing.T) {
 
 	var buf bytes.Buffer
 	alog := audit.New(audit.Options{Writer: &buf, QueueSize: 16, Now: time.Now})
-	m := buildAdminModule(cfg, alog, testLogger(t), nil, nil)
+	m := buildAdminModule(cfg, alog, testLogger(t), nil, nil, nil, nil)
 
 	if _, err := m.Dispatch(context.Background(), admin.Request{Text: "/help", UserID: 42, Source: admin.SourceMessage}); err != nil {
 		t.Fatalf("超管执行 /help 不应报错: %v", err)
@@ -409,7 +409,7 @@ func Test_F66_AdminCostCommandReportsUsage(t *testing.T) {
 		t.Fatalf("Chat: %v", err)
 	}
 
-	m := buildAdminModule(cfg, nil, testLogger(t), nil, tracker)
+	m := buildAdminModule(cfg, nil, testLogger(t), nil, tracker, nil, nil)
 	reply, err := m.Dispatch(context.Background(), admin.Request{Text: "/cost", UserID: 42, Source: admin.SourceMessage})
 	if err != nil {
 		t.Fatalf("Dispatch /cost: %v", err)
