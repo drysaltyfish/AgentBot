@@ -31,6 +31,8 @@ type Input struct {
 	History    []llm.Message
 	SessionKey session.Key
 	Files      []Attachment
+	// Role 是发起者的角色，供 F-45 的权限判定使用；为空时按 RoleMember 处理。
+	Role Role
 }
 
 // Step 是可观测的一步。

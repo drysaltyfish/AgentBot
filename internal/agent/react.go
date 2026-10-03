@@ -58,6 +58,14 @@ type ReactAgent struct {
 	ParallelTools bool
 	// Protocol 为空时按 ProtocolAuto 处理。
 	Protocol Protocol
+	// Gate 判定工具调用是否需要人工审批（F-45）；为 nil 表示不启用审批。
+	Gate Gate
+	// Approver 是人工审批通道；判定为 VerdictApprove 但未配置时，调用会被拒绝。
+	Approver Approver
+	// ApprovalTimeout 是审批等待的独立预算，默认 DefaultApprovalTimeout。
+	ApprovalTimeout time.Duration
+	// OnApproval 接收审批审计记录（F-60）。
+	OnApproval func(ApprovalRecord)
 	// Memory 若不为 nil，其结果会被注入到 system 之后、历史之前（见 ADR-0002）。
 	// 这样 system 段（所有会话共享的大头）仍然稳定命中缓存。
 	Memory Memory
@@ -139,7 +147,7 @@ func (a *ReactAgent) Run(ctx context.Context, in Input) (*Output, error) {
 			ToolCalls:        calls,
 		})
 
-		results := a.executeAll(ctx, calls)
+		results := a.executeAll(ctx, calls, in.Role)
 		for idx, call := range calls {
 			res := results[idx]
 			out.ToolCalls = append(out.ToolCalls, call)
@@ -220,7 +228,7 @@ func (a *ReactAgent) now() time.Time {
 //
 // 默认串行（顺序可预测）；只有 ParallelTools 打开**且**同轮所有工具都声明
 // ConcurrencySafe 时才并发——只要其中有一个不安全就整体退回串行。
-func (a *ReactAgent) executeAll(ctx context.Context, calls []llm.ToolCall) []execution {
+func (a *ReactAgent) executeAll(ctx context.Context, calls []llm.ToolCall, role Role) []execution {
 	out := make([]execution, len(calls))
 	if a.ParallelTools && a.allConcurrencySafe(calls) {
 		var wg sync.WaitGroup
@@ -234,14 +242,14 @@ func (a *ReactAgent) executeAll(ctx context.Context, calls []llm.ToolCall) []exe
 						out[i] = execution{Result: tool.Failure(fmt.Sprintf("tool panicked: %v", r))}
 					}
 				}()
-				out[i] = a.execute(ctx, call)
+				out[i] = a.execute(ctx, call, role)
 			}(i, call)
 		}
 		wg.Wait()
 		return out
 	}
 	for i, call := range calls {
-		out[i] = a.execute(ctx, call)
+		out[i] = a.execute(ctx, call, role)
 	}
 	return out
 }
@@ -258,11 +266,18 @@ func (a *ReactAgent) allConcurrencySafe(calls []llm.ToolCall) bool {
 
 // execute 执行单个工具调用。任何失败都转成失败结果，不返回 error——
 // 循环必须继续，让模型看到错误并自行纠错。
-func (a *ReactAgent) execute(ctx context.Context, call llm.ToolCall) execution {
+func (a *ReactAgent) execute(ctx context.Context, call llm.ToolCall, role Role) execution {
 	start := a.now()
 	t, ok := a.Tools.Get(call.Name)
 	if !ok {
 		return a.finish(start, tool.Failure(fmt.Sprintf("unknown tool %q", call.Name)))
+	}
+
+	// F-45：权限判定与人工审批在**单步超时之外**进行。
+	// 若把审批塞进 step 超时，"等人确认"会把工具的执行预算耗光，
+	// 表现为审批通过后工具立刻超时。
+	if res, denied := a.gate(ctx, call, role, start); denied {
+		return res
 	}
 
 	stepCtx, cancel := context.WithTimeout(ctx, a.stepTimeout())
@@ -321,3 +336,91 @@ func addUsage(a, b llm.Usage) llm.Usage {
 }
 
 var _ Agent = (*ReactAgent)(nil)
+
+// approvalTimeout 返回审批等待的独立预算。
+func (a *ReactAgent) approvalTimeout() time.Duration {
+	if a.ApprovalTimeout > 0 {
+		return a.ApprovalTimeout
+	}
+	return DefaultApprovalTimeout
+}
+
+func (a *ReactAgent) auditApproval(rec ApprovalRecord) {
+	if a.OnApproval != nil {
+		a.OnApproval(rec)
+	}
+}
+
+// gate 做权限判定与人工审批；返回 (结果, 是否已拒绝)。
+//
+// 审批等待使用调用方的 ctx（独立预算），而不是单步超时的 ctx——这是 F-45 的明确要求。
+func (a *ReactAgent) gate(ctx context.Context, call llm.ToolCall, role Role, start time.Time) (execution, bool) {
+	if a.Gate == nil {
+		return execution{}, false
+	}
+	if role == "" {
+		role = RoleMember
+	}
+	req := ApprovalRequest{ToolName: call.Name, Arguments: call.Arguments, Role: role}
+	verdict := a.Gate.Check(req)
+
+	// VerdictApprove 与未知判定共用 default 分支（fail-closed），故不单列 case。
+	//nolint:exhaustive // 见上：default 已覆盖 VerdictApprove 与未知判定
+	switch verdict {
+	case VerdictAllow:
+		return execution{}, false
+
+	case VerdictDeny:
+		a.auditApproval(ApprovalRecord{
+			At: a.now(), Request: req, Verdict: verdict,
+			Allowed: false, Reason: "策略拒绝", WaitMS: a.now().Sub(start).Milliseconds(),
+		})
+		return a.finish(start, tool.Failure(fmt.Sprintf("工具 %q 被策略拒绝，未执行", call.Name))), true
+
+	// VerdictApprove 与任何未知判定走同一条 fail-closed 分支，因此不单列 case。
+	default:
+		if a.Approver == nil {
+			a.auditApproval(ApprovalRecord{
+				At: a.now(), Request: req, Verdict: verdict,
+				Allowed: false, Reason: ErrNoApprover.Error(), WaitMS: a.now().Sub(start).Milliseconds(),
+			})
+			return a.finish(start, tool.Failure(fmt.Sprintf(
+				"工具 %q 需要人工确认，但没有配置审批通道，已拒绝", call.Name))), true
+		}
+
+		waitStart := a.now()
+		waitCtx, cancel := context.WithTimeout(ctx, a.approvalTimeout())
+		defer cancel()
+
+		decision, err := a.Approver.Approve(waitCtx, req)
+		waited := a.now().Sub(waitStart).Milliseconds()
+
+		rec := ApprovalRecord{At: a.now(), Request: req, Verdict: verdict, WaitMS: waited}
+
+		switch {
+		case err != nil:
+			// 超时与取消都按"拒绝"处理：不确定的副作用不该被执行。
+			rec.Allowed = false
+			rec.TimedOut = errors.Is(err, context.DeadlineExceeded)
+			rec.Reason = "审批未通过: " + err.Error()
+			a.auditApproval(rec)
+			return a.finish(start, tool.Failure(fmt.Sprintf(
+				"工具 %q 的审批未通过（%v），已拒绝", call.Name, err))), true
+
+		case !decision.Allowed:
+			rec.Allowed = false
+			rec.Reason = decision.Reason
+			if rec.Reason == "" {
+				rec.Reason = "审批被拒绝"
+			}
+			a.auditApproval(rec)
+			return a.finish(start, tool.Failure(fmt.Sprintf(
+				"工具 %q 的审批被拒绝：%s", call.Name, rec.Reason))), true
+		}
+
+		rec.Allowed = true
+		rec.Reason = decision.Reason
+		a.auditApproval(rec)
+		return execution{}, false
+	}
+}
