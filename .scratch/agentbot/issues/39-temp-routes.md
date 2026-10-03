@@ -2,7 +2,7 @@
 
 - **Feature**: F-15（P0）
 - **里程碑**: M2
-- **Status**: open
+- **Status**: resolved
 - **Blocked by**: 无
 - **写域（建议）**: internal/router/, internal/session/
 
@@ -30,3 +30,21 @@
 ## 备注（已定决策）
 
 - **F-15 必须先于 F-16 完成**（附录 A 明确要求）
+
+
+## Comments
+
+### 2026-10-03 · 完成记录
+
+**交付物**：`internal/session/temp.go`、`internal/session/temp_test.go`，以及组合根接线。
+
+- `TempTable`：`Register`（返回幂等移除函数）/ `Offer` / `RemoveKey` / `Len`，并发安全
+- `TempRoute`：`Once`（触发一次自动移除）与 `TTL`（到期自动失效）两种形态
+- **优先级**：`Offer` 命中即消费并返回 true，调用方据此不再走常规路由
+- **会话回收清理**：`Manager.finalize` 调用 `RemoveKey`，并有测试断言"清理后不再吞消息"
+- 组合根接线：事件进入常规路由**之前**先 `sessions.Temp().Offer(...)`
+
+**并发安全是必须的**：注册/投递/移除分别来自工作池、读循环与会话回收三条路径。
+测试用 16 个并发注册 + 8 个并发投递配合 `-race`（CI）覆盖。
+
+**过期项在匹配过程中顺手清理**，保证表有界；测试用可控时钟验证。

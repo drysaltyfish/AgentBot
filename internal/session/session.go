@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/transport"
 )
@@ -238,6 +239,7 @@ type Manager struct {
 	now       func() time.Time
 	onReclaim func(*Session)
 	evicted   int
+	temp      *TempTable
 }
 
 // New 构造 Manager。
@@ -248,6 +250,7 @@ func New(opts ...Option) *Manager {
 		ttl:      DefaultTTL,
 		max:      DefaultMax,
 		now:      time.Now,
+		temp:     NewTempTable(),
 	}
 	for _, o := range opts {
 		o(m)
@@ -257,6 +260,54 @@ func New(opts ...Option) *Manager {
 
 // Name 实现 bot.Component。
 func (m *Manager) Name() string { return "session-manager" }
+
+// Temp 返回临时路由表（F-15）；读循环应先用它 Offer，命中则不再走常规路由。
+func (m *Manager) Temp() *TempTable {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.temp == nil {
+		m.temp = NewTempTable()
+	}
+	return m.temp
+}
+
+// Await 等待该会话的下一条消息（F-16）。
+//
+// 实现方式是一条 Once 的临时路由 + 一个带缓冲的 channel：它**不阻塞事件读循环**，
+// 只是把消息投递进来。ctx 取消或 TTL 到期都会返回错误，并且不留下悬挂的临时路由。
+func (m *Manager) Await(ctx context.Context, key Key, match func(*event.Event) bool) (*event.Event, error) {
+	if match == nil {
+		return nil, ErrAwaitNoMatch
+	}
+	temp := m.Temp()
+	if temp == nil {
+		return nil, ErrTempRoutesUnavailable
+	}
+
+	ch := make(chan *event.Event, 1)
+	remove := temp.Register(TempRoute{
+		Key:   key,
+		Name:  "await",
+		Once:  true,
+		TTL:   DefaultAwaitTTL,
+		Match: match,
+		Deliver: func(ev *event.Event) {
+			// 带缓冲 + 非阻塞投递：读循环绝不因为等待方来不及取而被拖住。
+			select {
+			case ch <- ev:
+			default:
+			}
+		},
+	})
+	defer remove()
+
+	select {
+	case ev := <-ch:
+		return ev, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 
 // KeyFor 按策略把事件字段折成会话键。
 func (m *Manager) KeyFor(selfID, groupID, userID int64) Key {
@@ -373,6 +424,10 @@ func (m *Manager) removeOrder(key Key) {
 
 func (m *Manager) finalize(s *Session) {
 	s.closeRoutes()
+	// F-15：会话回收时一并清理其临时路由，避免悬挂的 Await 把后续消息吞掉。
+	if m.temp != nil {
+		m.temp.RemoveKey(s.ID)
+	}
 	if m.onReclaim != nil {
 		m.onReclaim(s)
 	}
