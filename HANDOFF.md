@@ -14,7 +14,7 @@
 - HEAD = 21059e7，已推送；工作区干净，本轮本地 build/vet/test/gofmt 全绿，CI 走 `gh run watch`。
 - **功能：87/89 完成**；剩下两条（F-07 多账号、F-27 多供应商）在目标范围之外。
   范围内全部完成：F-65 三段式前缀（21059e7）、F-23 定期回收接线（本轮）。
-- **接线：11/15 完成**（含 F-36/F-37、F-71、F-66 计量与 /cost、F-65、F-82、F-23）。这是最大的缺口：按仓库自己的 **F-79**，未接线 = 未交付。
+- **接线：12/15 完成**（含 F-36/F-37、F-71、F-65、F-82、F-23，以及本轮补齐的 F-66 会话维度与持久化）。这是最大的缺口：按仓库自己的 **F-79**，未接线 = 未交付。
 
 ### 已完成的接线（7 处）
 
@@ -30,6 +30,7 @@
 | F-65 | 三段式前缀（静态/半静态/动态）+ `/prompt-hash` 接线 | Test_F65_StaticSegmentIsByteStableAcrossDynamicInputs、Test_F65_HalfStaticTracksPersonaNotScope、Test_F65_PromptHashWithoutPersonaStillReportsStatic |
 | F-82（剩余） | SQLite 会话人格持久化 + `/persona` 切换 + RouteKey/Fingerprint 喂半静态段 | Test_F82_PersonaPersistsAcrossReopen、Test_F82_PersonaSwitchChangesPromptHash、Test_F82_DefaultPersonaDoesNotDuplicateTheStaticSegment |
 | F-23 | 定期回收接入 Bot 生命周期（`app.Go`，不再是没人启动的 `StartReclaimer`） | Test_F23_ReclaimerIsOwnedByBotLifecycle（100 会话回收 + Shutdown 后回收器确实停止） |
+| F-66（剩余） | 会话/用户维度归因经 ctx 进 LLM 链、调用前强制 deny、SQLite 快照持久化、`/cost` 报本会话 | Test_F66_QuotaDenyHappensBeforeSpending、Test_F66_SessionQuotaIsPerSession、Test_F66_CostSnapshotPersistsThroughAdapter、Test_F66_QuotaDenialRepliesWithANotice |
 
 ## 3. 剩余工作
 
@@ -44,13 +45,13 @@
 范围内的功能全部完成。剩余工作只有 §3.2 的接线；
 F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 
-### 3.2 接线（剩 7 处，按建议顺序）
+### 3.2 接线（剩 6 处，按建议顺序）
 
-~~#1 admin 命令入口~~、~~#3 agent.paradigm~~、~~#10 F-82 剩余~~ 均已完成，不再列出。
+~~#1 admin 命令入口~~、~~#2 cost 会话维度~~、~~#3 agent.paradigm~~、~~#10 F-82 剩余~~
+均已完成，不再列出。
 
 | # | 项 | 入口 | 前置条件 / 风险 |
 |---|---|---|---|
-| 2 | cost 会话维度 + 持久化 | 会话键需进 LLM 调用链 | 当前只做全局计量；要强制 session/user 配额，必须把会话键经 ctx 传到 observedLLM，再实现 SQLite cost.Store |
 | 3 | ~~agent.paradigm（F-36/F-37）~~ **已完成** | — | 已接：LLM Evaluator + wrapParadigm；F-37 目前只有默认单 worker，无 workers 列表配置 |
 | 4 | agent.memory 切分层记忆（F-49/F-51） | buildAgent 里 memory 的构造处 | **需要 SQLite TierStore 实现**（internal/memory 只给接口与内存实现）；否则重启丢记忆，是行为退化 |
 | 5 | semcache（F-63） | LLM 请求路径 | 需要 Vectorize（embedding 或二值哈希）+ 出口过滤（F-55）。可接在 observedLLM 层 |
@@ -64,7 +65,8 @@ F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 1. **F-72 无 OTLP 导出**：OpenTelemetry 不在依赖白名单，只实现了 traceparent 传播/采样/context。完整 OTel 需先走依赖准入。
 2. **F-46 是策略层，不是 OS 级隔离**：没有 os/exec 独立进程、cgroup/Job Object、进程组强杀。接口（SandboxDeclarer）已留好。
 3. **F-31/F-32 两处签名偏离规格**：JSONSchemaOf[T]() 返回 (ResponseFormat, error)；Fit/Count 带 ctx。理由已写入代码注释。
-4. **F-66 仅全局计量**，session/user 配额未生效；持久化走内存。
+4. **F-66 的 `downgrade` 动作未强制**：按请求切模型需要 `llm.ChatRequest` 带 model 字段（协议形状改动）。当前会如实告警并继续用原模型。
+   会话/用户维度的计量与 deny 已生效，快照落 SQLite。
 5. **F-24 只交付敏感词表热加载**（组合根里唯一真正读文件的运行时资产）。
 6. **F-63 自定义 Similarity 时退化为有界线性扫描**（包注释已写明理由与上限）。
 7. **F-65 的静态段报告只覆盖 system 正文**：工具 schema 随请求的 Tools 字段发送，

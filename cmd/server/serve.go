@@ -97,25 +97,6 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		lifecycle.Error("cannot build llm", "error", err)
 		return 1
 	}
-	// F-68：用装饰器收集模型调用的状态、延迟与 token，不改 internal/llm。
-	// F-66：成本统计（默认关闭）。计量挂在 LLM 装饰器上，按 provider 真实 usage 记账。
-	var costTracker *cost.Tracker
-	if cfg.Cost.EffectiveEnabled() {
-		t, cerr := buildCostTracker(cfg, lg, catalog)
-		if cerr != nil {
-			lifecycle.Error("cannot build cost tracker", "error", cerr)
-			return 1
-		}
-		costTracker = t
-		defer func() { _ = costTracker.Close() }()
-	}
-
-	model = &observedLLM{next: model, cat: catalog, provider: providerName(cfg), model: cfg.LLM.Model, cost: costTracker}
-
-	// 缓存优先（二）：历史裁剪交给存储层，且用高水位批量裁剪。
-	// 若由装配层每轮裁剪，前缀会逐轮变化，前缀缓存永远无法命中。
-	shape := sendShapeOf(cfg)
-	// 呈现窗口：每轮真正回灌给模型的条数（一轮 ≈ user + assistant 两条）。
 	// F-83：持久层。打不开就启动失败——不得静默降级为内存（那会悄悄丢数据）。
 	// 打开与迁移给一个独立预算：卡住时要在启动阶段暴露，而不是拖到第一条消息。
 	openCtx, cancelOpen := context.WithTimeout(context.Background(), 30*time.Second)
@@ -135,6 +116,30 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	}()
 	lg.Component("store").Info("persistence store is ready",
 		"path", st.Path(), "schema_version", store.SchemaVersion)
+	// F-68：用装饰器收集模型调用的状态、延迟与 token，不改 internal/llm。
+	// F-66：成本统计（默认关闭）。计量挂在 LLM 装饰器上，按 provider 真实 usage 记账；
+	// 配额需要重启后仍然有效，所以成本快照也落 SQLite——因此持久层必须先打开。
+	var costTracker *cost.Tracker
+	if cfg.Cost.EffectiveEnabled() {
+		t, cerr := buildCostTracker(cfg, lg, catalog, costStoreAdapter{st: st})
+		if cerr != nil {
+			lifecycle.Error("cannot build cost tracker", "error", cerr)
+			return 1
+		}
+		costTracker = t
+		defer func() { _ = costTracker.Close() }()
+	}
+
+	model = &observedLLM{
+		next: model, cat: catalog, provider: providerName(cfg), model: cfg.LLM.Model,
+		cost: costTracker,
+		warn: func(msg string) { lg.Component("cost").Warn(msg) },
+	}
+
+	// 缓存优先（二）：历史裁剪交给存储层，且用高水位批量裁剪。
+	// 若由装配层每轮裁剪，前缀会逐轮变化，前缀缓存永远无法命中。
+	shape := sendShapeOf(cfg)
+	// 呈现窗口：每轮真正回灌给模型的条数（一轮 ≈ user + assistant 两条）。
 
 	// F-89：提示词快照是**环形保留**的，启动时裁一次即可保证有界。
 	{

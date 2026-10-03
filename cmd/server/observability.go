@@ -24,6 +24,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/router"
 	"github.com/drysaltyfish/agentbot/internal/scoped"
 	"github.com/drysaltyfish/agentbot/internal/secrets"
+	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/textguard"
 	"github.com/drysaltyfish/agentbot/internal/toggle"
@@ -48,38 +49,69 @@ type observedLLM struct {
 	model    string
 	// cost 是 F-66 的成本统计器；nil 表示未启用。
 	cost *cost.Tracker
+	// warn 是降级路径的告警出口（例如 downgrade 动作未能强制）；nil 时静默。
+	warn func(string)
 }
 
 var _ llm.LLM = (*observedLLM)(nil)
 
-// Chat 记录一次非流式调用的状态、延迟与 token。
+// Chat 记录一次非流式调用的状态、延迟与 token，并在调用前执行配额判定。
 func (o *observedLLM) Chat(ctx context.Context, req *llm.ChatRequest) (*llm.ChatResponse, error) {
+	if err := o.authorize(ctx); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	resp, err := o.next.Chat(ctx, req)
-	o.observe(start, resp, err)
+	o.observe(ctx, start, resp, err)
 	return resp, err
 }
 
 // ChatStream 透传流式调用；流式用量在 provider 侧已计入台账，这里只记请求数。
 func (o *observedLLM) ChatStream(ctx context.Context, req *llm.ChatRequest) (<-chan llm.Chunk, error) {
+	if err := o.authorize(ctx); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	ch, err := o.next.ChatStream(ctx, req)
-	o.observe(start, nil, err)
+	o.observe(ctx, start, nil, err)
 	return ch, err
 }
 
-func (o *observedLLM) observe(start time.Time, resp *llm.ChatResponse, err error) {
-	// F-66：按 provider 真实 usage 记账（不做估算）。
+// authorize 在真正花钱之前执行配额判定（F-66）。
+//
+// 这是唯一能"拒绝请求"的位置：拦在这里，被拒绝的调用不会产生任何 provider 费用。
+// deny 时把 *cost.QuotaError 原样向上传——回复层靠 errors.As 认出它并给用户提示。
+//
+// downgrade 目前**未强制**：按请求切模型需要 llm.ChatRequest 带 model 字段，
+// 而那是协议形状的改动。宁可在此如实告警，也不假装降级生效了。
+func (o *observedLLM) authorize(ctx context.Context) error {
+	if o.cost == nil {
+		return nil
+	}
+	att := cost.AttributionFrom(ctx)
+	dec, err := o.cost.Authorize(att.SessionKey, att.UserID)
+	if err == nil {
+		if dec.Action == cost.ActionDowngrade && o.warn != nil {
+			o.warn(fmt.Sprintf("cost downgrade is configured but not enforced (per-request model switching is unsupported): suggested=%q", dec.DowngradeModel))
+		}
+		return nil
+	}
+	return fmt.Errorf("llm call denied by cost quota: %w", err)
+}
+
+func (o *observedLLM) observe(ctx context.Context, start time.Time, resp *llm.ChatResponse, err error) {
+	// F-66：按 provider 真实 usage 记账（不做估算），并带上 ctx 里的会话/用户归属。
 	// 必须放在指标之前：否则 cat 为 nil 时会把成本一起吞掉（静默丢账比指标缺失严重）。
-	// 当前只带 provider/model/latency：会话键还没进到 LLM 调用链，
-	// 因此会话/用户维度配额暂时无法强制（配置里已如实说明）。
 	if o.cost != nil && resp != nil {
+		att := cost.AttributionFrom(ctx)
 		_, _ = o.cost.Record(cost.Call{
 			Provider:         o.provider,
 			Model:            o.model,
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
 			Latency:          time.Since(start),
+			SessionKey:       att.SessionKey,
+			UserID:           att.UserID,
 			Timestamp:        time.Now(),
 		})
 	}
@@ -516,7 +548,7 @@ func compileWordsFile(path, replacement string) (*textguard.Matcher, error) {
 }
 
 // buildCostTracker 构造成本统计器（F-66）。
-func buildCostTracker(cfg *config.Config, lg *observe.Logger, cat *metrics.Catalog) (*cost.Tracker, error) {
+func buildCostTracker(cfg *config.Config, lg *observe.Logger, cat *metrics.Catalog, persist cost.Store) (*cost.Tracker, error) {
 	_ = cat // 指标接缝预留给后续（当前由 metrics Catalog 之外的调用方使用）
 	prices := cost.PriceTable{Prices: map[string]cost.Price{}, Unknown: cost.UnknownWarnZero}
 	if cfg.Cost.EffectiveUnknownModel() == "reject" {
@@ -539,6 +571,7 @@ func buildCostTracker(cfg *config.Config, lg *observe.Logger, cat *metrics.Catal
 	t, err := cost.New(cost.Options{
 		Prices:    prices,
 		Quotas:    quotas,
+		Store:     persist,
 		QueueSize: cfg.Cost.EffectiveQueueSize(),
 		Warn:      func(msg string) { lg.Component("cost").Warn(msg) },
 	})
@@ -547,7 +580,7 @@ func buildCostTracker(cfg *config.Config, lg *observe.Logger, cat *metrics.Catal
 	}
 	lg.Component("cost").Info("cost tracking enabled",
 		"models", len(prices.Prices), "quotas", len(quotas),
-		"unknown_model", cfg.Cost.EffectiveUnknownModel())
+		"unknown_model", cfg.Cost.EffectiveUnknownModel(), "persistent", persist != nil)
 	return t, nil
 }
 
@@ -633,11 +666,14 @@ func buildAdminModule(cfg *config.Config, alog *audit.Logger, lg *observe.Logger
 	}
 
 	if costTracker != nil {
-		if err := m.Register("cost", "/cost —— 今日与累计调用次数与费用", func(_ context.Context, _ admin.Invocation) (string, error) {
+		if err := m.Register("cost", "/cost —— 今日、累计与本会话的调用次数与费用", func(_ context.Context, inv admin.Invocation) (string, error) {
 			today := costTracker.Today()
 			all := costTracker.Global()
-			return fmt.Sprintf("今日：%d 次调用 / $%.4f\n累计：%d 次调用 / $%.4f",
-				today.Calls, today.Cost, all.Calls, all.Cost), nil
+			// F-66：会话维度就是"谁在问"这一路——用调用者的会话键，而不是某个全局值。
+			key := session.Key{SelfID: cfg.Transport.EffectiveSelfID(), GroupID: inv.GroupID, UserID: inv.UserID}
+			sess := costTracker.Session(key.String())
+			return fmt.Sprintf("今日：%d 次调用 / $%.4f\n累计：%d 次调用 / $%.4f\n本会话：%d 次调用 / $%.4f",
+				today.Calls, today.Cost, all.Calls, all.Cost, sess.Calls, sess.Cost), nil
 		}); err != nil {
 			mlog.Warn("register cost command", "error", err)
 		}

@@ -3,6 +3,7 @@ package reply
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/drysaltyfish/agentbot/internal/agent"
+	"github.com/drysaltyfish/agentbot/internal/cost"
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/observe"
@@ -218,6 +220,40 @@ func Test_UsageIsRecordedUnderTheSessionKey(t *testing.T) {
 	}
 	if tot.Requests != 1 || tot.InputTokens != 7 || tot.OutputTokens != 3 {
 		t.Fatalf("用量未按会话累加: %+v", tot)
+	}
+}
+
+// Test_F66_QuotaDenialRepliesWithANotice 覆盖 F-66 的「deny：拒绝请求并回复提示」。
+//
+// 静默失败会让用户以为消息丢了，再发一次——正好又撞一次限。因此拒绝必须可见。
+// 同时断言：被拒绝的轮次不追加助手回复，也不该污染后续对话上下文。
+func Test_F66_QuotaDenialRepliesWithANotice(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lg := testLogger(t)
+	mgr := testSessions(t)
+	caller := &recordingCaller{}
+	sender := outbound.NewSender(caller, outbound.New())
+	brain := &stubBrain{err: fmt.Errorf("llm call denied by cost quota: %w",
+		&cost.QuotaError{Scope: cost.ScopeSession, Period: cost.PeriodDay, Limit: 1, Used: 1})}
+	p := New(Deps{Brain: brain, Sessions: mgr, Sender: sender, Log: lg, Timeout: 5 * time.Second})
+	key := session.Key{SelfID: 1, GroupID: 2, UserID: 3}
+
+	p.Handle(ctx, testJob(key))
+
+	if caller.count() == 0 {
+		t.Fatal("配额拒绝必须回复提示，而不是静默失败")
+	}
+	sess, ok := mgr.Get(key)
+	if !ok {
+		t.Fatal("会话未建立")
+	}
+	items, err := sess.Hist.Messages(ctx, key.String())
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	if len(items) != 1 || items[0].Kind != history.KindUser {
+		t.Fatalf("被拒绝的轮次不得追加助手回复: %+v", items)
 	}
 }
 
