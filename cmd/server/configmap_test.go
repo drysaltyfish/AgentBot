@@ -13,12 +13,14 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/agent"
 	"github.com/drysaltyfish/agentbot/internal/audit"
 	"github.com/drysaltyfish/agentbot/internal/config"
+	"github.com/drysaltyfish/agentbot/internal/cost"
 	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/router"
+	"github.com/drysaltyfish/agentbot/internal/session"
 )
 
 func testLogger(t *testing.T) *observe.Logger {
@@ -308,7 +310,7 @@ func Test_F66_ObservedLLMRecordsCost(t *testing.T) {
 	cfg.Cost.Prices = map[string]config.CostPrice{
 		"test-model": {InputPer1K: 0.01, OutputPer1K: 0.02},
 	}
-	tracker, err := buildCostTracker(cfg, testLogger(t), nil)
+	tracker, err := buildCostTracker(cfg, testLogger(t), nil, nil)
 	if err != nil {
 		t.Fatalf("buildCostTracker: %v", err)
 	}
@@ -393,7 +395,7 @@ func Test_F66_AdminCostCommandReportsUsage(t *testing.T) {
 	cfg.Cost.Enabled = ptr(true)
 	cfg.Cost.Prices = map[string]config.CostPrice{"m": {InputPer1K: 0.01, OutputPer1K: 0.02}}
 
-	tracker, err := buildCostTracker(cfg, testLogger(t), nil)
+	tracker, err := buildCostTracker(cfg, testLogger(t), nil, nil)
 	if err != nil {
 		t.Fatalf("buildCostTracker: %v", err)
 	}
@@ -405,17 +407,24 @@ func Test_F66_AdminCostCommandReportsUsage(t *testing.T) {
 		model:    "m",
 		cost:     tracker,
 	}
-	if _, err := obs.Chat(context.Background(), &llm.ChatRequest{}); err != nil {
+	// F-66：归属经 ctx 进入 LLM 调用链——会话维度就是靠它建起来的。
+	// SelfID 取自配置：/cost 命令与装饰器必须用同一个会话键，否则两边永远对不上。
+	key := session.Key{SelfID: cfg.Transport.EffectiveSelfID(), GroupID: 7, UserID: 42}
+	callCtx := cost.WithAttribution(context.Background(), key.String(), "42")
+	if _, err := obs.Chat(callCtx, &llm.ChatRequest{}); err != nil {
 		t.Fatalf("Chat: %v", err)
+	}
+	if got := tracker.Session(key.String()); got.Calls != 1 {
+		t.Fatalf("会话维度应记到 1 次调用，实际 %+v", got)
 	}
 
 	m := buildAdminModule(cfg, nil, testLogger(t), nil, tracker, nil, nil)
-	reply, err := m.Dispatch(context.Background(), admin.Request{Text: "/cost", UserID: 42, Source: admin.SourceMessage})
+	reply, err := m.Dispatch(context.Background(), admin.Request{Text: "/cost", UserID: 42, GroupID: 7, Source: admin.SourceMessage})
 	if err != nil {
 		t.Fatalf("Dispatch /cost: %v", err)
 	}
-	if !strings.Contains(reply, "1 次调用") {
-		t.Fatalf("/cost 应反映刚记录的那次调用: %q", reply)
+	if !strings.Contains(reply, "本会话：1 次调用") {
+		t.Fatalf("/cost 应报出调用者所在会话的用量: %q", reply)
 	}
 	if strings.Contains(reply, "$0.0000") {
 		t.Fatalf("/cost 应算出非零费用: %q", reply)

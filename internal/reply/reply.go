@@ -12,12 +12,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/drysaltyfish/agentbot/internal/agent"
 	"github.com/drysaltyfish/agentbot/internal/audit"
 	"github.com/drysaltyfish/agentbot/internal/conversation"
+	"github.com/drysaltyfish/agentbot/internal/cost"
 	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
@@ -180,6 +182,11 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 		rlog.Debug("history assembled", "items", n, "ambient", amb, "convo", n-amb)
 	}
 
+	// F-66：把会话与用户归属放进 ctx——成本装饰器据此做会话/用户维度的计量与配额。
+	// 归属与记忆作用域是同一性质（"这次调用属于谁"），因此都走 ctx 而不是 Input：
+	// agent 与 llm 不需要为了记账多知道一个与它们无关的概念。
+	callCtx = cost.WithAttribution(callCtx, j.Key.String(), strconv.FormatInt(j.UserID, 10))
+
 	// 两条路径（ReAct / 直连）在调用方看完全同形。
 	// 记忆的注入位置与呈现窗口由装配器按 ADR-0002 处理（system 之后、历史之前）。
 	out, runErr := p.deps.Brain.Run(callCtx, agent.Input{
@@ -277,6 +284,20 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 		return
 	}
 	if runErr != nil {
+		// F-66：配额拒绝必须回复提示，不能静默失败。用户看不到原因时会把同一条
+		// 消息再发一次，正好又撞一次限——沉默在这里会放大问题而不是掩盖问题。
+		if qerr := quotaDenied(runErr); qerr != nil {
+			rlog.Warn("model call denied by cost quota",
+				"scope", qerr.Scope, "period", qerr.Period, "limit", qerr.Limit, "used", qerr.Used)
+			target := outbound.PrivateTarget(j.UserID)
+			if j.GroupID != 0 {
+				target = outbound.GroupTarget(j.GroupID)
+			}
+			if _, serr := p.deps.Sender.SendMany(callCtx, target, []string{"本会话的模型额度已用完，请稍后再试或联系管理员。"}, 0); serr != nil {
+				rlog.Warn("cannot send quota notice", "error", serr)
+			}
+			return
+		}
 		rlog.Error("agent run failed", "error", runErr, "steps", len(out.Steps))
 		return
 	}
@@ -342,6 +363,15 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 		"cache_hit_ratio", fmt.Sprintf("%.1f%%", out.Usage.CacheHitRatio()*100),
 		"cache_hit_tokens", out.Usage.PromptCacheHitTokens,
 		"cache_miss_tokens", out.Usage.PromptCacheMissTokens)
+}
+
+// quotaDenied 从错误链里取出配额拒绝，非配额错误返回 nil。
+func quotaDenied(err error) *cost.QuotaError {
+	var qerr *cost.QuotaError
+	if errors.As(err, &qerr) {
+		return qerr
+	}
+	return nil
 }
 
 // toolNames 汇总本轮用到的工具名，便于在日志里核对"到底调了什么"。

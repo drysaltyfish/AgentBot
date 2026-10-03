@@ -217,6 +217,20 @@ var tables = []tableDef{
 			updated_at  INTEGER NOT NULL
 		)`,
 	},
+	{
+		// 成本聚合快照（F-66 的持久化那一条）。
+		//
+		// 存整份快照而不是逐事件流水：本表要回答的是"这个周期已经用了多少"，
+		// 那是聚合量。逐条流水是另一张表的事（会话台账 F-85 已有用量列），
+		// 两者混在一起会让"重启后配额从零开始"这种 bug 更难发现。
+		//
+		// id 固定为 1：快照是覆盖写，历史值没有意义，反而会让加载时选错版本。
+		CreateSQL: `CREATE TABLE IF NOT EXISTS cost_snapshot (
+			id         INTEGER PRIMARY KEY CHECK (id = 1),
+			data       BLOB    NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+	},
 }
 
 // schemaStatements 把 tables 展平成建表/建索引语句序列，顺序与注册顺序一致。
