@@ -18,6 +18,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/ops"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/router"
+	"github.com/drysaltyfish/agentbot/internal/secrets"
 	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/toggle"
 )
@@ -131,9 +132,24 @@ func buildAudit(cfg *config.Config, lg *observe.Logger) (*audit.Logger, io.Close
 		Writer:       io.MultiWriter(writers...),
 		QueueSize:    cfg.Audit.EffectiveQueueSize(),
 		ContentLimit: cfg.Audit.EffectiveContentLimit(),
-		Redactor:     config.Redact,
+		Redactor:     secrets.Scrub,
 		Warn:         func(msg string) { alog.Warn(msg) },
 	}), closer
+}
+
+// resolveAPIKey 按 F-61 的优先级解析密钥：环境变量 > 密钥文件 > 配置内联。
+//
+// warning 需要记录但不阻断启动；error 只在"配了密钥文件却读不到"时出现。
+func resolveAPIKey(cfg *config.Config) (string, string, error) {
+	v, err := secrets.Resolve(secrets.ResolveOptions{
+		EnvVar:   stringOr(cfg.LLM.APIKeyEnv, ""),
+		FilePath: stringOr(cfg.LLM.APIKeyFile, ""),
+		Inline:   stringOr(cfg.LLM.APIKey, ""),
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return v.Secret, v.Warning, nil
 }
 
 // readinessChecks 构造 F-69 的就绪检查：存储可查、传输已连、provider 已配置。

@@ -3,9 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
+	"github.com/drysaltyfish/agentbot/internal/secrets"
 	"gopkg.in/yaml.v3"
 )
 
@@ -62,16 +62,10 @@ func expandSecret(path, raw string) (string, error) {
 }
 
 // Redact 按 F-61 的约定脱敏：只保留前 4 位与长度。
-func Redact(s string) string {
-	if s == "" {
-		return ""
-	}
-	r := []rune(s)
-	if len(r) <= 4 {
-		return strings.Repeat("*", len(r))
-	}
-	return string(r[:4]) + "***（len=" + strconv.Itoa(len(r)) + "）"
-}
+//
+// 实现在 internal/secrets：配置导出、日志清洗、审计共用同一份规则，
+// 避免"配了脱敏但漏了一个出口"。
+func Redact(s string) string { return secrets.Mask(s) }
 
 // Redacted 返回一份用于打印的副本，所有敏感项已脱敏。
 func (c *Config) Redacted() *Config {

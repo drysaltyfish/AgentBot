@@ -28,6 +28,14 @@ const openAIDefaultBase = "https://api.openai.com/v1"
 
 // buildLLM 按配置选择模型实现。echo 是联调用的假实现。
 func buildLLM(cfg *config.Config, lg *observe.Logger) (llm.LLM, error) {
+	apiKey, keyWarn, kerr := resolveAPIKey(cfg)
+	if kerr != nil {
+		return nil, kerr
+	}
+	if keyWarn != "" {
+		lg.Component("llm").Warn(keyWarn)
+	}
+
 	provider := strings.ToLower(strings.TrimSpace(cfg.LLM.Provider))
 	switch provider {
 	case "echo":
@@ -43,7 +51,7 @@ func buildLLM(cfg *config.Config, lg *observe.Logger) (llm.LLM, error) {
 		})
 		base := llm.NewOpenAI(llm.OpenAIConfig{
 			BaseURL:            baseURL(cfg, provider),
-			APIKey:             stringOr(cfg.LLM.APIKey, ""),
+			APIKey:             apiKey,
 			Model:              cfg.LLM.Model,
 			Client:             client,
 			Thinking:           cfg.LLM.Thinking,
@@ -61,6 +69,14 @@ func buildLLM(cfg *config.Config, lg *observe.Logger) (llm.LLM, error) {
 // 关闭思考是刻意的：判定只需要一个标签，开着思考会为它多花几百个 token 与几秒延迟。
 // 复用同一个 provider 与端点，只是换一组模型参数——因此不需要第二份配置。
 func buildJudgeLLM(cfg *config.Config, lg *observe.Logger) (llm.LLM, error) {
+	apiKey, keyWarn, kerr := resolveAPIKey(cfg)
+	if kerr != nil {
+		return nil, kerr
+	}
+	if keyWarn != "" {
+		lg.Component("llm").Warn(keyWarn)
+	}
+
 	provider := strings.ToLower(strings.TrimSpace(cfg.LLM.Provider))
 	switch provider {
 	case "echo":
@@ -76,7 +92,7 @@ func buildJudgeLLM(cfg *config.Config, lg *observe.Logger) (llm.LLM, error) {
 		noThinking := false // 判官不需要思考
 		base := llm.NewOpenAI(llm.OpenAIConfig{
 			BaseURL:  baseURL(cfg, provider),
-			APIKey:   stringOr(cfg.LLM.APIKey, ""),
+			APIKey:   apiKey,
 			Model:    cfg.LLM.Model,
 			Client:   client,
 			Thinking: &noThinking,

@@ -27,6 +27,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/reply"
 	"github.com/drysaltyfish/agentbot/internal/router"
+	"github.com/drysaltyfish/agentbot/internal/secrets"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/transport"
@@ -42,6 +43,8 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		DebugContent: cfg.Log.DebugContent,
 		QueueSize:    cfg.Log.EffectiveQueueSize(),
 		Writer:       os.Stdout,
+		// F-61：全部日志（含 panic 堆栈）落盘前走同一个 Redactor。
+		Redactor: secrets.Scrub,
 	})
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

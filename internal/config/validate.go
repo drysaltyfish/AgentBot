@@ -88,6 +88,15 @@ func (c *Config) Validate() error {
 	if c.LLM.HistoryTurns != nil && *c.LLM.HistoryTurns < 0 {
 		add("llm.history_turns", "不能为负")
 	}
+	if c.LLM.APIKeyFile != nil && strings.TrimSpace(*c.LLM.APIKeyFile) != "" {
+		b, ferr := os.ReadFile(*c.LLM.APIKeyFile)
+		switch {
+		case ferr != nil:
+			add("llm.api_key_file", "无法读取: "+ferr.Error())
+		case strings.TrimSpace(string(b)) == "":
+			add("llm.api_key_file", "文件内容为空")
+		}
+	}
 	if c.LLM.SystemPromptFile != nil && strings.TrimSpace(*c.LLM.SystemPromptFile) != "" {
 		if _, err := os.Stat(*c.LLM.SystemPromptFile); err != nil {
 			add("llm.system_prompt_file", "无法读取: "+err.Error())
