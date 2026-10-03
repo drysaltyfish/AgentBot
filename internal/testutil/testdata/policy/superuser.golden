@@ -1,0 +1,8 @@
+| 功能 | action | params | data |
+|---|---|---|---|
+| 撤回消息 | delete_msg | message_id |  |
+| 查询群成员 | get_group_member_info | user_id |  |
+| 发送消息 | send_msg | text |  |
+| 禁言群成员 | set_group_ban | user_id, duration |  |
+
+列表中没有的 action 不允许调用。
