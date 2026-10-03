@@ -61,7 +61,15 @@ func grayGrid(img image.Image, w, h int) []uint8 {
 					n++
 				}
 			}
-			out[ty*w+tx] = uint8((sum + n/2) / n)
+			avg := (sum + n/2) / n
+			if avg < 0 {
+				avg = 0
+			}
+			if avg > 255 {
+				avg = 255
+			}
+			//nolint:gosec // G115：color.Gray 的 Y 已是 0..255，上面又做了钳制。
+			out[ty*w+tx] = uint8(avg)
 		}
 	}
 	return out

@@ -22,7 +22,7 @@ import (
 // benchLine 匹配 go test -bench 的输出行，例如：
 //
 //	BenchmarkRouteMatch-16   1000   27400 ns/op   8232 B/op   3 allocs/op
-var benchLine = regexp.MustCompile("^(Benchmark\\S+)\\s+\\d+\\s+([0-9.]+)\\s+ns/op")
+var benchLine = regexp.MustCompile(`^(Benchmark\S+)\s+\d+\s+([0-9.]+)\s+ns/op`)
 
 // parse 读取 go test -bench 输出，返回 基准名 -> ns/op。
 func parse(path string) (map[string]float64, error) {
