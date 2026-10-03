@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 )
@@ -276,5 +277,55 @@ func Test_F38_FileHistoryTrimAndReset(t *testing.T) {
 	kept, _ = f.Messages(ctx, "keep")
 	if len(kept) != 1 {
 		t.Fatalf("Reset clobbered another key: %+v", kept)
+	}
+}
+
+// Test_HighWaterTrimsInBatches 守住"裁剪不能每轮都发生"这条缓存前提。
+//
+// Window 策略下每次 Append 超限都会裁剪，等价于每轮缩短历史，前缀每轮变化，
+// 前缀缓存因此永远无法命中。HighWater 必须把裁剪摊薄。
+func Test_HighWaterTrimsInBatches(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	m := NewMemory(20).WithTrimmer(HighWater{Max: 20, Low: 15})
+
+	var prev []Item
+	changes := 0
+	const appends = 200
+	for i := 0; i < appends; i++ {
+		if err := m.Append(ctx, "k", Item{Kind: KindUser, Content: strconv.Itoa(i)}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		cur, err := m.Messages(ctx, "k")
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		if len(cur) > 0 && len(prev) > 0 && cur[0].Content != prev[0].Content {
+			changes++
+		}
+		prev = cur
+	}
+	// 每 (Max-Low)=5 次追加才裁剪一次，理论上约 35 次；给足余量后仍远低于逐轮裁剪。
+	if changes > 60 {
+		t.Fatalf("history trimmed too often (%d changes over %d appends); each trim invalidates the cached prefix", changes, appends)
+	}
+	if changes == 0 {
+		t.Fatalf("HighWater never trimmed; the window is unbounded")
+	}
+	if got := m.Len("k"); got > 20 {
+		t.Fatalf("high water exceeded: %d items", got)
+	}
+}
+
+// Test_HighWaterLeavesUnboundedInputAlone 覆盖未超上限时的行为。
+func Test_HighWaterLeavesUnderLimitAlone(t *testing.T) {
+	t.Parallel()
+	items := make([]Item, 10)
+	for i := range items {
+		items[i] = Item{Kind: KindUser, Content: strconv.Itoa(i)}
+	}
+	out := HighWater{Max: 20, Low: 15}.Apply(items)
+	if len(out) != len(items) {
+		t.Fatalf("under-limit input must be returned as-is: %d -> %d", len(items), len(out))
 	}
 }

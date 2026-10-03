@@ -24,6 +24,14 @@ type OpenAIConfig struct {
 	Client *http.Client
 	// MaxBytes 为 0 时使用 DefaultMaxBytes。
 	MaxBytes int64
+	// Thinking 控制思考模式开关（DeepSeek 的 {"thinking":{"type":...}}）。
+	// nil 表示不下发该字段，由服务端使用默认值。
+	Thinking *bool
+	// ReasoningEffort 是思考强度：low / high / max。空串表示不下发。
+	ReasoningEffort string
+	// IncludeStreamUsage 在流式请求里带上 stream_options.include_usage，
+	// 否则拿不到 usage（也就没有缓存命中计量）。
+	IncludeStreamUsage bool
 }
 
 // OpenAI 是 OpenAI 兼容实现。
@@ -55,11 +63,22 @@ type wireToolCall struct {
 }
 
 type wireMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
-	Name       string         `json:"name,omitempty"`
-	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role             string         `json:"role"`
+	Content          string         `json:"content,omitempty"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	Name             string         `json:"name,omitempty"`
+	ToolCalls        []wireToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
+}
+
+// wireThinking 是思考模式开关（DeepSeek OpenAI 格式）。
+type wireThinking struct {
+	Type string `json:"type"`
+}
+
+// wireStreamOptions 控制流式附加行为。
+type wireStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type wireTool struct {
@@ -77,13 +96,16 @@ type wireResponseFormat struct {
 }
 
 type wireRequest struct {
-	Model          string              `json:"model"`
-	Messages       []wireMessage       `json:"messages"`
-	Tools          []wireTool          `json:"tools,omitempty"`
-	Temperature    float64             `json:"temperature,omitempty"`
-	MaxTokens      int                 `json:"max_tokens,omitempty"`
-	ResponseFormat *wireResponseFormat `json:"response_format,omitempty"`
-	Stream         bool                `json:"stream,omitempty"`
+	Model           string              `json:"model"`
+	Messages        []wireMessage       `json:"messages"`
+	Tools           []wireTool          `json:"tools,omitempty"`
+	Temperature     float64             `json:"temperature,omitempty"`
+	MaxTokens       int                 `json:"max_tokens,omitempty"`
+	ResponseFormat  *wireResponseFormat `json:"response_format,omitempty"`
+	Stream          bool                `json:"stream,omitempty"`
+	StreamOptions   *wireStreamOptions  `json:"stream_options,omitempty"`
+	Thinking        *wireThinking       `json:"thinking,omitempty"`
+	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
 }
 
 type wireResponse struct {
@@ -92,11 +114,34 @@ type wireResponse struct {
 		Delta        wireMessage `json:"delta"`
 		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
+	Usage wireUsage `json:"usage"`
+}
+
+// wireUsage 是回包里的 token 计量。
+//
+// prompt_cache_hit_tokens / prompt_cache_miss_tokens 是 DeepSeek 前缀缓存的命中与未命中
+// 输入 token（见 api-docs.deepseek.com/guides/kv_cache）。
+type wireUsage struct {
+	PromptTokens            int `json:"prompt_tokens"`
+	CompletionTokens        int `json:"completion_tokens"`
+	TotalTokens             int `json:"total_tokens"`
+	PromptCacheHitTokens    int `json:"prompt_cache_hit_tokens"`
+	PromptCacheMissTokens   int `json:"prompt_cache_miss_tokens"`
+	CompletionTokensDetails struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
+}
+
+// toUsage 把线上计量转成内部计量。
+func toUsage(u wireUsage) Usage {
+	return Usage{
+		PromptTokens:          u.PromptTokens,
+		CompletionTokens:      u.CompletionTokens,
+		TotalTokens:           u.TotalTokens,
+		PromptCacheHitTokens:  u.PromptCacheHitTokens,
+		PromptCacheMissTokens: u.PromptCacheMissTokens,
+		ReasoningTokens:       u.CompletionTokensDetails.ReasoningTokens,
+	}
 }
 
 // toWire 把请求转成线上格式。
@@ -105,8 +150,24 @@ type wireResponse struct {
 // 调用会在第二轮被服务端 400 拒绝（反模式 #14）。
 func (o *OpenAI) toWire(req *ChatRequest, stream bool) wireRequest {
 	out := wireRequest{Model: o.cfg.Model, Stream: stream}
+	if o.cfg.Thinking != nil {
+		t := "disabled"
+		if *o.cfg.Thinking {
+			t = "enabled"
+		}
+		out.Thinking = &wireThinking{Type: t}
+	}
+	if o.cfg.ReasoningEffort != "" {
+		out.ReasoningEffort = o.cfg.ReasoningEffort
+	}
+	if stream && o.cfg.IncludeStreamUsage {
+		out.StreamOptions = &wireStreamOptions{IncludeUsage: true}
+	}
 	if req != nil {
-		if req.Temperature > 0 {
+		// 思考模式不支持 temperature/presence_penalty/frequency_penalty——传了不报错也不生效。
+		// 既然如此就不下发，免得产生"设了却没效果"的错觉。
+		thinkingOn := o.cfg.Thinking != nil && *o.cfg.Thinking
+		if req.Temperature > 0 && !thinkingOn {
 			out.Temperature = req.Temperature
 		}
 		out.MaxTokens = req.MaxTokens
@@ -195,13 +256,10 @@ func (o *OpenAI) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, err
 	}
 	choice := parsed.Choices[0]
 	out := &ChatResponse{
-		Content:      choice.Message.Content,
-		FinishReason: choice.FinishReason,
-		Usage: Usage{
-			PromptTokens:     parsed.Usage.PromptTokens,
-			CompletionTokens: parsed.Usage.CompletionTokens,
-			TotalTokens:      parsed.Usage.TotalTokens,
-		},
+		Content:          choice.Message.Content,
+		ReasoningContent: choice.Message.ReasoningContent,
+		FinishReason:     choice.FinishReason,
+		Usage:            toUsage(parsed.Usage),
 	}
 	for _, tc := range choice.Message.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
@@ -249,6 +307,7 @@ func (o *OpenAI) pumpSSE(ctx context.Context, body io.Reader, ch chan<- Chunk) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), o.cfg.MaxBytes64())
 	finish := ""
+	var usage *Usage
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, ":") {
@@ -259,7 +318,8 @@ func (o *OpenAI) pumpSSE(ctx context.Context, body io.Reader, ch chan<- Chunk) {
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
-			SendChunk(ctx, ch, Chunk{Done: true, FinishReason: finish})
+			// 终止分片必须带上此前收到的 usage，否则流式路径拿不到缓存命中计量。
+			SendChunk(ctx, ch, Chunk{Done: true, FinishReason: finish, Usage: usage})
 			return
 		}
 		var parsed wireResponse
@@ -267,21 +327,30 @@ func (o *OpenAI) pumpSSE(ctx context.Context, body io.Reader, ch chan<- Chunk) {
 			// 单个分片解析失败不应中断整条流。
 			continue
 		}
-		if parsed.Usage.TotalTokens > 0 {
-			// 用量分片不产生内容。
+		if parsed.Usage.TotalTokens > 0 || parsed.Usage.PromptTokens > 0 {
+			// 用量分片不产生内容，但要留下缓存命中计量。
+			u := toUsage(parsed.Usage)
+			usage = &u
 			continue
 		}
 		for _, choice := range parsed.Choices {
 			if choice.FinishReason != "" {
 				finish = choice.FinishReason
 			}
-			chunk := Chunk{Content: choice.Delta.Content, FinishReason: choice.FinishReason}
+			chunk := Chunk{
+				Content:      choice.Delta.Content,
+				Reasoning:    choice.Delta.ReasoningContent,
+				FinishReason: choice.FinishReason,
+			}
 			// 说明：F-29 的"按 index 分片聚合"属 M3；这里只透传服务端已给出的完整调用。
 			for _, tc := range choice.Delta.ToolCalls {
 				if tc.ID == "" {
 					continue
 				}
 				chunk.ToolCalls = append(chunk.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+			}
+			if chunk.Content == "" && chunk.Reasoning == "" && len(chunk.ToolCalls) == 0 && chunk.FinishReason == "" {
+				continue
 			}
 			if !SendChunk(ctx, ch, chunk) {
 				return
@@ -292,7 +361,8 @@ func (o *OpenAI) pumpSSE(ctx context.Context, body io.Reader, ch chan<- Chunk) {
 		SendChunk(ctx, ch, Chunk{Done: true, Err: fmt.Errorf("read llm stream: %w", err)})
 		return
 	}
-	SendChunk(ctx, ch, Chunk{Done: true, FinishReason: finish})
+	// 终止分片携带 usage，让调用方拿到缓存命中计量。
+	SendChunk(ctx, ch, Chunk{Done: true, FinishReason: finish, Usage: usage})
 }
 
 // MaxBytes64 返回扫描缓冲上限。

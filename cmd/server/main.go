@@ -17,6 +17,7 @@ import (
 
 	"github.com/drysaltyfish/agentbot/internal/bot"
 	"github.com/drysaltyfish/agentbot/internal/config"
+	"github.com/drysaltyfish/agentbot/internal/conversation"
 	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/httpx"
@@ -99,13 +100,17 @@ func configuredSelfID(cfg *config.Config) int64 {
 	return *cfg.Transport.SelfID
 }
 
+// openAIDefaultBase 是 openai provider 的默认端点，用于判断 base_url 是否被显式配置过。
+const openAIDefaultBase = "https://api.openai.com/v1"
+
 // buildLLM 按配置选择模型实现。echo 是联调用的假实现。
 func buildLLM(cfg *config.Config, lg *observe.Logger) (llm.LLM, error) {
-	switch strings.ToLower(strings.TrimSpace(cfg.LLM.Provider)) {
+	provider := strings.ToLower(strings.TrimSpace(cfg.LLM.Provider))
+	switch provider {
 	case "echo":
 		lg.Component("llm").Warn("using the echo provider: replies are a fixed template, not a real model")
 		return llm.NewEcho(""), nil
-	case "", "openai":
+	case "", "openai", "deepseek":
 		client := httpx.NewClient(httpx.Config{
 			Timeout:      llmTimeout(cfg),
 			MaxBytes:     httpx.Defaults().MaxBytes,
@@ -114,14 +119,94 @@ func buildLLM(cfg *config.Config, lg *observe.Logger) (llm.LLM, error) {
 			AllowPrivate: false,
 		})
 		base := llm.NewOpenAI(llm.OpenAIConfig{
-			BaseURL: cfg.LLM.BaseURL,
-			APIKey:  stringOr(cfg.LLM.APIKey, ""),
-			Model:   cfg.LLM.Model,
-			Client:  client,
+			BaseURL:            baseURL(cfg, provider),
+			APIKey:             stringOr(cfg.LLM.APIKey, ""),
+			Model:              cfg.LLM.Model,
+			Client:             client,
+			Thinking:           cfg.LLM.Thinking,
+			ReasoningEffort:    cfg.LLM.ReasoningEffort,
+			IncludeStreamUsage: true,
 		})
 		return llm.NewRetryLLM(base, retry.Default()), nil
 	default:
 		return nil, fmt.Errorf("unsupported llm.provider %q", cfg.LLM.Provider)
+	}
+}
+
+// baseURL 在未显式配置时给出该 provider 的默认端点。
+//
+// 注意：config.Default() 会把 base_url 预置成 OpenAI 的地址，所以 deepseek 必须同时
+// 识别"为空"与"仍是 OpenAI 默认值"两种情况，否则会静默打到错误的端点。
+func baseURL(cfg *config.Config, provider string) string {
+	u := strings.TrimSpace(cfg.LLM.BaseURL)
+	if provider == "deepseek" && (u == "" || u == openAIDefaultBase) {
+		return "https://api.deepseek.com"
+	}
+	if u == "" {
+		return openAIDefaultBase
+	}
+	return u
+}
+
+// systemPrompt 返回不可变前缀正文。
+//
+// 文件形式在启动时读一次就固定下来——之后任何时刻读文件都可能拿到改动后的内容，
+// 那会让前缀在运行中变化，缓存全部失效。
+func systemPrompt(cfg *config.Config) (string, error) {
+	if path := strings.TrimSpace(stringOr(cfg.LLM.SystemPromptFile, "")); path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read llm.system_prompt_file %s: %w", path, err)
+		}
+		s := strings.TrimSpace(string(b))
+		if s == "" {
+			return "", fmt.Errorf("llm.system_prompt_file %s is empty", path)
+		}
+		return s, nil
+	}
+	if cfg.LLM.SystemPrompt != nil && strings.TrimSpace(*cfg.LLM.SystemPrompt) != "" {
+		return *cfg.LLM.SystemPrompt, nil
+	}
+	return conversation.DefaultSystemPrompt, nil
+}
+
+// historyTurns 返回最多回灌的历史条数。
+func historyTurns(cfg *config.Config) int {
+	if cfg.LLM.HistoryTurns != nil {
+		return *cfg.LLM.HistoryTurns
+	}
+	return 20
+}
+
+// replyRule 把 behavior 配置翻译成路由谓词。
+//
+// 未配置时的默认：私聊 always、群聊 on_mention（群里不 @ 就不回复，避免刷屏），
+// 且绝不回复机器人自己。
+func replyRule(cfg *config.Config) router.Rule {
+	private := cfg.Behavior.Private
+	if private == "" {
+		private = config.ReplyAlways
+	}
+	group := cfg.Behavior.Group
+	if group == "" {
+		group = config.ReplyOnMention
+	}
+	atMe := router.AtMe()
+	return func(c *router.Ctx) bool {
+		if c.Event == nil || c.Event.UserID == 0 || c.Event.UserID == c.Event.SelfID {
+			return false
+		}
+		if c.Event.GroupID == 0 {
+			return private == config.ReplyAlways
+		}
+		switch group {
+		case config.ReplyAlways:
+			return true
+		case config.ReplyOnMention:
+			return atMe(c)
+		default:
+			return false
+		}
 	}
 }
 
@@ -132,8 +217,31 @@ func llmTimeout(cfg *config.Config) time.Duration {
 	return 30 * time.Second
 }
 
+// sendShape 描述回复的发送形态（是否按空行拆分、连发间隔、最多几条）。
+type sendShape struct {
+	splitOnBlank bool
+	delay        time.Duration
+	maxSegments  int
+}
+
+// sendShapeOf 从配置读取发送形态，缺省值与 config.Default 保持一致。
+func sendShapeOf(cfg *config.Config) sendShape {
+	shape := sendShape{splitOnBlank: true, delay: 400 * time.Millisecond, maxSegments: outbound.DefaultMaxSegments}
+	if cfg.Behavior.SplitOnBlankLine != nil {
+		shape.splitOnBlank = *cfg.Behavior.SplitOnBlankLine
+	}
+	if cfg.Behavior.SplitDelay != nil && cfg.Behavior.SplitDelay.D >= 0 {
+		shape.delay = cfg.Behavior.SplitDelay.D
+	}
+	if cfg.Behavior.MaxSegments != nil && *cfg.Behavior.MaxSegments > 0 {
+		shape.maxSegments = *cfg.Behavior.MaxSegments
+	}
+	return shape
+}
+
 // replyJob 是一次待回复的消息。
 type replyJob struct {
+	key     session.Key
 	groupID int64
 	userID  int64
 	text    string
@@ -174,11 +282,32 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		return 1
 	}
 
+	// 缓存优先（二）：历史裁剪交给存储层，且用高水位批量裁剪。
+	// 若由装配层每轮裁剪，前缀会逐轮变化，前缀缓存永远无法命中。
+	shape := sendShapeOf(cfg)
+	histItems := historyTurns(cfg) * 2 // 一轮 ≈ user + assistant 两条
+	hist := history.NewMemory(histItems).WithTrimmer(history.HighWater{
+		Max: histItems,
+		Low: histItems * 3 / 4,
+	})
 	sessions := session.New(
-		session.WithHistory(history.NewMemory(50)),
+		session.WithHistory(hist),
 		session.WithTTL(session.DefaultTTL),
 		session.WithMax(session.DefaultMax),
 	)
+
+	// 缓存优先（一）：不可变前缀在启动时固定一次，所有会话共享同一段前缀，
+	// 因此公共前缀检测能让不同会话也命中同一块缓存。
+	// MaxHistory=0：装配层不再二次裁剪，裁剪权只归存储层。
+	sysPrompt, err := systemPrompt(cfg)
+	if err != nil {
+		lifecycle.Error("cannot load system prompt", "error", err)
+		return 1
+	}
+	asm := conversation.New(conversation.Options{System: sysPrompt})
+	lg.Component("llm").Info("cache-first layout pinned",
+		"prefix_hash", asm.PrefixHash(), "prefix_runes", len([]rune(sysPrompt)),
+		"history_items", histItems, "trim_high_water", histItems, "trim_low_water", histItems*3/4)
 
 	routes := router.NewRouter(router.WithWarnFunc(func(msg string) {
 		lg.Component("router").Warn(msg)
@@ -241,13 +370,8 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		}),
 	)
 
-	// 路由：私聊一律回复；群里只在 @ 机器人时回复，避免刷屏；绝不回复自己。
-	routes.OnMessage(
-		func(c *router.Ctx) bool {
-			return c.Event != nil && c.Event.UserID != 0 && c.Event.UserID != c.Event.SelfID
-		},
-		router.Or(router.OnlyPrivate(), router.AtMe()),
-	).
+	// 回复策略来自配置：私聊 always/never，群聊 always/on_mention/never（见 behavior）。
+	routes.OnMessage(replyRule(cfg)).
 		Named("reply").
 		Priority(router.PriorityNormal).
 		Handle(func(c *router.Ctx) {
@@ -259,7 +383,13 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 			}
 			inflight.Add(1)
 			select {
-			case jobs <- replyJob{groupID: c.Event.GroupID, userID: c.Event.UserID, text: text, traceID: observe.TraceID(c)}:
+			case jobs <- replyJob{
+				key:     sessions.KeyFor(c.Event.SelfID, c.Event.GroupID, c.Event.UserID),
+				groupID: c.Event.GroupID,
+				userID:  c.Event.UserID,
+				text:    text,
+				traceID: observe.TraceID(c),
+			}:
 			default:
 				inflight.Done()
 				lifecycle.Warn("reply queue is full; dropping message", "user_id", c.Event.UserID)
@@ -280,7 +410,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 								lg.Component("reply").Error("worker panic", "panic", fmt.Sprint(rec))
 							}
 						}()
-						handleReply(ctx, lg, model, sender, timeout, j)
+						handleReply(ctx, lg, model, sender, sessions, asm, timeout, shape, j)
 					}()
 				}
 			}
@@ -387,31 +517,79 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 }
 
 // handleReply 调用模型并把回复经唯一出口发出。
-func handleReply(ctx context.Context, lg *observe.Logger, model llm.LLM, sender *outbound.Sender, timeout time.Duration, j replyJob) {
+//
+// 这里落实"缓存优先"：消息序列固定为 [不可变前缀] + [只追加历史] + [当前输入]，
+// 并记录 DeepSeek 返回的缓存命中计量，让命中率可观测、可回归。
+func handleReply(ctx context.Context, lg *observe.Logger, model llm.LLM, sender *outbound.Sender,
+	sessions *session.Manager, asm *conversation.Assembler, timeout time.Duration, shape sendShape, j replyJob) {
 	rlog := lg.Component("reply")
 	callCtx, cancel := context.WithTimeout(observe.WithTraceID(ctx, j.traceID), timeout)
 	defer cancel()
 
-	resp, err := model.Chat(callCtx, &llm.ChatRequest{Messages: []llm.Message{{Role: llm.RoleUser, Content: j.text}}})
+	sess := sessions.GetOrCreate(j.key)
+	histKey := j.key.String()
+	items, err := sess.Hist.Messages(callCtx, histKey)
+	if err != nil {
+		// 读不到历史不该拒绝服务：退化成单轮，但要留下痕迹。
+		rlog.Warn("cannot read history; falling back to a single turn", "error", err)
+	}
+
+	req := &llm.ChatRequest{Messages: asm.Build(items, j.text)}
+	resp, err := model.Chat(callCtx, req)
 	if err != nil {
 		rlog.Error("llm call failed", "error", err)
 		return
 	}
 	reply := strings.TrimSpace(resp.Content)
 	if reply == "" {
-		rlog.Warn("llm returned empty content")
+		rlog.Warn("llm returned empty content", "reasoning_runes", len([]rune(resp.ReasoningContent)))
 		return
 	}
+
+	// 只追加、绝不改写：这是下一轮还能命中前缀缓存的前提。
+	if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindUser, Content: j.text}); err != nil {
+		rlog.Warn("cannot append user turn", "error", err)
+	}
+	if err := sess.Hist.Append(callCtx, histKey, history.Item{Kind: history.KindAssistant, Content: reply}); err != nil {
+		rlog.Warn("cannot append assistant turn", "error", err)
+	}
+
+	rlog.Info("llm call",
+		"prefix_hash", asm.PrefixHash(),
+		"messages", len(req.Messages),
+		"prompt_tokens", resp.Usage.PromptTokens,
+		"completion_tokens", resp.Usage.CompletionTokens,
+		"reasoning_tokens", resp.Usage.ReasoningTokens,
+		"cache_hit_tokens", resp.Usage.PromptCacheHitTokens,
+		"cache_miss_tokens", resp.Usage.PromptCacheMissTokens,
+		"cache_hit_ratio", fmt.Sprintf("%.1f%%", resp.Usage.CacheHitRatio()*100),
+	)
 
 	target := outbound.PrivateTarget(j.userID)
 	if j.groupID != 0 {
 		target = outbound.GroupTarget(j.groupID)
 	}
-	if _, err := sender.Send(callCtx, target, event.Message{event.Text(reply)}); err != nil {
-		rlog.Error("send failed", "error", err)
+
+	// 真人是一条一条发的：按空行拆成多条分别发送，而不是一整块砸过去。
+	parts := []string{reply}
+	if shape.splitOnBlank {
+		parts = outbound.SplitParagraphs(reply, shape.maxSegments)
+	}
+	if len(parts) == 0 {
+		rlog.Warn("reply became empty after splitting")
 		return
 	}
-	rlog.Info("replied", "group_id", j.groupID, "user_id", j.userID, "runes", len([]rune(reply)))
+	sent, err := sender.SendMany(callCtx, target, parts, shape.delay)
+	if err != nil {
+		rlog.Error("send failed", "error", err, "sent", sent, "segments", len(parts))
+		return
+	}
+	// 每条讯息都带上它自己的缓存命中率：这是"缓存优先"是否生效的唯一客观指标。
+	rlog.Info("replied", "group_id", j.groupID, "user_id", j.userID,
+		"runes", len([]rune(reply)), "segments", len(parts),
+		"cache_hit_ratio", fmt.Sprintf("%.1f%%", resp.Usage.CacheHitRatio()*100),
+		"cache_hit_tokens", resp.Usage.PromptCacheHitTokens,
+		"cache_miss_tokens", resp.Usage.PromptCacheMissTokens)
 }
 
 // segmentDetail 渲染非文本段的全部字段，用于确认平台真实载荷。

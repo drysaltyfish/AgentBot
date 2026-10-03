@@ -71,6 +71,30 @@ type Window struct {
 	N int
 }
 
+// HighWater 是高水位批量裁剪：只有超过 Max 才回收到 Low。
+//
+// 为什么不能直接用 Window：Memory 在每次 Append 超限时都会调用裁剪，Window 等价于
+// "每轮都把历史缩短一条"，于是每次请求的消息前缀都不同——DeepSeek 的前缀缓存因此
+// 永远无法命中（实测命中率恒为 0）。HighWater 把裁剪摊薄到每 (Max-Low) 条一次，
+// 让前缀在两次裁剪之间保持稳定，缓存才真正可用。
+type HighWater struct {
+	Max int
+	Low int
+}
+
+// Apply 实现 Trimmer：未超 Max 时原样返回，超了才回收到 Low。
+func (h HighWater) Apply(items []Item) []Item {
+	if h.Max <= 0 || len(items) <= h.Max {
+		return items
+	}
+	low := h.Low
+	if low <= 0 || low >= h.Max {
+		low = h.Max * 3 / 4
+	}
+	// 复用 Window 的对齐逻辑，保证不拆散 tool 调用与结果。
+	return Window{N: low}.Apply(items)
+}
+
 // Apply 实现 Trimmer。
 func (w Window) Apply(items []Item) []Item {
 	if w.N <= 0 || len(items) <= w.N {
