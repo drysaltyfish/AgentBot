@@ -151,6 +151,17 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 }
 
 // Path 返回数据库文件路径。
+// Ping 检查持久层是否可用（F-69 的就绪探针）。
+//
+// 用一次最廉价的查询而不是建新连接：SQLite 是嵌入式单文件，"能查"就是"可用"。
+func (s *Store) Ping(ctx context.Context) error {
+	var one int
+	if err := s.db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+		return fmt.Errorf("store ping: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) Path() string { return s.path }
 
 // Close 关闭存储。
