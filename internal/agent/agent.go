@@ -48,9 +48,13 @@ type Step struct {
 
 // Output 是一次 Agent 运行的结果。
 type Output struct {
-	Text         string
-	Steps        []Step
-	Usage        llm.Usage
+	Text  string
+	Steps []Step
+	// Usage 是本次运行**所有** LLM 调用的用量合计。
+	Usage llm.Usage
+	// LLMCalls 是本次运行实际发生的 LLM 调用次数（ReAct 每轮一次）。
+	// 台账需要"请求数"而不是"步数"：步数把思考与动作分开计，不是请求数。
+	LLMCalls     int
 	ToolCalls    []llm.ToolCall
 	FinishReason string
 }
@@ -93,6 +97,7 @@ func (a *DirectAgent) Run(ctx context.Context, in Input) (*Output, error) {
 	}
 	out.Text = resp.Content
 	out.Usage = resp.Usage
+	out.LLMCalls = 1
 	out.ToolCalls = resp.ToolCalls
 	out.FinishReason = resp.FinishReason
 	out.AddStep(Step{Type: StepThought, Content: resp.Content})

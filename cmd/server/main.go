@@ -48,6 +48,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	configPath := fs.String("config", "config.yaml", "配置文件路径")
 	checkOnly := fs.Bool("check-config", false, "只校验配置并打印生效配置（脱敏）后退出，不启动服务")
 	selfTest := fs.Int64("selftest", 0, "连接平台后向该 QQ 号发送一条自检消息，然后退出")
+	showStats := fs.Bool("stats", false, "打印用量台账后退出（F-85）")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -74,7 +75,56 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *selfTest != 0 {
 		return runSelfTest(cfg, *selfTest, stderr)
 	}
+	if *showStats {
+		return runStats(cfg, stdout, stderr)
+	}
 	return serve(cfg, stderr)
+}
+
+// runStats 打印用量台账（F-85）。
+//
+// 这条命令存在的意义就是让"缓存命中率与花费"可以**查**，而不是只能翻日志。
+func runStats(cfg *config.Config, stdout, stderr io.Writer) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	st, err := store.Open(ctx, store.Options{
+		Path:        cfg.Store.Path,
+		BusyTimeout: durationOr(cfg.Store.BusyTimeout, store.DefaultBusyTimeout),
+	})
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer func() { _ = st.Close() }()
+
+	tot, err := st.UsageTotals(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	_, _ = fmt.Fprintf(stdout, "数据库: %s\n", st.Path())
+	_, _ = fmt.Fprintf(stdout, "消息总数: %d\n", tot.MessageCount)
+	_, _ = fmt.Fprintf(stdout, "请求总数: %d（工具调用 %d 次）\n", tot.Requests, tot.ToolCalls)
+	_, _ = fmt.Fprintf(stdout, "token: 输入 %d / 输出 %d / 推理 %d\n",
+		tot.InputTokens, tot.OutputTokens, tot.ReasoningTokens)
+	_, _ = fmt.Fprintf(stdout, "前缀缓存: 命中 %d / 未命中 %d -> %.1f%%\n",
+		tot.CacheHitTokens, tot.CacheMissTokens, tot.CacheHitRatio()*100)
+	_, _ = fmt.Fprintf(stdout, "估计成本: $%.4f（价格版本 %q）\n", tot.EstimatedCostUSD, tot.PricingVersion)
+
+	top, err := st.TopSessions(ctx, 5)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if len(top) > 0 {
+		_, _ = fmt.Fprintln(stdout, "\n花费最高的会话:")
+		for _, u := range top {
+			_, _ = fmt.Fprintf(stdout, "  %-28s 请求 %4d  token 输入 %8d  命中 %5.1f%%  成本 $%.4f\n",
+				u.SessionKey, u.Requests, u.InputTokens, u.CacheHitRatio()*100, u.EstimatedCostUSD)
+		}
+	}
+	return 0
 }
 
 func shutdownTimeout(cfg *config.Config) time.Duration {
@@ -222,6 +272,13 @@ func llmTimeout(cfg *config.Config) time.Duration {
 	return 30 * time.Second
 }
 
+func floatOr(p *float64, fallback float64) float64 {
+	if p != nil {
+		return *p
+	}
+	return fallback
+}
+
 func intOr(p *int, fallback int) int {
 	if p != nil && *p > 0 {
 		return *p
@@ -364,6 +421,8 @@ type replyPipeline struct {
 	asm      *conversation.Assembler
 	memory   agent.Memory
 	autoMem  *agent.MemoryCommand
+	store    *store.Store
+	price    llm.Price
 	timeout  time.Duration
 	shape    sendShape
 }
@@ -608,9 +667,26 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	lg.Component("agent").Info("proactive memory (model decides)",
 		"enabled", boolOr(cfg.Agent.ProactiveMemory.Enabled, true))
 
+	// 价格未配置时成本恒为 0，但用量（token/请求数）仍然照记——
+	// "花了多少 token"与"花了多少钱"是两件事，前者不依赖价格表。
+	price := llm.Price{
+		Version:            cfg.LLM.Pricing.Version,
+		InputPerMillion:    floatOr(cfg.LLM.Pricing.InputPerMillion, 0),
+		OutputPerMillion:   floatOr(cfg.LLM.Pricing.OutputPerMillion, 0),
+		CacheHitPerMillion: floatOr(cfg.LLM.Pricing.CacheHitPerMillion, 0),
+	}
+	if price.Enabled() {
+		lg.Component("llm").Info("cost tracking is enabled", "pricing_version", price.Version,
+			"input_per_million", price.InputPerMillion, "cache_hit_per_million", price.CacheHitPerMillion,
+			"output_per_million", price.OutputPerMillion)
+	} else {
+		lg.Component("llm").Info("pricing is not configured; cost stays 0 (token usage is still recorded)")
+	}
+
 	pipeline := replyPipeline{
 		brain: brain, sender: sender, sessions: sessions, asm: asm,
 		memory: mem, autoMem: autoMem, timeout: timeout, shape: shape,
+		store: st, price: price,
 	}
 
 	// 回复策略来自配置：私聊 always/never，群聊 always/on_mention/never（见 behavior）。
@@ -808,6 +884,29 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 		SessionKey: j.key,
 		Role:       j.role,
 	})
+
+	// F-85：把这一轮的用量累加进台账。失败只告警——用量统计与用户请求的价值不对等，
+	// 不能让它拖垮回复。
+	if p.store != nil {
+		cost := 0.0
+		if p.price.Enabled() {
+			cost = p.price.Cost(out.Usage)
+		}
+		uerr := p.store.AddUsage(callCtx, j.key.String(), store.UsageDelta{
+			Requests:        int64(out.LLMCalls),
+			ToolCalls:       int64(len(out.ToolCalls)),
+			InputTokens:     int64(out.Usage.PromptTokens),
+			OutputTokens:    int64(out.Usage.CompletionTokens),
+			CacheHitTokens:  int64(out.Usage.PromptCacheHitTokens),
+			CacheMissTokens: int64(out.Usage.PromptCacheMissTokens),
+			ReasoningTokens: int64(out.Usage.ReasoningTokens),
+			CostUSD:         cost,
+			PricingVersion:  p.price.Version,
+		})
+		if uerr != nil {
+			rlog.Warn("cannot record usage; metrics will be incomplete", "error", uerr)
+		}
+	}
 
 	// F-40：模型主动结束本轮。这**不是失败**，但也不发任何消息。
 	if errors.Is(runErr, agent.ErrEndOfTurn) {
