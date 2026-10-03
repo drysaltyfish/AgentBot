@@ -167,7 +167,7 @@ func (c *Commander) handleList() (CommandResult, error) {
 	b.WriteString("黑名单：\n")
 	for i, e := range entries {
 		if i >= c.maxList {
-			b.WriteString(fmt.Sprintf("…… 其余 %d 条已省略\n", len(entries)-c.maxList))
+			fmt.Fprintf(&b, "…… 其余 %d 条已省略\n", len(entries)-c.maxList)
 			break
 		}
 		expires := "永久"
@@ -178,7 +178,7 @@ func (c *Commander) handleList() (CommandResult, error) {
 			}
 			expires = "剩余 " + remain.Truncate(time.Second).String()
 		}
-		b.WriteString(fmt.Sprintf("- %s %s（%s）%s\n", e.Kind, e.ID, expires, e.Reason))
+		fmt.Fprintf(&b, "- %s %s（%s）%s\n", e.Kind, e.ID, expires, e.Reason)
 	}
 	return CommandResult{Handled: true, Reply: strings.TrimRight(b.String(), "\n")}, nil
 }
@@ -208,7 +208,7 @@ func parseSubject(args []string) (BanKind, string, []string, error) {
 	id := args[idx]
 	if kind != BanIP {
 		if _, err := parseID(id); err != nil {
-			return BanUser, "", nil, fmt.Errorf("%w: %v", ErrBadArgs, err)
+			return BanUser, "", nil, fmt.Errorf("%w: %w", ErrBadArgs, err)
 		}
 	}
 	return kind, id, args[idx+1:], nil

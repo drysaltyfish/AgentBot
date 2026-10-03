@@ -274,7 +274,7 @@ func parsePlan(content string) (Plan, error) {
 		return p, fmt.Errorf("%w: no JSON object", ErrInvalidPlan)
 	}
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		return p, fmt.Errorf("%w: %v", ErrInvalidPlan, err)
+		return p, fmt.Errorf("%w: %w", ErrInvalidPlan, err)
 	}
 	if len(p.Subtasks) == 0 {
 		return p, fmt.Errorf("%w: no subtasks", ErrInvalidPlan)

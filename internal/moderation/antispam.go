@@ -165,7 +165,8 @@ func (a *AntiSpam) recordAt(key, text string, now time.Time) (SpamReason, string
 			kept = append(kept, ts)
 		}
 	}
-	b.times = append(kept, now)
+	kept = append(kept, now)
+	b.times = kept
 
 	// 重复：连续相同文本计数；窗口外重置。
 	if text != "" && text == b.lastText && !prevSeen.IsZero() && now.Sub(prevSeen) <= a.cfg.DuplicateWindow {
