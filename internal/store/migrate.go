@@ -28,14 +28,8 @@ type migration struct {
 
 // schemaSQL 是"期望的 schema"，全部语句必须幂等（IF NOT EXISTS）。
 //
-// 新表、新索引、新触发器都放这里；它们天然可重复执行。
-var schemaSQL = append([]string{
-	`CREATE TABLE IF NOT EXISTS schema_version (
-		id      INTEGER PRIMARY KEY CHECK (id = 1),
-		version INTEGER NOT NULL,
-		updated_at INTEGER NOT NULL
-	)`,
-}, append(append(append(append(messagesSchema, sessionsSchema...), memoriesSchema...), pendingSchema...), promptSnapshotSchema...)...)
+// 它由 schema.go 的 tables 派生：新表、新索引、新触发器只改 tables 一处。
+var schemaSQL = append([]string{schemaVersionTableSQL}, schemaStatements()...)
 
 // columnSpec 描述一个声明式维护的列。
 type columnSpec struct {
@@ -44,13 +38,11 @@ type columnSpec struct {
 	DDL   string // 形如 "created_at INTEGER NOT NULL DEFAULT 0"
 }
 
-// desiredColumns 是"表应当具备的列"。缺失的会被 ADD COLUMN 补齐。
+// desiredColumns 是"表应当具备的列"，由 schema.go 的 tables 派生。缺失的会被 ADD COLUMN 补齐。
 //
 // 只用于**加列**。改类型、改约束、改索引都不在这里做——那些必须进 migrations，
 // 因为 ALTER TABLE 表达不了，需要重建表或回填数据。
-var desiredColumns = append([]columnSpec{
-	// 各功能表由后续 ticket 追加（F-85 台账、F-87 记忆、F-86 在途、F-89 快照）。
-}, append(append(append(messagesColumns, sessionsColumns...), memoriesColumns...), promptSnapshotColumns...)...)
+var desiredColumns = declaredColumns()
 
 // migrations 是版本门控链，按版本升序。
 //
@@ -122,11 +114,7 @@ func (s *Store) targetVersion() int {
 
 func (s *Store) ensureVersionTable(ctx context.Context) error {
 	return s.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (
-			id      INTEGER PRIMARY KEY CHECK (id = 1),
-			version INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL
-		)`)
+		_, err := tx.ExecContext(ctx, schemaVersionTableSQL)
 		if err != nil {
 			return fmt.Errorf("create schema_version: %w", err)
 		}

@@ -3,7 +3,6 @@ package history
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -19,11 +18,6 @@ type File struct {
 	maxItems int
 	trimmer  Trimmer
 	now      func() time.Time
-}
-
-type fileRecord struct {
-	Key  string `json:"key"`
-	Item Item   `json:"item"`
 }
 
 // NewFile 构造 JSONL 历史；maxItems <= 0 时使用 DefaultMax。
@@ -62,10 +56,10 @@ func (f *File) Append(ctx context.Context, key string, item Item) error {
 	if err != nil {
 		return fmt.Errorf("open history file: %w", err)
 	}
-	line, err := json.Marshal(fileRecord{Key: key, Item: item})
+	line, err := marshalRecord(fileRecord{Key: key, Item: item})
 	if err != nil {
 		_ = fh.Close()
-		return fmt.Errorf("encode history record: %w", err)
+		return err
 	}
 	_, werr := fh.Write(append(line, '\n'))
 	cerr := fh.Close()
@@ -217,8 +211,8 @@ func (f *File) readAllLocked() ([]fileRecord, error) {
 		if len(line) == 0 {
 			continue
 		}
-		var rec fileRecord
-		if err := json.Unmarshal(line, &rec); err != nil {
+		rec, err := readRecord(line)
+		if err != nil {
 			// 单行损坏不应让整段历史不可读。
 			continue
 		}
@@ -228,17 +222,6 @@ func (f *File) readAllLocked() ([]fileRecord, error) {
 		return nil, fmt.Errorf("scan history file: %w", err)
 	}
 	return out, nil
-}
-
-func writeRecord(w *bufio.Writer, rec fileRecord) error {
-	line, err := json.Marshal(rec)
-	if err != nil {
-		return fmt.Errorf("encode history record: %w", err)
-	}
-	if _, err := w.Write(append(line, '\n')); err != nil {
-		return fmt.Errorf("write history record: %w", err)
-	}
-	return nil
 }
 
 var _ History = (*File)(nil)

@@ -6,7 +6,7 @@ import (
 
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/memory"
-	"github.com/drysaltyfish/agentbot/internal/tool"
+	"github.com/drysaltyfish/agentbot/internal/scope"
 )
 
 // 记忆的文本规则由 internal/memory 拥有，这里只做别名——
@@ -45,15 +45,16 @@ type Memory interface {
 // 作用域隔离是 F-47 的硬要求："群 A 的记忆不得出现在群 B 的回忆中"。
 // 不隔离的话，私聊里存下的内容会被注入群聊的提示词——这是隐私缺陷。
 //
-// 实现下沉在 tool 包：内置工具（如 recall_history）也需要按会话取值，
-// 而 builtin 不该反向依赖 agent。
-func WithMemoryScope(ctx context.Context, scope string) context.Context {
-	return tool.WithScope(ctx, scope)
+// 键的定义下沉在 internal/scope：内置工具（如 recall_history）也需要按会话取值，
+// 而 builtin 不该反向依赖 agent。这里保留旧名，方便调用方按"记忆作用域"的语义阅读；
+// 它只是委托，没有第二份键。
+func WithMemoryScope(ctx context.Context, key string) context.Context {
+	return scope.WithScope(ctx, key)
 }
 
 // MemoryScopeFrom 取出 ctx 里的作用域；没有时返回空串（默认桶）。
 func MemoryScopeFrom(ctx context.Context) string {
-	return tool.ScopeFrom(ctx)
+	return scope.ScopeFrom(ctx)
 }
 
 // validateMemoryText 做写入前的统一校验。

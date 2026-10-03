@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/drysaltyfish/agentbot/internal/history"
+	"github.com/drysaltyfish/agentbot/internal/scope"
 	"github.com/drysaltyfish/agentbot/internal/tool"
 )
 
@@ -52,7 +53,7 @@ type recallHistoryArgs struct {
 
 // Execute 按当前会话读取历史。
 //
-// 会话键从 ctx 取（tool.ScopeFrom）：工具签名固定为 Execute(ctx, args)，
+// 会话键从 ctx 取（scope.ScopeFrom）：工具签名固定为 Execute(ctx, args)，
 // 而"这次调用属于哪个会话"本来就是上下文信息。取不到就明确失败——
 // 绝不能退化成"读全部会话的历史"，那会串台。
 // renderHits 把检索结果渲染成给模型看的紧凑文本。
@@ -123,7 +124,7 @@ func (t recallHistory) Execute(ctx context.Context, args json.RawMessage) (tool.
 	if t.deps.History == nil {
 		return tool.Failure("历史存储未配置"), nil
 	}
-	key := tool.ScopeFrom(ctx)
+	key := scope.ScopeFrom(ctx)
 	if key == "" {
 		return tool.Failure("无法确定当前会话，暂不能召回历史"), nil
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/tool"
@@ -40,7 +41,7 @@ func Test_F40_EndActionTerminatesWithoutReply(t *testing.T) {
 	if err := RegisterVirtual(r, NewMemoryStore(0)); err != nil {
 		t.Fatalf("RegisterVirtual: %v", err)
 	}
-	a := &ReactAgent{LLM: fake, Tools: r}
+	a := &ReactAgent{LLM: fake, Tools: r, Assembler: testAssembler("")}
 
 	out, err := a.Run(context.Background(), Input{Query: "别理我"})
 	if !errors.Is(err, ErrEndOfTurn) {
@@ -71,7 +72,7 @@ func Test_F40_SaveMemoryLandsInNextRunPrompt(t *testing.T) {
 		{ToolCalls: []llm.ToolCall{toolCall("c1", ActionSaveMemory, `{"text":"主人喜欢橘子味"}`)}, FinishReason: llm.FinishReasonToolCalls},
 		{Content: "记住啦", FinishReason: "stop"},
 	}}
-	a := &ReactAgent{LLM: save, Tools: r, SystemPrompt: "你是香橙娘", Memory: mem}
+	a := &ReactAgent{LLM: save, Tools: r, Assembler: testAssembler("你是香橙娘"), Memory: mem}
 	if _, err := a.Run(context.Background(), Input{Query: "记住我喜欢橘子味"}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -81,7 +82,7 @@ func Test_F40_SaveMemoryLandsInNextRunPrompt(t *testing.T) {
 
 	// 第二次运行：记忆必须出现在提示词里。
 	second := &scriptedLLM{replies: []*llm.ChatResponse{{Content: "嗯嗯", FinishReason: "stop"}}}
-	b := &ReactAgent{LLM: second, Tools: r, SystemPrompt: "你是香橙娘", Memory: mem}
+	b := &ReactAgent{LLM: second, Tools: r, Assembler: testAssembler("你是香橙娘"), Memory: mem}
 	if _, err := b.Run(context.Background(), Input{Query: "我喜欢什么味"}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -107,12 +108,15 @@ func Test_F40_MemoryInjectionPosition(t *testing.T) {
 	}
 	fake := &scriptedLLM{replies: []*llm.ChatResponse{{Content: "ok", FinishReason: "stop"}}}
 	a := &ReactAgent{
-		LLM: fake, Tools: tool.New(), SystemPrompt: "系统提示词", Memory: mem,
+		LLM:       fake,
+		Tools:     tool.New(),
+		Assembler: testAssembler("系统提示词"),
+		Memory:    mem,
 	}
 	if _, err := a.Run(context.Background(), Input{
 		Query:      "当前问题",
 		SessionKey: key,
-		History:    []llm.Message{{Role: llm.RoleUser, Content: "历史1"}, {Role: llm.RoleAssistant, Content: "历史2"}},
+		History:    []history.Item{{Kind: history.KindUser, Content: "历史1"}, {Kind: history.KindAssistant, Content: "历史2"}},
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -159,7 +163,7 @@ func Test_F40_SaveMemoryValidationIsFedBack(t *testing.T) {
 				{ToolCalls: []llm.ToolCall{toolCall("c1", ActionSaveMemory, string(args))}, FinishReason: llm.FinishReasonToolCalls},
 				{Content: "好吧", FinishReason: "stop"},
 			}}
-			a := &ReactAgent{LLM: fake, Tools: r, Memory: mem}
+			a := &ReactAgent{LLM: fake, Tools: r, Memory: mem, Assembler: testAssembler("")}
 			if _, err := a.Run(context.Background(), Input{Query: "记住"}); err != nil {
 				t.Fatalf("校验失败不应中断循环: %v", err)
 			}

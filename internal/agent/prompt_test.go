@@ -86,7 +86,7 @@ func Test_F89_AgentReportsPromptAndMemoryDigests(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 	fake := &scriptedLLM{replies: []*llm.ChatResponse{{Content: "ok", FinishReason: "stop"}}}
-	a := &ReactAgent{LLM: fake, Tools: tool.New(), SystemPrompt: "系统提示词", Memory: mem}
+	a := &ReactAgent{LLM: fake, Tools: tool.New(), Assembler: testAssembler("系统提示词"), Memory: mem}
 
 	out, err := a.Run(ctx, Input{Query: "你好", SessionKey: key})
 	if err != nil {
@@ -114,7 +114,7 @@ func Test_F89_AgentReportsPromptAndMemoryDigests(t *testing.T) {
 		t.Fatalf("记忆变化后指纹必须变化，否则分类器区分不了预期与意外")
 	}
 	// 没有记忆时不应误报有记忆块。
-	noMem := &ReactAgent{LLM: second, Tools: tool.New(), SystemPrompt: "S"}
+	noMem := &ReactAgent{LLM: second, Tools: tool.New(), Assembler: testAssembler("S")}
 	out3, err := noMem.Run(ctx, Input{Query: "hi", SessionKey: key})
 	if err != nil {
 		t.Fatalf("Run: %v", err)

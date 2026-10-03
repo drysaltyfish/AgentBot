@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/drysaltyfish/agentbot/internal/scope"
 	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/textsim"
-	"github.com/drysaltyfish/agentbot/internal/tool"
 )
 
 // 判定分带：相似度落在 [LowBand, HighBand) 之外时不需要语义判断。
@@ -67,7 +67,8 @@ func New(opts Options) *Store {
 
 // Save 实现 agent.Memory：把一条事实写入当前作用域。
 //
-// 作用域经 ctx 传递（与 agent.WithMemoryScope 同一个键），因此这里不接收 scope 参数。
+// 作用域经 ctx 传递（键由 internal/scope 拥有，agent.WithMemoryScope 是它的别名），
+// 因此这里不接收 scope 参数。
 func (s *Store) Save(ctx context.Context, text string) error {
 	if s == nil || s.st == nil {
 		return ErrUnavailable
@@ -76,13 +77,13 @@ func (s *Store) Save(ctx context.Context, text string) error {
 	if err != nil {
 		return err
 	}
-	scope := tool.ScopeFrom(ctx)
-	if scope == "" {
+	scopeKey := scope.ScopeFrom(ctx)
+	if scopeKey == "" {
 		// 空作用域会把所有会话的记忆混在一起——宁可写入失败，也不能串。
 		return fmt.Errorf("save memory: %w", ErrUnavailable)
 	}
 
-	best, sim, found, err := s.st.FindSimilarMemory(ctx, scope, trimmed)
+	best, sim, found, err := s.st.FindSimilarMemory(ctx, scopeKey, trimmed)
 	if err != nil {
 		return err
 	}
@@ -99,7 +100,7 @@ func (s *Store) Save(ctx context.Context, text string) error {
 		}
 	}
 
-	res, err := s.st.SaveMemoryWith(ctx, store.Memory{ScopeKey: scope, Text: trimmed}, opts)
+	res, err := s.st.SaveMemoryWith(ctx, store.Memory{ScopeKey: scopeKey, Text: trimmed}, opts)
 	if err != nil {
 		return err
 	}
@@ -108,13 +109,13 @@ func (s *Store) Save(ctx context.Context, text string) error {
 	}
 	// 留存：写入后顺手淘汰，不让作用域无界增长。
 	if s.maxPerScope > 0 {
-		if n, terr := s.st.TrimMemories(ctx, scope, s.maxPerScope); terr != nil {
+		if n, terr := s.st.TrimMemories(ctx, scopeKey, s.maxPerScope); terr != nil {
 			// 淘汰失败不影响这次写入的成功语义，但必须留痕。
 			if s.warn != nil {
 				s.warn("memory retention trim failed: " + terr.Error())
 			}
 		} else if n > 0 && s.warn != nil {
-			s.warn(fmt.Sprintf("memory retention evicted %d entr(ies) in scope %s", n, scope))
+			s.warn(fmt.Sprintf("memory retention evicted %d entr(ies) in scope %s", n, scopeKey))
 		}
 	}
 	return nil
@@ -153,7 +154,7 @@ func (s *Store) Recall(ctx context.Context) ([]string, error) {
 	if s == nil || s.st == nil {
 		return nil, ErrUnavailable
 	}
-	items, err := s.st.RecallMemories(ctx, tool.ScopeFrom(ctx))
+	items, err := s.st.RecallMemories(ctx, scope.ScopeFrom(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +170,7 @@ func (s *Store) List(ctx context.Context, limit int) ([]store.Memory, error) {
 	if s == nil || s.st == nil {
 		return nil, ErrUnavailable
 	}
-	return s.st.ListMemories(ctx, tool.ScopeFrom(ctx), limit)
+	return s.st.ListMemories(ctx, scope.ScopeFrom(ctx), limit)
 }
 
 // Forget 删除一条记忆（幂等）。
@@ -177,7 +178,7 @@ func (s *Store) Forget(ctx context.Context, id int64) (bool, error) {
 	if s == nil || s.st == nil {
 		return false, ErrUnavailable
 	}
-	return s.st.ForgetMemory(ctx, tool.ScopeFrom(ctx), id)
+	return s.st.ForgetMemory(ctx, scope.ScopeFrom(ctx), id)
 }
 
 // ForgetScope 清空当前作用域。
@@ -185,7 +186,7 @@ func (s *Store) ForgetScope(ctx context.Context) (int, error) {
 	if s == nil || s.st == nil {
 		return 0, ErrUnavailable
 	}
-	return s.st.ForgetScope(ctx, tool.ScopeFrom(ctx))
+	return s.st.ForgetScope(ctx, scope.ScopeFrom(ctx))
 }
 
 // Trim 把当前作用域淘汰到 keep 条（F-88 的留存策略）。
@@ -193,7 +194,7 @@ func (s *Store) Trim(ctx context.Context, keep int) (int, error) {
 	if s == nil || s.st == nil {
 		return 0, ErrUnavailable
 	}
-	return s.st.TrimMemories(ctx, tool.ScopeFrom(ctx), keep)
+	return s.st.TrimMemories(ctx, scope.ScopeFrom(ctx), keep)
 }
 
 // JudgeFallbacks 返回因判官失败而退回确定性判据的次数（观测用）。

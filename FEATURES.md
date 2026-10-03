@@ -339,7 +339,9 @@
 
 **规格**
 - `type Router struct { mu sync.RWMutex; routes []*Route; epoch uint64 }`
-- `type Route struct { Kind string; Rules []Rule; Handlers []Handler; Priority int; Block bool; Break bool; Once bool; Name string }`
+- `type Route`：**字段全部私有**，防止外部绕过 Router 记账（重排序、重名告警）直接改写状态。
+  配置走链式方法：`Named`/`Priority`/`Once`/`Block`/`Break`/`Expire`/`Handle`/`UseRules`/`UsePre`；
+  读面提供 `Kind`/`Name`/`Level`/`IsOnce`/`IsBlocked`/`SkipsPost`/`Rules`/`Handlers`/`PreRules` 等副本访问器。
 - 注册 API 返回 `*Route` 以便链式配置：`r.On("message", rules...).Priority(10).Handle(h)`。
 - **禁止包级全局注册表**；`Router` 由 `Bot` 持有，通过依赖注入传递。
 - 便捷触发器与通用触发器并存：`OnMessage`/`OnNotice`/`OnRequest`/`OnCommand`/`OnPrefix`/`OnSuffix`/`OnRegex`/`OnKeyword`/`OnFullMatch`/`OnAtMe`。
@@ -635,7 +637,8 @@
 
 **规格**
 - `func ParseCommandArgs(s string) ([]string, error)`：手写 shellwords 词法——支持单/双引号、反斜杠转义、连续空白折叠；未闭合引号返回错误。
-- `func BindFlags(v any, args []string) error`：按 `flag:"name,default=..."` struct tag 把字段绑定到 `flag.FlagSet`；支持 `bool`/`int`/`int64`/`float64`/`string`/`time.Duration`。
+- ~~`func BindFlags(v any, args []string) error`~~：**已删除**。该反射绑定没有任何生产调用方（只有自己的测试），
+  属于纯表面积，移除后命令参数只保留 `ParseCommandArgs` 的词法解析；将来真需要结构化 flag 时再按需引入。
 - `Command` 规则（F-14）解析后把**参数切片**写入 `StateKeyArgs`：类型是 `[]string`，不是拼接后的字符串。
 - 解析或绑定失败 → 回一句用法提示（走 F-55 出口）并终止本条路由，不进入 Handler。
 - 管理命令（F-71）统一基于本 Feature，不各自解析。
@@ -646,7 +649,7 @@
 - 空参数串返回空切片而非 nil（便于测试断言）。
 
 **验收**
-- 表驱动：带引号、带转义、未闭合引号、空串、重复空白、正常 flag 绑定，共 6 组。
+- 表驱动：带引号、带转义、未闭合引号、空串、重复空白。
 - 断言 `StateKeyArgs` 的静态类型为 `[]string`。
 
 ---

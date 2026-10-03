@@ -121,7 +121,7 @@ func Test_Assembler_SeparatesConvoAndAmbient(t *testing.T) {
 	items = append(items, convo("我问的第一句"))
 	items = append(items, convo("我问的第二句"))
 
-	msgs := a.Build(items, "现在这句")
+	msgs := a.Build(items, "", "现在这句")
 	joined := ""
 	for _, m := range msgs {
 		joined += m.Content + "|"

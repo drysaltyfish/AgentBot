@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/drysaltyfish/agentbot/internal/scope"
 	"github.com/drysaltyfish/agentbot/internal/store"
-	"github.com/drysaltyfish/agentbot/internal/tool"
 )
 
 // fakeJudge 是确定性判官，避免单测依赖真实模型。
@@ -40,8 +40,8 @@ func newStore(t *testing.T, judge Judge) *Store {
 	return New(Options{Store: st, Judge: judge})
 }
 
-func ctxScope(scope string) context.Context {
-	return tool.WithScope(context.Background(), scope)
+func ctxScope(key string) context.Context {
+	return scope.WithScope(context.Background(), key)
 }
 
 func recall(t *testing.T, s *Store, scope string) []string {

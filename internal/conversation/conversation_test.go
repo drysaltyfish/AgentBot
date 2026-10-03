@@ -35,13 +35,13 @@ func Test_CacheFirst_PreviousTurnIsPrefixOfNext(t *testing.T) {
 	a := New(Options{System: "你是助手"})
 
 	hist := []history.Item{}
-	m1 := a.Build(hist, "你好")
+	m1 := a.Build(hist, "", "你好")
 
 	hist = append(hist, user("你好"), asst("你也好"))
-	m2 := a.Build(hist, "今天天气怎么样")
+	m2 := a.Build(hist, "", "今天天气怎么样")
 
 	hist = append(hist, user("今天天气怎么样"), asst("挺好的"))
-	m3 := a.Build(hist, "再见")
+	m3 := a.Build(hist, "", "再见")
 
 	assertPrefix(t, m1, m2)
 	assertPrefix(t, m2, m3)
@@ -65,7 +65,7 @@ func Test_CacheFirst_MarkersNeverGoUpstream(t *testing.T) {
 		asst("回答"),
 		marker("内部草稿：再想一下"),
 	}
-	msgs := a.Build(hist, "下一个问题")
+	msgs := a.Build(hist, "", "下一个问题")
 
 	for _, m := range msgs {
 		if strings.Contains(m.Content, "内部草稿") {
@@ -73,7 +73,7 @@ func Test_CacheFirst_MarkersNeverGoUpstream(t *testing.T) {
 		}
 	}
 	// 且 marker 的存在不影响前缀性质。
-	withoutMarkers := a.Build([]history.Item{user("问题"), asst("回答")}, "下一个问题")
+	withoutMarkers := a.Build([]history.Item{user("问题"), asst("回答")}, "", "下一个问题")
 	if Fingerprint(msgs) != Fingerprint(withoutMarkers) {
 		t.Fatalf("markers changed the assembled messages: with=%s without=%s",
 			Fingerprint(msgs), Fingerprint(withoutMarkers))
@@ -86,7 +86,7 @@ func Test_CacheFirst_PrefixHashIsStable(t *testing.T) {
 	a := New(Options{System: "固定的前缀"})
 	h := a.PrefixHash()
 	for i := 0; i < 3; i++ {
-		_ = a.Build([]history.Item{user(fmt.Sprintf("第 %d 轮", i))}, "现在")
+		_ = a.Build([]history.Item{user(fmt.Sprintf("第 %d 轮", i))}, "", "现在")
 		if a.PrefixHash() != h {
 			t.Fatalf("prefix hash changed across calls: %s -> %s", h, a.PrefixHash())
 		}
@@ -126,7 +126,7 @@ func Test_CacheFirst_TrimAlignsToTurnBoundary(t *testing.T) {
 		user("u2"), asst("a2"),
 		user("u3"), asst("a3"),
 	}
-	msgs := a.Build(hist, "u4")
+	msgs := a.Build(hist, "", "u4")
 	// 裁剪后必须从 user 开始，绝不能从 assistant 开始。
 	if msgs[1].Role != llm.RoleUser {
 		t.Fatalf("trimmed window must start at a user turn: %+v", msgs[1])
@@ -135,7 +135,7 @@ func Test_CacheFirst_TrimAlignsToTurnBoundary(t *testing.T) {
 		t.Fatalf("window not applied: %d messages", len(msgs))
 	}
 	// 未超限时不得裁剪（窗口内前缀稳定）。
-	small := a.Build([]history.Item{user("u1"), asst("a1")}, "u2")
+	small := a.Build([]history.Item{user("u1"), asst("a1")}, "", "u2")
 	if len(small) != 4 {
 		t.Fatalf("under-limit history must not be trimmed: %d messages", len(small))
 	}
@@ -150,7 +150,7 @@ func Test_CacheFirst_ToolItemsRoundTrip(t *testing.T) {
 		{Kind: history.KindToolCall, ToolCalls: []history.ToolCall{{ID: "c1", Name: "search", Arguments: "{}"}}},
 		{Kind: history.KindToolResult, ToolCallID: "c1", Content: "结果"},
 	}
-	msgs := a.Build(hist, "继续")
+	msgs := a.Build(hist, "", "继续")
 	if msgs[2].Role != llm.RoleAssistant || len(msgs[2].ToolCalls) != 1 || msgs[2].ToolCalls[0].ID != "c1" {
 		t.Fatalf("tool_call mapping wrong: %+v", msgs[2])
 	}
@@ -175,7 +175,7 @@ func Test_CacheFirst_WindowSlidesInBatches(t *testing.T) {
 	)
 	const turns = 60
 	for turn := 1; turn <= turns; turn++ {
-		msgs := a.Build(hist, fmt.Sprintf("u%d", turn))
+		msgs := a.Build(hist, "", fmt.Sprintf("u%d", turn))
 		if prev != nil && !isPrefix(prev, msgs) {
 			moves++
 		}
@@ -210,7 +210,7 @@ func Test_CacheFirst_StoreLargerThanWindow(t *testing.T) {
 			history.Item{Kind: history.KindAssistant, Content: fmt.Sprintf("a%d", i)},
 		)
 	}
-	msgs := a.Build(hist, "现在")
+	msgs := a.Build(hist, "", "现在")
 	// 呈现的消息数 = system + 窗口 + 当前输入；必须显著少于 60+2。
 	if len(msgs) > window+10 {
 		t.Fatalf("窗口未生效: %d 条消息", len(msgs))

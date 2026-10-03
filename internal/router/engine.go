@@ -105,7 +105,7 @@ func (e *Engine) Dispatch(ctx context.Context, ev *event.Event, caller transport
 		if rt.removed.Load() {
 			continue
 		}
-		if !KindMatches(rt.Kind, ev) {
+		if !KindMatches(rt.kind, ev) {
 			continue
 		}
 		c.ResetForNextRoute()
@@ -118,7 +118,7 @@ func (e *Engine) Dispatch(ctx context.Context, ev *event.Event, caller transport
 			e.reject(c, "pre-route")
 			continue
 		}
-		if !e.runRules(c, "rules", rt.Rules...) {
+		if !e.runRules(c, "rules", rt.rules...) {
 			e.reject(c, "rules")
 			continue
 		}
@@ -133,7 +133,7 @@ func (e *Engine) Dispatch(ctx context.Context, ev *event.Event, caller transport
 		if rt.IsOnce() {
 			e.router.Remove(rt)
 		}
-		if rt.Block || rt.Break {
+		if rt.block || rt.brk {
 			break
 		}
 	}
@@ -143,7 +143,7 @@ func (e *Engine) Dispatch(ctx context.Context, ev *event.Event, caller transport
 func (e *Engine) runRoute(c *Ctx, rt *Route) {
 	// Block: 本条路由执行后停止尝试后续路由。
 	// Break: 同上，并且跳过 post 钩子（用于"已充分处理、无需统计"的场景）。
-	skipPost := rt.Break
+	skipPost := rt.brk
 	defer func() {
 		if r := recover(); r != nil {
 			e.reportPanic("handler", r)
@@ -152,7 +152,7 @@ func (e *Engine) runRoute(c *Ctx, rt *Route) {
 			e.runPost(c)
 		}
 	}()
-	for _, h := range rt.Handlers {
+	for _, h := range rt.handlers {
 		h(c)
 	}
 }

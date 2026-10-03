@@ -40,7 +40,7 @@ func Test_F45_DenyPreventsExecution(t *testing.T) {
 
 	et := &echoTool{name: "echo"}
 	fake := approvalLoop(t, []llm.ToolCall{toolCall("c1", "echo", `{"v":"x"}`)})
-	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, et), Gate: gate}
+	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, et), Gate: gate, Assembler: testAssembler("")}
 
 	if _, err := a.Run(context.Background(), Input{Query: "x", Role: RoleMember}); err != nil {
 		t.Fatalf("拒绝不应中断循环: %v", err)
@@ -77,7 +77,7 @@ func Test_F45_NoApproverMeansDenied(t *testing.T) {
 
 	et := &echoTool{name: "echo"}
 	fake := approvalLoop(t, []llm.ToolCall{toolCall("c1", "echo", `{"v":"x"}`)})
-	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, et), Gate: gate}
+	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, et), Gate: gate, Assembler: testAssembler("")}
 
 	if _, err := a.Run(context.Background(), Input{Query: "x", Role: RoleMember}); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -99,7 +99,8 @@ func Test_F45_ApprovedCallExecutes(t *testing.T) {
 	et := &echoTool{name: "echo"}
 	fake := approvalLoop(t, []llm.ToolCall{toolCall("c1", "echo", `{"v":"yes"}`)})
 	a := &ReactAgent{
-		LLM: fake, Tools: newRegistry(t, et), Gate: gate,
+		Assembler: testAssembler(""),
+		LLM:       fake, Tools: newRegistry(t, et), Gate: gate,
 		Approver: ApproverFunc(func(ctx context.Context, req ApprovalRequest) (Decision, error) {
 			return Decision{Allowed: true, Reason: "群主同意"}, nil
 		}),
@@ -128,7 +129,8 @@ func Test_F45_ApprovalRejectionIsFedBack(t *testing.T) {
 	et := &echoTool{name: "echo"}
 	fake := approvalLoop(t, []llm.ToolCall{toolCall("c1", "echo", `{"v":"x"}`)})
 	a := &ReactAgent{
-		LLM: fake, Tools: newRegistry(t, et), Gate: gate,
+		Assembler: testAssembler(""),
+		LLM:       fake, Tools: newRegistry(t, et), Gate: gate,
 		Approver: ApproverFunc(func(ctx context.Context, req ApprovalRequest) (Decision, error) {
 			return Decision{Allowed: false, Reason: "群主不同意"}, nil
 		}),
@@ -158,7 +160,8 @@ func Test_F45_ApprovalTimeoutDeniesAndContinues(t *testing.T) {
 	et := &echoTool{name: "echo"}
 	fake := approvalLoop(t, []llm.ToolCall{toolCall("c1", "echo", `{"v":"x"}`)})
 	a := &ReactAgent{
-		LLM: fake, Tools: newRegistry(t, et), Gate: gate,
+		Assembler: testAssembler(""),
+		LLM:       fake, Tools: newRegistry(t, et), Gate: gate,
 		ApprovalTimeout: 20 * time.Millisecond,
 		Approver: ApproverFunc(func(ctx context.Context, req ApprovalRequest) (Decision, error) {
 			<-ctx.Done()
@@ -213,7 +216,8 @@ func Test_F45_ApprovalWaitDoesNotEatStepTimeout(t *testing.T) {
 	probe := &slowGateTool{}
 	fake := approvalLoop(t, []llm.ToolCall{toolCall("c1", "slow", "{}")})
 	a := &ReactAgent{
-		LLM: fake, Tools: newRegistry(t, probe), Gate: gate,
+		Assembler: testAssembler(""),
+		LLM:       fake, Tools: newRegistry(t, probe), Gate: gate,
 		StepTimeout: 40 * time.Millisecond,
 		Approver: ApproverFunc(func(ctx context.Context, req ApprovalRequest) (Decision, error) {
 			time.Sleep(120 * time.Millisecond) // 比单步超时长得多
@@ -245,7 +249,8 @@ func Test_F45_AllowBypassesApprover(t *testing.T) {
 	et := &echoTool{name: "echo"}
 	fake := approvalLoop(t, []llm.ToolCall{toolCall("c1", "echo", `{"v":"x"}`)})
 	a := &ReactAgent{
-		LLM: fake, Tools: newRegistry(t, et), Gate: gate,
+		Assembler: testAssembler(""),
+		LLM:       fake, Tools: newRegistry(t, et), Gate: gate,
 		Approver: ApproverFunc(func(ctx context.Context, req ApprovalRequest) (Decision, error) {
 			called = true
 			return Decision{Allowed: true}, nil

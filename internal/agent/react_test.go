@@ -133,7 +133,7 @@ func Test_F35_ToolProtocolContract(t *testing.T) {
 		BaseURL: srv.URL, APIKey: "k", Model: "m", Client: srv.Client(),
 	})
 	tools := newRegistry(t, &echoTool{name: "echo"})
-	a := &ReactAgent{LLM: model, Tools: tools, MaxIterations: 5}
+	a := &ReactAgent{LLM: model, Tools: tools, MaxIterations: 5, Assembler: testAssembler("")}
 
 	out, err := a.Run(context.Background(), Input{Query: "帮我查"})
 	if err != nil {
@@ -224,7 +224,7 @@ func Test_F35_MaxIterationsReturnsErrorWithSteps(t *testing.T) {
 		})
 	}
 	fake := &scriptedLLM{replies: replies}
-	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, &echoTool{name: "echo"}), MaxIterations: 3}
+	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, &echoTool{name: "echo"}), MaxIterations: 3, Assembler: testAssembler("")}
 
 	out, err := a.Run(context.Background(), Input{Query: "转圈"})
 	if !errors.Is(err, ErrMaxIterations) {
@@ -250,7 +250,7 @@ func Test_F35_ToolErrorBecomesObservationAndLoopContinues(t *testing.T) {
 		{Content: "我换个方式", FinishReason: "stop"},
 	}}
 	tools := newRegistry(t, &echoTool{name: "boom", failWith: "磁盘炸了"})
-	a := &ReactAgent{LLM: fake, Tools: tools}
+	a := &ReactAgent{LLM: fake, Tools: tools, Assembler: testAssembler("")}
 
 	out, err := a.Run(context.Background(), Input{Query: "试试"})
 	if err != nil {
@@ -284,7 +284,7 @@ func Test_F35_UnknownToolBecomesObservation(t *testing.T) {
 		{ToolCalls: []llm.ToolCall{toolCall("c1", "nope", `{}`)}, FinishReason: llm.FinishReasonToolCalls},
 		{Content: "好吧", FinishReason: "stop"},
 	}}
-	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, &echoTool{name: "echo"})}
+	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, &echoTool{name: "echo"}), Assembler: testAssembler("")}
 	if _, err := a.Run(context.Background(), Input{Query: "x"}); err != nil {
 		t.Fatalf("未知工具不应中断: %v", err)
 	}
@@ -301,7 +301,7 @@ func Test_F35_ContextCancelReturnsImmediately(t *testing.T) {
 	fake := &scriptedLLM{replies: []*llm.ChatResponse{
 		{ToolCalls: []llm.ToolCall{toolCall("c1", "echo", `{"v":"x"}`)}, FinishReason: llm.FinishReasonToolCalls},
 	}}
-	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, &echoTool{name: "echo"}), MaxIterations: 10}
+	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, &echoTool{name: "echo"}), MaxIterations: 10, Assembler: testAssembler("")}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -325,7 +325,7 @@ func Test_F35_ScavengesActionsFromText(t *testing.T) {
 		{Content: "好了", FinishReason: "stop"},
 	}}
 	tools := newRegistry(t, &echoTool{name: "echo"})
-	a := &ReactAgent{LLM: fake, Tools: tools, Warn: func(m string) { warns = append(warns, m) }}
+	a := &ReactAgent{LLM: fake, Tools: tools, Warn: func(m string) { warns = append(warns, m) }, Assembler: testAssembler("")}
 
 	out, err := a.Run(context.Background(), Input{Query: "x"})
 	if err != nil {
@@ -365,7 +365,7 @@ func Test_F35_NativeToolCallsWinOverTextActions(t *testing.T) {
 		{Content: "完成", FinishReason: "stop"},
 	}}
 	tools := newRegistry(t, &echoTool{name: "echo"})
-	a := &ReactAgent{LLM: fake, Tools: tools, Protocol: ProtocolAuto, Warn: func(m string) { warns = append(warns, m) }}
+	a := &ReactAgent{LLM: fake, Tools: tools, Protocol: ProtocolAuto, Warn: func(m string) { warns = append(warns, m) }, Assembler: testAssembler("")}
 
 	out, err := a.Run(context.Background(), Input{Query: "x"})
 	if err != nil {
@@ -391,7 +391,7 @@ func Test_F35_NativeProtocolDisablesScavenging(t *testing.T) {
 	fake := &scriptedLLM{replies: []*llm.ChatResponse{
 		{Content: `{"action":"echo","params":{"v":"x"}}`, FinishReason: "stop"},
 	}}
-	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, &echoTool{name: "echo"}), Protocol: ProtocolNative}
+	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, &echoTool{name: "echo"}), Protocol: ProtocolNative, Assembler: testAssembler("")}
 	out, err := a.Run(context.Background(), Input{Query: "x"})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -417,7 +417,7 @@ func Test_F35_ReasoningContentIsEchoedBackWithTools(t *testing.T) {
 		},
 		{Content: "好了", FinishReason: "stop"},
 	}}
-	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, &echoTool{name: "echo"})}
+	a := &ReactAgent{LLM: fake, Tools: newRegistry(t, &echoTool{name: "echo"}), Assembler: testAssembler("")}
 	if _, err := a.Run(context.Background(), Input{Query: "x"}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -490,6 +490,7 @@ func Test_F35_ParallelRequiresConcurrencySafe(t *testing.T) {
 				{Content: "done", FinishReason: "stop"},
 			}}
 			a := &ReactAgent{
+				Assembler:     testAssembler(""),
 				LLM:           fake,
 				Tools:         newRegistry(t, probe),
 				ParallelTools: true,

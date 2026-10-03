@@ -209,7 +209,7 @@ func toItem(m store.Message) (Item, error) {
 	return it, nil
 }
 
-// 导入复用 File 实现的 JSONL 行格式（fileRecord 定义在 file.go）。
+// JSONL 行格式定义在 jsonl.go；导入只依赖该格式，不依赖 File 适配器。
 // ErrImportSourceMissing 表示导入源文件不存在。
 var ErrImportSourceMissing = errors.New("import source does not exist")
 
@@ -238,8 +238,8 @@ func (h *SQLite) ImportJSONL(ctx context.Context, path string) (imported, skippe
 		if line == "" {
 			continue
 		}
-		var rec fileRecord
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		rec, err := readRecord([]byte(line))
+		if err != nil {
 			return imported, skipped, fmt.Errorf("parse line %d of %s: %w", lineNo, path, err)
 		}
 		if strings.TrimSpace(rec.Key) == "" {
