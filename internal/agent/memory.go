@@ -108,9 +108,10 @@ func (m *MemoryStore) Save(ctx context.Context, text string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	items := m.byScope[scope]
-	// 去重：重复写入不追加，保证同样的写入序列得到同样的结果。
+	// 去重：**近似**相同的也算同一条（措辞不同但说的是同一件事）。
+	// 只用精确比较会漏掉「我喜欢喝橙汁」/「用户喜欢喝橙汁」这类改写。
 	for _, existing := range items {
-		if existing == trimmed {
+		if IsDuplicateMemory(trimmed, existing) {
 			return nil
 		}
 	}
@@ -189,13 +190,14 @@ func (m *HistoryMemory) Save(ctx context.Context, text string) error {
 	}
 	scope := MemoryScopeFrom(ctx)
 
-	// 去重：同样的写入序列必须得到同样的召回结果，否则记忆段会平白多失效一次缓存。
+	// 去重：**近似**相同的也算同一条（措辞不同但说的是同一件事）。
+	// 只用精确比较会漏掉「我喜欢喝橙汁」/「用户喜欢喝橙汁」这类改写。
 	existing, err := m.Recall(ctx)
 	if err != nil {
 		return err
 	}
 	for _, e := range existing {
-		if e == trimmed {
+		if IsDuplicateMemory(trimmed, e) {
 			return nil
 		}
 	}

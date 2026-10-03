@@ -736,6 +736,8 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 			} else {
 				rlog.Info("memory auto-saved from an explicit command", "runes", len([]rune(fact)))
 			}
+			// 标记本轮已捕获：模型随后若再调 save_memory，会被告知无需重复保存。
+			callCtx = agent.WithMemoryCaptured(callCtx)
 		}
 	}
 
