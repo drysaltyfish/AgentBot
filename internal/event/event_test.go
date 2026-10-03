@@ -352,3 +352,176 @@ func Test_F03_EmptyMessageIsSafe(t *testing.T) {
 		t.Fatalf("ParseMessage(nil): actual=(%v,%v) expected=(empty,nil)", m2, err)
 	}
 }
+
+func Test_F03_SummaryRendersNonTextSegments(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		msg  Message
+		want string
+	}{
+		{"text only", Message{Text("喂")}, "喂"},
+		{"face with id", Message{{Type: TypeFace, Data: map[string]string{"id": "4"}}}, "[表情:得意]"},
+		{"face without id", Message{{Type: TypeFace, Data: map[string]string{}}}, "[表情]"},
+		{"image", Message{Image("x.jpg")}, "[图片]"},
+		{"at plus text", Message{At("10001"), Text(" 你好")}, "@10001 你好"},
+		{"reply plus text", Message{Reply("42"), Text("ok")}, "[回复]ok"},
+		{"unknown type with summary", Message{{Type: "mface", Data: map[string]string{"summary": "动画表情"}}}, "[mface:动画表情]"},
+		{"mixed", Message{Text("看"), Image("a.png")}, "看[图片]"},
+	}
+	for _, tc := range cases {
+		if got := tc.msg.Summary(); got != tc.want {
+			t.Fatalf("%s: actual=%q expected=%q", tc.name, got, tc.want)
+		}
+	}
+
+	// 修复要点：纯非文本消息的 PlainText 仍为空（匹配语义不变），
+	// 但 Summary 不为空，因此不会再被回复链路静默跳过。
+	face := Message{{Type: TypeFace, Data: map[string]string{"id": "4"}}}
+	if face.PlainText() != "" {
+		t.Fatalf("PlainText must stay empty for a face-only message: actual=%q", face.PlainText())
+	}
+	if face.Summary() == "" {
+		t.Fatalf("Summary must not be empty for a face-only message")
+	}
+}
+
+// Test_F03_MixedSegmentsWithNonStringDataParse 是回归测试。
+//
+// 平台对同一字段不保证类型：face.id 是数字、image.file_size 是数字。早期 Segment.Data 是
+// map[string]string，任何一个非字符串值都会让整条消息（含文本段）解析失败并变空。
+func Test_F03_MixedSegmentsWithNonStringDataParse(t *testing.T) {
+	t.Parallel()
+	raw := json.RawMessage(`{"time":1,"self_id":1,"post_type":"message","message_type":"private","sub_type":"friend","user_id":2,"message_id":3,"message":[{"type":"text","data":{"text":"那我发个"}},{"type":"face","data":{"id":4}},{"type":"text","data":{"text":"这个你不傻了"}},{"type":"image","data":{"file":"a.jpg","file_size":12345,"url":"http://x/y"}},{"type":"mface","data":{"summary":"动画表情","emoji_id":5}}]}`)
+	ev := NewEvent(raw)
+	if ev.Kind != KindMessage {
+		t.Fatalf("kind: actual=%q", ev.Kind)
+	}
+	if got := ev.Message.PlainText(); got != "那我发个这个你不傻了" {
+		t.Fatalf("plain text: actual=%q", got)
+	}
+	want := "那我发个[表情:得意]这个你不傻了[图片][mface:动画表情]"
+	if got := ev.Message.Summary(); got != want {
+		t.Fatalf("summary: actual=%q expected=%q", got, want)
+	}
+	if ev.DecodeWarning != "" {
+		t.Fatalf("unexpected decode warning: %s", ev.DecodeWarning)
+	}
+}
+
+// Test_F03_BrokenSegmentDoesNotDestroyMessage 保证坏段只降级为警告，不毁掉整条消息。
+func Test_F03_BrokenSegmentDoesNotDestroyMessage(t *testing.T) {
+	t.Parallel()
+	raw := json.RawMessage(`{"time":1,"self_id":1,"post_type":"message","message_type":"private","user_id":2,"message_id":3,"message":[{"type":"text","data":{"text":"前半"}},"这不是一个对象",{"type":"text","data":{"text":"后半"}}]}`)
+	ev := NewEvent(raw)
+	if got := ev.Message.PlainText(); got != "前半后半" {
+		t.Fatalf("broken segment destroyed the message: actual=%q", got)
+	}
+	if ev.DecodeWarning == "" {
+		t.Fatalf("expected a decode warning for the broken segment")
+	}
+}
+
+// Test_F03_ScalarCoercion 覆盖 coerceScalar 的类型收敛。
+func Test_F03_ScalarCoercion(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{`"abc"`, "abc"},
+		{`123`, "123"},
+		{`-4.5`, "-4.5"},
+		{`true`, "true"},
+		{`null`, ""},
+		{`{"a":1}`, "{\"a\":1}"},
+	}
+	for _, tc := range cases {
+		if got := coerceScalar(json.RawMessage(tc.in)); got != tc.want {
+			t.Fatalf("coerceScalar(%s): actual=%q expected=%q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Test_F03_FaceLabelPrefersPlatformName 覆盖表情名称的三级优先级。
+func Test_F03_FaceLabelPrefersPlatformName(t *testing.T) {
+	t.Parallel()
+	// 平台在 raw.faceText 里直接给出名称时优先用平台的（id 344 表里是"大怨种"，此处故意
+	// 给成另一个名字，用来证明取的是平台值而不是表值）。
+	platform := Message{{Type: TypeFace, Data: map[string]string{
+		"id":  "344",
+		"raw": `{"faceIndex":344,"faceText":"/平台新名字"}`,
+	}}}
+	if got := platform.Summary(); got != "[表情:平台新名字]" {
+		t.Fatalf("platform name should win: actual=%q", got)
+	}
+
+	// 没有平台名称时用内置表。
+	fromTable := Message{{Type: TypeFace, Data: map[string]string{"id": "344"}}}
+	if got := fromTable.Summary(); got != "[表情:大怨种]" {
+		t.Fatalf("table lookup: actual=%q", got)
+	}
+
+	// 表里没有的编号退回编号本身，绝不编造名称。
+	unknown := Message{{Type: TypeFace, Data: map[string]string{"id": "999999"}}}
+	if got := unknown.Summary(); got != "[表情:999999]" {
+		t.Fatalf("unknown id must fall back to the raw id: actual=%q", got)
+	}
+}
+
+// Test_F03_ImageLabelDistinguishesSticker 覆盖表情包与普通图片的区分。
+//
+// 字段取值来自真实平台载荷：表情包 sub_type=1/summary=[动画表情]，普通图片 sub_type=0。
+func Test_F03_ImageLabelDistinguishesSticker(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		data map[string]string
+		want string
+	}{
+		{"sticker from real payload", map[string]string{"file": "a.jpg", "sub_type": "1", "summary": "[动画表情]"}, "[动画表情]"},
+		{"sticker without summary", map[string]string{"file": "a.jpg", "sub_type": "1"}, "[动画表情]"},
+		{"plain image from real payload", map[string]string{"file": "b.jpg", "sub_type": "0", "summary": ""}, "[图片]"},
+		{"image without sub_type", map[string]string{"file": "c.jpg"}, "[图片]"},
+	}
+	for _, tc := range cases {
+		msg := Message{{Type: TypeImage, Data: tc.data}}
+		if got := msg.Summary(); got != tc.want {
+			t.Fatalf("%s: actual=%q expected=%q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Test_F03_FaceTableIsEmbeddedAndAuthoritative 断言映射表真的被嵌入且内容正确。
+func Test_F03_FaceTableIsEmbeddedAndAuthoritative(t *testing.T) {
+	t.Parallel()
+	if n := FaceCount(); n < 300 {
+		t.Fatalf("face table looks missing or truncated: count=%d", n)
+	}
+	// 抽查三个编号：其中 344 与真实平台载荷中的 faceText 完全一致。
+	for id, want := range map[string]string{"0": "惊讶", "4": "得意", "14": "微笑", "344": "大怨种"} {
+		got, ok := FaceName(id)
+		if !ok {
+			t.Fatalf("face %s missing from table", id)
+		}
+		if got != want {
+			t.Fatalf("face %s: actual=%q expected=%q", id, got, want)
+		}
+	}
+	if _, ok := FaceName("999999"); ok {
+		t.Fatalf("unknown id should not be in the table")
+	}
+}
+
+// Test_F03_SummaryFromRealStickerFrame 端到端回归：真实表情包帧必须渲染成动画表情。
+func Test_F03_SummaryFromRealStickerFrame(t *testing.T) {
+	t.Parallel()
+	raw := json.RawMessage(`{"time":1,"self_id":1,"post_type":"message","message_type":"private","user_id":2,"message_id":3,"message":[{"type":"image","data":{"file":"41AE7DB0.jpg","file_size":7932,"sub_type":1,"summary":"[动画表情]","url":"https://example/x"}}]}`)
+	ev := NewEvent(raw)
+	if got := ev.Message.Summary(); got != "[动画表情]" {
+		t.Fatalf("sticker frame: actual=%q", got)
+	}
+	if ev.DecodeWarning != "" {
+		t.Fatalf("unexpected decode warning: %s", ev.DecodeWarning)
+	}
+}

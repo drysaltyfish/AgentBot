@@ -59,6 +59,9 @@ func (m Message) Marshal() json.RawMessage {
 }
 
 // PlainText 抽取纯文本，供关键词/正则匹配使用。
+//
+// 注意：它只取 text 段——纯表情/纯图片消息会得到空串。需要"给用户看/喂给模型"的
+// 文本时请用 Summary。
 func (m Message) PlainText() string {
 	var b strings.Builder
 	for _, seg := range m {
@@ -67,6 +70,86 @@ func (m Message) PlainText() string {
 		}
 	}
 	return b.String()
+}
+
+// Summary 把整条消息渲染成可读文本：文本段原样保留，非文本段变成占位符。
+//
+// 与 PlainText 的区别是它不会把非文本消息变成空串——纯表情包/图片也能被回复与记录。
+func (m Message) Summary() string {
+	var b strings.Builder
+	for _, seg := range m {
+		switch seg.Type {
+		case TypeText:
+			b.WriteString(seg.Data["text"])
+		case TypeAt:
+			b.WriteString("@" + seg.Data["qq"])
+		case TypeImage:
+			b.WriteString(imageLabel(seg))
+		case TypeFace:
+			b.WriteString(placeholder("表情", faceLabel(seg)))
+		case TypeReply:
+			b.WriteString("[回复]")
+		case TypeRecord:
+			b.WriteString("[语音]")
+		case TypeVideo:
+			b.WriteString("[视频]")
+		default:
+			// 未知类型（例如表情包 mface）保留类型名，便于排查与扩展。
+			b.WriteString(placeholder(seg.Type, seg.Data["summary"]))
+		}
+	}
+	return b.String()
+}
+
+func placeholder(name, detail string) string {
+	if detail == "" {
+		return "[" + name + "]"
+	}
+	return "[" + name + ":" + detail + "]"
+}
+
+// faceLabel 返回表情的可读标签，优先级：平台给出的名称 > 内置编号表 > 原始编号。
+//
+// 平台对部分表情会在 raw.faceText 里直接给出名称（如 "/大怨种"），那比任何本地表都新；
+// 内置表（faces.json）覆盖 QQ 官方编号；两者都没有时退回编号，绝不编造名称。
+func faceLabel(seg Segment) string {
+	if name := platformFaceText(seg); name != "" {
+		return name
+	}
+	if name, ok := FaceName(seg.Data["id"]); ok {
+		return name
+	}
+	return seg.Data["id"]
+}
+
+// platformFaceText 从 face 段的 raw 字段里取平台给出的名称。
+func platformFaceText(seg Segment) string {
+	raw := strings.TrimSpace(seg.Data["raw"])
+	if raw == "" {
+		return ""
+	}
+	var d struct {
+		FaceText string `json:"faceText"`
+	}
+	if err := json.Unmarshal([]byte(raw), &d); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(d.FaceText), "/"))
+}
+
+// imageLabel 区分普通图片与表情包。
+//
+// 平台对表情包同样上报 image 段，靠这两个字段区分（已在真实平台载荷上核实）：
+//   - 表情包：sub_type=1，summary="[动画表情]"
+//   - 普通图片：sub_type=0，summary 为空
+func imageLabel(seg Segment) string {
+	if s := strings.TrimSpace(seg.Data["summary"]); s != "" {
+		return s
+	}
+	if st := strings.TrimSpace(seg.Data["sub_type"]); st != "" && st != "0" {
+		return "[动画表情]"
+	}
+	return "[图片]"
 }
 
 // ParseMessage 解析上报的消息，同时支持数组形态与 CQ 码字符串形态。
@@ -78,15 +161,23 @@ func ParseMessage(raw json.RawMessage) (Message, []string, error) {
 		return Message{}, nil, nil
 	}
 	if trimmed[0] == '[' {
-		var segs []Segment
-		if err := json.Unmarshal([]byte(trimmed), &segs); err != nil {
+		// 逐段解析：某一段坏了只降级成 warning，绝不连累其余段。
+		// 否则一个类型不符的字段就会让含文本的整条消息变成空消息。
+		var raws []json.RawMessage
+		if err := json.Unmarshal([]byte(trimmed), &raws); err != nil {
 			return Message{}, nil, fmt.Errorf("parse message array: %w", err)
 		}
-		out := make(Message, 0, len(segs))
-		for _, s := range segs {
+		out := make(Message, 0, len(raws))
+		var warnings []string
+		for i, rb := range raws {
+			var s Segment
+			if err := json.Unmarshal(rb, &s); err != nil {
+				warnings = append(warnings, fmt.Sprintf("segment %d: %v", i, err))
+				continue
+			}
 			out = append(out, normalizeSegment(s))
 		}
-		return out, nil, nil
+		return out, warnings, nil
 	}
 	if trimmed[0] == '"' {
 		var s string
@@ -104,6 +195,39 @@ func firstRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
+}
+
+// UnmarshalJSON 让 data 里的任意 JSON 值都能落进 map[string]string。
+//
+// 平台对同一字段并不保证类型：image 的 file_size 是数字、face 的 id 可能是数字也可能是
+// 字符串。早期直接用 map[string]string 承接，任何一个非字符串值都会让整条消息解析失败。
+func (s *Segment) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Type string                     `json:"type"`
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	s.Type = raw.Type
+	s.Data = make(map[string]string, len(raw.Data))
+	for k, v := range raw.Data {
+		s.Data[k] = coerceScalar(v)
+	}
+	return nil
+}
+
+// coerceScalar 把 JSON 标量还原成字符串；null 得到空串，对象/数组退化为其 JSON 文本。
+func coerceScalar(raw json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return trimmed
 }
 
 func normalizeSegment(s Segment) Segment {
