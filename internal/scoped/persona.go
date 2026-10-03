@@ -308,6 +308,27 @@ func (r *Registry) Apply(c *Config) {
 	}
 }
 
+// Swap 用一份**已加载并校验过**的注册表替换当前内容（F-24 热加载）。
+//
+// 与 Reload 的分工：Reload 自己去读目录、失败时自行告警；Swap 只接受已经
+// 通过校验的结果——校验发生在 watcher 的 load 里，失败时 watcher 根本不会
+// 调用 Swap，因此这里可以无条件替换。
+func (r *Registry) Swap(next *Registry) {
+	if r == nil || next == nil {
+		return
+	}
+	next.mu.RLock()
+	personas := make(map[string]Persona, len(next.personas))
+	for name, p := range next.personas {
+		personas[name] = p
+	}
+	next.mu.RUnlock()
+
+	r.mu.Lock()
+	r.personas = personas
+	r.mu.Unlock()
+}
+
 // Reload 重新加载外部目录；失败时保留现有注册表并调用 warn，不返回错误（F-24）。
 func (r *Registry) Reload(dir string, warn func(string)) {
 	if warn == nil {

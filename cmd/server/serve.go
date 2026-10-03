@@ -459,6 +459,11 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		defer w.Stop()
 	}
 
+	// F-24：人格目录热加载。改人格设定不必重启；替换只影响半静态段（F-65）。
+	if w := watchPersonas(listenCtx, cfg.Prompt.EffectivePersonasDir(), personaReg, lg); w != nil {
+		defer w.Stop()
+	}
+
 	// F-18：令牌桶限速（默认关闭）。超限事件会被整条丢弃——这是刻意的：
 	// 限速的目的就是让刷屏不产生任何 LLM 调用，代价远低于额度被打爆。
 	if cfg.RateLimit.EffectiveEnabled() {

@@ -31,6 +31,7 @@
 | F-82（剩余） | SQLite 会话人格持久化 + `/persona` 切换 + RouteKey/Fingerprint 喂半静态段 | Test_F82_PersonaPersistsAcrossReopen、Test_F82_PersonaSwitchChangesPromptHash、Test_F82_DefaultPersonaDoesNotDuplicateTheStaticSegment |
 | F-23 | 定期回收接入 Bot 生命周期（`app.Go`，不再是没人启动的 `StartReclaimer`） | Test_F23_ReclaimerIsOwnedByBotLifecycle（100 会话回收 + Shutdown 后回收器确实停止） |
 | F-49（持久化） | `memory.SQLiteTierStore`：分层记忆落 SQLite（id 走 tier_ids 统一分配器，scope 全程参与） | Test_F49_SQLiteTierStoreSurvivesReopen、Test_F49_TieredMemoryOverSQLiteEndToEnd |
+| F-24（人格目录） | `watchPersonas` 监听人格目录热替换定义；`reload` 指纹支持目录（逐子文件，避免"改已存在文件不触发"） | Test_F24_PersonaFileChangeSwapsDefinitions、Test_F24_ReloadsDirectoryContentChange |
 | F-72（传播） | W3C trace 上下文：入站事件建立 span、日志 trace_id 与之一致、httpx 自动带 traceparent | Test_F72_TraceparentIsPropagated、Test_F72_EventTraceContextCarriesW3CIdentity、Test_F72_ExplicitHeaderIsPreserved |
 | F-66（剩余） | 会话/用户维度归因经 ctx 进 LLM 链、调用前强制 deny、SQLite 快照持久化、`/cost` 报本会话 | Test_F66_QuotaDenyHappensBeforeSpending、Test_F66_SessionQuotaIsPerSession、Test_F66_CostSnapshotPersistsThroughAdapter、Test_F66_QuotaDenialRepliesWithANotice |
 
@@ -63,7 +64,7 @@ F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 | 5 | semcache（F-63） | LLM 请求路径 | 需要 Vectorize（embedding 或二值哈希）+ 出口过滤（F-55）。可接在 observedLLM 层 |
 | 6 | tree 摘要树（F-52） | 摄入路径 | 需要注入 Summarizer / Embedder |
 | 7 | stream -> outbound（F-64） | 发送路径 | llm.NewStreamSplitter{Flush: outbound.NewStreamSender(...).Handler(ctx)}；不要改动请求侧（前缀缓存） |
-| 9 | reload 其余资产（F-24） | 提示词/开关/限速 | 目前只接了敏感词表；提示词热加载要重建 Assembler，需评估前缀缓存语义 |
+| 9 | reload 其余资产（F-24） | 提示词/开关/限速 | **人格目录已接**（`watchPersonas` + 目录级指纹）。开关本来就"读时查 store"，外部改文件立即生效，无需监听。**提示词正文刻意不热加载**：它在启动时固定正是前缀缓存（F-65）的前提。限速参数仍未热加载（构造时定值） |
 
 ## 4. 已知偏离与诚实标注（不要当成"已完成"）
 

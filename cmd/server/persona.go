@@ -10,6 +10,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/config"
 	"github.com/drysaltyfish/agentbot/internal/conversation"
 	"github.com/drysaltyfish/agentbot/internal/observe"
+	"github.com/drysaltyfish/agentbot/internal/reload"
 	"github.com/drysaltyfish/agentbot/internal/scoped"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/store"
@@ -95,6 +96,40 @@ func personaHalfStatic(reg *scoped.Registry, mgr *scoped.Manager, warn func(stri
 		}
 		return p.SystemPrompt
 	}
+}
+
+// watchPersonas 监听人格目录并热替换已加载的定义（F-24）。
+//
+// 人格定义可以安全热替换，而「提示词正文」不能：半静态段是按请求现算的
+// （personaHalfStatic 每次都调 reg.Get），替换后下一个请求就生效；
+// 静态段（llm.system_prompt_file）在启动时固定，正是为了前缀缓存稳定（F-65）。
+// 替换会改变半静态段哈希，属预期失效——所以每次替换都记一条日志。
+func watchPersonas(ctx context.Context, dir string, reg *scoped.Registry, lg *observe.Logger) *reload.Watcher[*scoped.Registry] {
+	dir = strings.TrimSpace(dir)
+	if reg == nil || dir == "" {
+		return nil
+	}
+	plog := lg.Component("persona")
+	var w *reload.Watcher[*scoped.Registry]
+	w = reload.New([]string{dir}, func() (*scoped.Registry, error) {
+		// 校验发生在 load 里：解析失败的目录会让 watcher 保留旧定义并告警。
+		return scoped.Load(dir)
+	}, reload.Options{
+		OnSwap: func(version uint64, _ string) {
+			next, ok := w.Current()
+			if !ok {
+				return
+			}
+			reg.Swap(next)
+			plog.Info("personas reloaded; the half-static prompt segment changes from the next request",
+				"version", version, "count", reg.Len(), "dir", dir)
+		},
+		Warn: func(err error) {
+			plog.Warn("persona reload failed; keeping the previous definitions", "error", err)
+		},
+	})
+	w.Start(ctx)
+	return w
 }
 
 // registerPersonaCommand 注册 /persona <名字>（F-82 的人格切换入口）。
