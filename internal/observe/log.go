@@ -58,6 +58,9 @@ type Logger struct {
 }
 
 type queueWriter struct {
+	// mu 保护 ch 的"发送 vs 关闭"：Close 里 close(ch) 与并发 Write 的
+	// q.ch <- buf 之间原本没有同步，关停时可能 panic（send on closed channel）。
+	mu      sync.RWMutex
 	ch      chan []byte
 	out     io.Writer
 	dropped atomic.Uint64
@@ -88,6 +91,8 @@ func (q *queueWriter) run() {
 
 // Write 永不阻塞：队列满时丢弃并计数。
 func (q *queueWriter) Write(p []byte) (int, error) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
 	if q.closed.Load() {
 		q.dropped.Add(1)
 		return len(p), nil
@@ -107,6 +112,8 @@ func (q *queueWriter) Dropped() uint64 { return q.dropped.Load() }
 
 func (q *queueWriter) Close(ctx context.Context) error {
 	q.once.Do(func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
 		q.closed.Store(true)
 		close(q.ch)
 	})
