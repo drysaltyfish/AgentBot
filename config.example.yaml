@@ -39,6 +39,9 @@ history:
   # 对话历史落盘的 JSONL 路径（复用 F-38 的存储实现）。
   # 留空则仅进程内，重启即丢——启动时会有 WARN 提醒。
   file: ./data/history.jsonl
+  # **存储**保留的条数上限（默认 400），远大于呈现窗口（llm.history_turns）。
+  # 两者分开是 recall_history 真正有用的前提：窗口外的历史仍在存储里，才召得回来。
+  retention: 400
 
 agent:
   # 开启后回复走 ReAct 循环（F-35），可调用工具；关闭则直连 LLM。

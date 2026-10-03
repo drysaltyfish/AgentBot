@@ -72,6 +72,10 @@ const (
 type History struct {
 	// File 是 JSONL 落盘路径；为空表示仅进程内（重启即丢）。
 	File string `yaml:"file"`
+	// Retention 是**存储**保留的条目上限（默认 400），远大于呈现窗口。
+	// 呈现窗口由 llm.history_turns 决定；两者分开，recall_history 才能召回
+	// 窗口之外的旧内容。
+	Retention *int `yaml:"retention"`
 }
 
 // Agent 描述 ReAct 循环与工具系统的接入方式（F-35 / F-41 / F-44 / F-45）。
@@ -397,6 +401,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Agent.ApprovalTimeout != nil && c.Agent.ApprovalTimeout.D <= 0 {
 		add("agent.approval_timeout", "必须为正")
+	}
+	if c.History.Retention != nil && *c.History.Retention < 1 {
+		add("history.retention", "必须 >= 1")
 	}
 	if c.Agent.MemoryMax != nil && *c.Agent.MemoryMax < 1 {
 		add("agent.memory_max", "必须 >= 1")

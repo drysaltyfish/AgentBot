@@ -51,3 +51,34 @@ F-21 的 PerGroup 语义是"群消息按群分桶"，私聊没有群可归，天
 
 **验收执行**：`go test -count=1 ./...` → 全绿；golangci-lint 0 issues；
 gofmt/build/vet 干净。
+
+
+### 2026-10-03 · 补记：recall_history 曾是个摆设（真机验证时发现）
+
+真机跑完才发现一个**接线层面的设计缺陷**，代码结构直接可判定：
+
+```
+main.go:429  hist = history.NewFile(path, histItems)   // 存储上限 = 40 条
+main.go:456  asm  = conversation.New(...)              // MaxHistory 未设 -> 呈现存储里的全部
+main.go:293  History: hist                             // recall_history 读的是同一个存储
+```
+
+三者叠加的后果是：**提示词里恰好就是存储里的全部内容，工具没有任何"窗口之外"可召回**。
+它能返回的永远是已经出现在上下文里的东西——等于没做。
+
+根因是我把**存储保留量**与**呈现窗口**当成了同一个数字（都用 `history_turns*2`）。
+
+修法：
+- 新增 `config.History.Retention`（默认 400）：**存储**保留量，远大于窗口
+- 呈现窗口交回装配层（`conversation.Assembler.MaxHistory = history_turns*2`）
+- 但窗口**按批量滑动**（margin = max/2）：起点对齐到 margin 的整数倍，
+  因此每 margin/2 轮才移动一次。逐轮滑动的窗口会让前缀每轮都变，
+  前缀缓存必然失效——这正是本轮缓存优化一直在防的事
+
+两条测试守住：
+- `Test_CacheFirst_WindowSlidesInBatches`：60 轮里窗口移动次数必须远小于轮数
+- `Test_CacheFirst_StoreLargerThanWindow`：最旧的历史**不出现在提示词里**，
+  但仍留在存储中等待被召回
+
+顺带补上可观测性：`llm call` 日志新增 `tools` 字段（本轮调用了哪些工具）。
+先前只有 `tool_calls` 计数，排查时看不出**到底调了什么**——真机验证时我就卡在这里。
