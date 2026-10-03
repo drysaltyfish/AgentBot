@@ -313,6 +313,12 @@ func (m *Manager) Await(ctx context.Context, key Key, match func(*event.Event) b
 func (m *Manager) KeyFor(selfID, groupID, userID int64) Key {
 	switch m.policy {
 	case PerGroup:
+		if groupID == 0 {
+			// 私聊没有群可归。若这里仍返回 UserID=0，所有私聊会共用一个会话，
+			// 于是 A 的上下文与记忆会出现在 B 的私聊里——这是串台，不是粒度选择。
+			// F-21 的 PerGroup 语义是"群消息按群分桶"，私聊天然应按用户分桶。
+			return Key{SelfID: selfID, UserID: userID}
+		}
 		return Key{SelfID: selfID, GroupID: groupID}
 	case PerUser:
 		return Key{SelfID: selfID, UserID: userID}

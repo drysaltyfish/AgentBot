@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/httpx"
 	"github.com/drysaltyfish/agentbot/internal/tool"
 )
@@ -41,7 +42,7 @@ func Test_F44_RegisterIsOrderStable(t *testing.T) {
 	if strings.Join(r1.Names(), ",") != strings.Join(r2.Names(), ",") {
 		t.Fatalf("注册顺序不稳定: %v vs %v", r1.Names(), r2.Names())
 	}
-	want := "calculator,current_time,json_query,http_fetch,memory_save,memory_recall"
+	want := "calculator,current_time,json_query,http_fetch,memory_save,memory_recall,recall_history"
 	if got := strings.Join(r1.Names(), ","); got != want {
 		t.Fatalf("内置工具集顺序: actual=%q expected=%q", got, want)
 	}
@@ -238,4 +239,113 @@ func Test_F44_QueryJSONErrorsAreStructured(t *testing.T) {
 	if _, err := QueryJSON([]byte(`{"a":1}`), "a.b"); err == nil {
 		t.Fatalf("在标量上继续取键应报错")
 	}
+}
+
+// memHistory 是测试用的内存历史（实现 builtin.HistoryReader）。
+type memHistory struct{ byKey map[string][]history.Item }
+
+func newMemHistory() *memHistory { return &memHistory{byKey: map[string][]history.Item{}} }
+func (m *memHistory) Messages(ctx context.Context, key string) ([]history.Item, error) {
+	return m.byKey[key], nil
+}
+
+func Test_F38_RecallHistoryReadsCurrentSession(t *testing.T) {
+	t.Parallel()
+	h := newMemHistory()
+	h.byKey["k1"] = []history.Item{
+		{Kind: history.KindUser, Content: "我喜欢橘子"},
+		{Kind: history.KindAssistant, Content: "记住啦"},
+		{Kind: history.KindMarker, Content: "内部记忆条目"},
+		{Kind: history.KindUser, Content: "今天天气不错"},
+	}
+	h.byKey["k2"] = []history.Item{{Kind: history.KindUser, Content: "别的会话的内容"}}
+
+	r := newRegistry(t, Deps{History: h})
+	ctx := tool.WithScope(context.Background(), "k1")
+
+	res := execWith(t, r, ctx, "recall_history", `{"query":"橘子"}`)
+	if res.Failed() {
+		t.Fatalf("召回失败: %+v", res)
+	}
+	if !strings.Contains(res.Output, "我喜欢橘子") {
+		t.Fatalf("应命中相关历史: %q", res.Output)
+	}
+	if strings.Contains(res.Output, "别的会话的内容") {
+		t.Fatalf("绝不能召回其它会话的历史: %q", res.Output)
+	}
+	if strings.Contains(res.Output, "内部记忆条目") {
+		t.Fatalf("marker 不是对话，不应参与召回: %q", res.Output)
+	}
+	if strings.Contains(res.Output, "今天天气不错") {
+		t.Fatalf("不匹配关键词的不应出现: %q", res.Output)
+	}
+}
+
+func Test_F38_RecallHistoryWithoutScopeFailsLoudly(t *testing.T) {
+	t.Parallel()
+	h := newMemHistory()
+	r := newRegistry(t, Deps{History: h})
+	// 没有作用域时**必须失败**，绝不能退化成"读全部历史"。
+	res := execWith(t, r, context.Background(), "recall_history", `{}`)
+	if !res.Failed() {
+		t.Fatalf("无作用域应明确失败: %+v", res)
+	}
+	if !strings.Contains(res.Error, "会话") {
+		t.Fatalf("错误信息应说明原因: %q", res.Error)
+	}
+}
+
+func Test_F38_RecallHistoryLimitAndEmpty(t *testing.T) {
+	t.Parallel()
+	h := newMemHistory()
+	for i := 0; i < 30; i++ {
+		h.byKey["k"] = append(h.byKey["k"], history.Item{Kind: history.KindUser, Content: "第" + strconv.Itoa(i) + "条"})
+	}
+	r := newRegistry(t, Deps{History: h})
+	ctx := tool.WithScope(context.Background(), "k")
+
+	res := execWith(t, r, ctx, "recall_history", `{"limit":3}`)
+	if res.Failed() {
+		t.Fatalf("召回失败: %+v", res)
+	}
+	if n := strings.Count(res.Output, "条"); n != 3 {
+		t.Fatalf("应限制为 3 条，实际 %d: %q", n, res.Output)
+	}
+	// 超出硬上限应被夹到 MaxRecallLimit。
+	res = execWith(t, r, ctx, "recall_history", `{"limit":9999}`)
+	if res.Failed() {
+		t.Fatalf("召回失败: %+v", res)
+	}
+	if n := strings.Count(res.Output, "条"); n != 30 {
+		t.Fatalf("硬上限内的全部历史应返回，实际 %d", n)
+	}
+
+	empty := newMemHistory()
+	r2 := newRegistry(t, Deps{History: empty})
+	res = execWith(t, r2, tool.WithScope(context.Background(), "none"), "recall_history", `{}`)
+	if res.Failed() || !strings.Contains(res.Output, "还没有历史") {
+		t.Fatalf("空历史应给出可读提示: %+v", res)
+	}
+}
+
+func Test_F38_RecallHistoryWithoutStoreFailsLoudly(t *testing.T) {
+	t.Parallel()
+	r := newRegistry(t, Deps{})
+	res := execWith(t, r, tool.WithScope(context.Background(), "k"), "recall_history", `{}`)
+	if !res.Failed() || !strings.Contains(res.Error, "历史存储") {
+		t.Fatalf("未配置历史存储应明确失败: %+v", res)
+	}
+}
+
+func execWith(t *testing.T, r *tool.Registry, ctx context.Context, name, args string) tool.Result {
+	t.Helper()
+	tl, ok := r.Get(name)
+	if !ok {
+		t.Fatalf("工具 %s 未注册", name)
+	}
+	res, err := tl.Execute(ctx, json.RawMessage(args))
+	if err != nil {
+		t.Fatalf("%s 不应返回 error（要回灌）: %v", name, err)
+	}
+	return res
 }

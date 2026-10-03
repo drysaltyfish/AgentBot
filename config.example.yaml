@@ -35,6 +35,11 @@ llm:
   # 最多回灌多少条历史（一轮约两条）；存储层用高水位批量裁剪，避免每轮裁剪破坏前缀
   history_turns: 20
 
+history:
+  # 对话历史落盘的 JSONL 路径（复用 F-38 的存储实现）。
+  # 留空则仅进程内，重启即丢——启动时会有 WARN 提醒。
+  file: ./data/history.jsonl
+
 agent:
   # 开启后回复走 ReAct 循环（F-35），可调用工具；关闭则直连 LLM。
   enabled: true
@@ -54,7 +59,8 @@ agent:
   # 落盘路径。留空则仅进程内，重启即丢——启动时会有一条 WARN 提醒。
   memory_file: ./data/memory.jsonl
   # 要注册的内置工具（F-44）；留空表示全部注册。
-  # 可选：calculator / current_time / json_query / http_fetch / memory_save / memory_recall
+  # 可选：calculator / current_time / json_query / http_fetch /
+  #       memory_save / memory_recall / recall_history
   tools: []
   # F-45 权限闸门。**默认关闭**：权限表是 fail-closed 的，
   # 没配好审批通道就打开会让所有未放行工具都被拒绝。

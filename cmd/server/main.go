@@ -261,7 +261,7 @@ func agentRole(ev *event.Event) agent.Role {
 //
 // 返回的是 agent.Agent 接口：未启用 ReAct 时返回 DirectAgent，
 // 因此调用方对两条路径完全同形，不需要分支。
-func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, lg *observe.Logger) (agent.Agent, error) {
+func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist history.History, lg *observe.Logger) (agent.Agent, error) {
 	if !cfg.Agent.Enabled {
 		return &agent.DirectAgent{LLM: model, SystemPrompt: sysPrompt}, nil
 	}
@@ -290,7 +290,7 @@ func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, lg *observe
 	}
 
 	// 内置工具：先全量注册再按配置裁剪，这样顺序始终等于内置顺序（前缀缓存需要稳定）。
-	deps := builtin.Deps{Memory: mem, HTTP: httpx.Defaults(), Now: time.Now}
+	deps := builtin.Deps{Memory: mem, HTTP: httpx.Defaults(), Now: time.Now, History: hist}
 	if err := builtin.Register(registry, deps); err != nil {
 		return nil, fmt.Errorf("register builtin tools: %w", err)
 	}
@@ -347,6 +347,7 @@ func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, lg *observe
 		"step_timeout", react.StepTimeout.String(),
 		"memory", mem != nil,
 		"memory_file", strings.TrimSpace(cfg.Agent.MemoryFile),
+		"history_file", strings.TrimSpace(cfg.History.File),
 		"approval", cfg.Agent.ApprovalEnabled)
 	return react, nil
 }
@@ -421,10 +422,23 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	// 若由装配层每轮裁剪，前缀会逐轮变化，前缀缓存永远无法命中。
 	shape := sendShapeOf(cfg)
 	histItems := historyTurns(cfg) * 2 // 一轮 ≈ user + assistant 两条
-	hist := history.NewMemory(histItems).WithTrimmer(history.HighWater{
-		Max: histItems,
-		Low: histItems * 3 / 4,
-	})
+	// 对话历史：可落盘（F-38 的 JSONL），留空则仅进程内。
+	// 裁剪统一用高水位批量进行，避免每次追加都缩短前缀、白白失效缓存。
+	var hist history.History
+	if path := strings.TrimSpace(cfg.History.File); path != "" {
+		hist = history.NewFile(path, histItems).WithTrimmer(history.HighWater{
+			Max: histItems,
+			Low: histItems * 3 / 4,
+		})
+		lg.Component("session").Info("conversation history is persisted to disk",
+			"path", path, "max_items", histItems)
+	} else {
+		hist = history.NewMemory(histItems).WithTrimmer(history.HighWater{
+			Max: histItems,
+			Low: histItems * 3 / 4,
+		})
+		lg.Component("session").Warn("conversation history is in-process only; it will be lost on restart (set history.file to persist)")
+	}
 	sessions := session.New(
 		session.WithHistory(hist),
 		session.WithTTL(session.DefaultTTL),
@@ -445,7 +459,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		"history_items", histItems, "trim_high_water", histItems, "trim_low_water", histItems*3/4)
 
 	// Agent：启用时走 ReAct（带工具），否则是直连 LLM。调用方对两条路径同形。
-	brain, err := buildAgent(cfg, model, sysPrompt, lg)
+	brain, err := buildAgent(cfg, model, sysPrompt, hist, lg)
 	if err != nil {
 		lifecycle.Error("cannot build agent", "error", err)
 		return 1

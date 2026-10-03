@@ -50,6 +50,7 @@ type Config struct {
 	Transport Transport `yaml:"transport"`
 	LLM       LLM       `yaml:"llm"`
 	Agent     Agent     `yaml:"agent"`
+	History   History   `yaml:"history"`
 	Behavior  Behavior  `yaml:"behavior"`
 	Prompt    Prompt    `yaml:"prompt"`
 	Policy    Policy    `yaml:"policy"`
@@ -66,6 +67,12 @@ const (
 	// ReplyOnMention 仅在 @ 机器人时回复（群聊默认，避免刷屏）。
 	ReplyOnMention = "on_mention"
 )
+
+// History 描述对话历史的存储（F-38 的落盘选项）。
+type History struct {
+	// File 是 JSONL 落盘路径；为空表示仅进程内（重启即丢）。
+	File string `yaml:"file"`
+}
 
 // Agent 描述 ReAct 循环与工具系统的接入方式（F-35 / F-41 / F-44 / F-45）。
 type Agent struct {

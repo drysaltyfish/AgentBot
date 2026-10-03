@@ -120,6 +120,7 @@ AgentBot/
 | 40 | F-16 | 交互式等待（Await/Stream） | P0 | M2 | 39 | `issues/40-await-stream.md` |
 | 41 | F-35 等 | Agent 接入组合根（M2 收口） | P0 | M2 | 34, 37, 38, 39 | `issues/41-agent-wiring.md` |
 | 42 | F-47（部分） | 记忆落盘与作用域隔离 | P0 | M2 | 35 | `issues/42-memory-persistence.md` |
+| 43 | F-38/F-44/F-21 | 对话历史落盘、历史召回工具与私聊隔离 | P0 | M2 | 41, 42 | `issues/43-history-persistence.md` |
 
 M2 的 Feature 范围来自附录 A：F-15, F-16, F-35, F-40, F-41~F-45。
 完成判据：Await 多轮对话可用 + F-75 中"多轮工具调用契约"通过。
