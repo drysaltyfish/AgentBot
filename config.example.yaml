@@ -264,3 +264,13 @@ sandbox:
   network_tools: []
   allow_network: false
   require_read_only: false
+
+# ---- 成本统计与配额（F-66）----
+# 默认关闭。开启后按模型单价统计 token 与费用，并按配额给出软限告警/硬限决策。
+# 注意：当前接入的是"全局计量"；会话/用户维度配额需要调用链携带会话键后才能强制。
+cost:
+  enabled: false
+  unknown_model: warn_zero     # warn_zero（0 计费并告警）| reject
+  queue_size: 256
+  prices: {}
+  quotas: []
