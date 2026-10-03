@@ -22,6 +22,16 @@ llm:
   thinking: true
   reasoning_effort: low        # low / high / max
 
+  # 模型单价（每百万 token 的美元价），用于台账的成本统计（F-85）。
+  # 留空或全 0 = 不计成本，但 token 与请求数仍然照记——
+  # "花了多少 token"与"花了多少钱"是两件事，前者不依赖价格表。
+  # 价格要填**当时**的价：台账会记录 pricing_version，改价后老数据仍可解释。
+  pricing:
+    version: ""
+    input_per_million: 0
+    output_per_million: 0
+    cache_hit_per_million: 0
+
   # 缓存优先：system_prompt(_file) 是整个会话的不可变前缀，启动时读一次就固定。
   # 逐字节不变才能命中前缀缓存；严禁写入时间戳/随机数等易变内容。
   #

@@ -119,6 +119,7 @@ func (a *ReactAgent) Run(ctx context.Context, in Input) (*Output, error) {
 			return out, fmt.Errorf("react iteration %d: %w", i+1, err)
 		}
 		out.Usage = addUsage(out.Usage, resp.Usage)
+		out.LLMCalls++
 
 		calls := resp.ToolCalls
 		if len(calls) == 0 {

@@ -59,3 +59,31 @@ var messagesColumns = []columnSpec{
 	{Table: "messages", Name: "token_count", DDL: "token_count INTEGER NOT NULL DEFAULT 0"},
 	{Table: "messages", Name: "fingerprint", DDL: "fingerprint TEXT NOT NULL DEFAULT ''"},
 }
+
+var sessionsSchema = []string{
+	// 会话台账（F-85）。
+	//
+	// 计数一律是**累加列**，靠 upsert 的 "列 = 列 + 增量" 维护。
+	// 不用"读改写"是因为并发下会丢增量，而丢增量不会有任何报错——
+	// 只是数字慢慢变得不可信。
+	`CREATE TABLE IF NOT EXISTS sessions (
+		session_key        TEXT PRIMARY KEY,
+		first_seen         INTEGER NOT NULL,
+		last_active        INTEGER NOT NULL,
+		requests           INTEGER NOT NULL DEFAULT 0,
+		tool_calls         INTEGER NOT NULL DEFAULT 0,
+		input_tokens       INTEGER NOT NULL DEFAULT 0,
+		output_tokens      INTEGER NOT NULL DEFAULT 0,
+		cache_hit_tokens   INTEGER NOT NULL DEFAULT 0,
+		cache_miss_tokens  INTEGER NOT NULL DEFAULT 0,
+		reasoning_tokens   INTEGER NOT NULL DEFAULT 0,
+		estimated_cost_usd REAL    NOT NULL DEFAULT 0,
+		pricing_version    TEXT    NOT NULL DEFAULT ''
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active DESC)`,
+}
+
+var sessionsColumns = []columnSpec{
+	{Table: "sessions", Name: "pricing_version", DDL: "pricing_version TEXT NOT NULL DEFAULT ''"},
+	{Table: "sessions", Name: "estimated_cost_usd", DDL: "estimated_cost_usd REAL NOT NULL DEFAULT 0"},
+}

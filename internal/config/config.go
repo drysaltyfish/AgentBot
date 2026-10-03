@@ -173,6 +173,14 @@ type Transport struct {
 }
 
 // LLM 描述模型供应商接入（F-26）。
+// Pricing 是模型单价（每百万 token 的美元价）。全 0 表示未配置，成本不参与统计。
+type Pricing struct {
+	Version            string   `yaml:"version"`
+	InputPerMillion    *float64 `yaml:"input_per_million"`
+	OutputPerMillion   *float64 `yaml:"output_per_million"`
+	CacheHitPerMillion *float64 `yaml:"cache_hit_per_million"`
+}
+
 type LLM struct {
 	Provider      string    `yaml:"provider"`
 	Model         string    `yaml:"model"`
@@ -193,6 +201,7 @@ type LLM struct {
 	// 长人格提示词放文件更易维护；启动时读一次并固定，保证前缀逐字节稳定。
 	SystemPromptFile *string `yaml:"system_prompt_file"`
 	// HistoryTurns 是最多回灌多少条历史；<=0 或未设置时用默认值。
+	Pricing      Pricing
 	HistoryTurns *int `yaml:"history_turns"`
 }
 
