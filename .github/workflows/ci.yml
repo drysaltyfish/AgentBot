@@ -58,10 +58,44 @@ jobs:
       - name: 断言 -update 在 CI 中被拒绝
         shell: bash
         run: |
-          if go test ./... -run Golden -update 2>&1 | grep -q "CI"; then
-            echo "-update 在 CI 中未被拒绝" >&2
+          set -euo pipefail
+          # 这条守卫的意图（F-74）：CI 里绝不允许用 -update 重写 golden 文件。
+          #
+          # 历史教训：上一版写成 `go test ... -update | grep -q "CI"` 而后失败——
+          # 一是判据反了（输出里出现 CI 反而判为失败），二是当时根本没有 golden 用例，
+          # -update 只是"未知 flag"报错，于是这一步无论对错都会通过，成了假安全感。
+          # 现在改成：先探测哪些包真的有 golden 用例；有则真断言，没有则显式告知。
+          #
+          # 两个坑都已实测：
+          #   1) -list 不受 -run 约束：`-run Golden -list '.*'` 会把全部 244 个测试都列出来
+          #      （当时误判为"有 244 个 golden 用例"），探测必须直接用 -list 'Golden'。
+          #   2) 不能对 ./... 断言：没有 -update flag 的包会先以"未知 flag"失败，
+          #      掩盖"是助手接受了 -update"这个真正要报的原因。只对 golden 包断言。
+          pkgs=""
+          for p in $(go list ./...); do
+            if go test "$p" -list 'Golden' 2>/dev/null | grep -q '^Test'; then
+              pkgs="$pkgs $p"
+            fi
+          done
+          pkgs=$(echo "$pkgs" | xargs)
+
+          if [ -z "$pkgs" ]; then
+            echo "::notice::golden 用例尚未落地（F-74 属 M3）——本步当前不提供任何保护，特此显式告知，避免假安全感。"
+            exit 0
+          fi
+          echo "含 golden 用例的包：$pkgs"
+
+          if out=$(go test $pkgs -run Golden -update 2>&1); then
+            echo "::error::-update 在 CI 中被接受了，golden 文件可能被意外重写"
+            printf '%s\n' "$out"
             exit 1
           fi
+          if ! printf '%s' "$out" | grep -q 'CI'; then
+            echo "::error::-update 虽被拒绝，但原因不是预期的 CI 保护（输出中未出现 CI）"
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          echo "OK：-update 在 CI 中被拒绝（覆盖包：$pkgs）"
 
   bench-coverage:
     name: bench smoke + coverage
