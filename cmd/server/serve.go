@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/drysaltyfish/agentbot/internal/agent"
+	"github.com/drysaltyfish/agentbot/internal/backpressure"
 	"github.com/drysaltyfish/agentbot/internal/bot"
 	"github.com/drysaltyfish/agentbot/internal/config"
 	"github.com/drysaltyfish/agentbot/internal/conversation"
@@ -67,6 +68,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	var (
 		sessionMgr *session.Manager
 		replyQueue chan reply.Job
+		eventQueue *backpressure.Queue[eventJob]
 		wsUp       atomic.Bool
 	)
 	catalog := metrics.NewCatalog(metrics.CatalogOptions{
@@ -76,7 +78,13 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 			}
 			return float64(sessionMgr.Len())
 		},
-		QueueDepth: func() float64 { return float64(len(replyQueue)) },
+		QueueDepth: func() float64 {
+			depth := len(replyQueue)
+			if eventQueue != nil {
+				depth += eventQueue.Depth()
+			}
+			return float64(depth)
+		},
 	})
 
 	model, err := buildLLM(cfg, lg)
@@ -375,6 +383,30 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 			"group_per_minute", cfg.RateLimit.EffectiveGroupPerMinute(), "group_burst", cfg.RateLimit.EffectiveGroupBurst())
 	}
 
+	// F-17：单飞（反并发）。同一用户连点两次时，第二次在入口被拒。
+	// 占位在 post 释放——引擎在 Handler panic 后仍会执行 post，因此不会永久卡住。
+	if cfg.Singleflight.EffectiveEnabled() {
+		keyFn := func(c *router.Ctx) string { return fmt.Sprintf("%d:%d", c.Event.GroupID, c.Event.UserID) }
+		if cfg.Singleflight.EffectiveKey() == "user" {
+			keyFn = func(c *router.Ctx) string { return fmt.Sprintf("%d", c.Event.UserID) }
+		}
+		sf := router.NewSingleflight(keyFn)
+		if cfg.Singleflight.EffectiveNotice() {
+			sf.OnReject(func(c *router.Ctx) {
+				target := outbound.PrivateTarget(c.Event.UserID)
+				if c.Event.GroupID != 0 {
+					target = outbound.GroupTarget(c.Event.GroupID)
+				}
+				if _, err := sender.SendMany(context.Background(), target, []string{"上一条还在处理中，稍等一下～"}, 0); err != nil {
+					lg.Component("singleflight").Warn("cannot send busy notice", "error", err)
+				}
+			})
+		}
+		engine.UseMid(sf.Rule())
+		engine.UsePost(sf.Release())
+		lg.Component("singleflight").Info("single-flight middleware is enabled", "key", cfg.Singleflight.EffectiveKey())
+	}
+
 	// F-19：功能开关。未启用时等价于没有开关（默认全开）。
 	toggles := newToggles(cfg, lg)
 	if cfg.Toggle.EffectiveEnabled() {
@@ -418,6 +450,25 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		})
 	}
 
+	// F-20：事件处理走有界背压队列——洪峰时丢弃并计数，绝不在读循环里阻塞。
+	// 队列本身不带 worker 数的硬编码：默认 max(4, GOMAXPROCS)。
+	eventQueue = backpressure.New(func(j eventJob) {
+		engine.Dispatch(j.ctx, j.event, j.caller)
+	}, backpressure.Options{
+		OnDrop: func(reason string) {
+			catalog.EventsDropped.With(metrics.Labels{"reason": reason}).Inc()
+		},
+		OnPanic: func(recovered any) {
+			lg.Component("transport").Error("event handler panic", "panic", fmt.Sprint(recovered))
+		},
+	})
+	eventQueue.Start()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = eventQueue.Close(ctx)
+	}()
+
 	sink := func(raw []byte, caller transport.Caller) {
 		ev := event.NewEvent(raw)
 		tlog := lg.Component("transport")
@@ -451,7 +502,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		}
 
 		ectx := observe.WithTraceID(listenCtx, traceID(ev))
-		engine.Dispatch(ectx, ev, caller)
+		eventQueue.Submit(eventJob{ctx: ectx, event: ev, caller: caller})
 	}
 
 	app.Go("ws-session", func(ctx context.Context) {
@@ -529,6 +580,13 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	lifecycle.Info("shutdown signal received", "timeout", timeout.String())
 	if opsSrv != nil {
 		opsSrv.SetReady(false)
+	}
+	if eventQueue != nil {
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), 3*time.Second)
+		if err := eventQueue.Close(drainCtx); err != nil {
+			lifecycle.Warn("event queue did not drain in time", "error", err)
+		}
+		cancelDrain()
 	}
 
 	go func() {

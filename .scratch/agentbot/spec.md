@@ -149,6 +149,20 @@ M2 的 Feature 范围来自附录 A：F-15, F-16, F-35, F-40, F-41~F-45。
 (3) 记忆只能写不能删，"忘记我"没有通道。
 因此新增 F-83~F-89，并把 F-47/F-48/F-50 既有的 SQLite 计划与它们合并到同一里程碑。
 
+### 5.5 M3 补记 · 第二批（本次补齐）
+
+| Feature | 落地 | 位置 |
+|---|---|---|
+| F-17 单飞反并发 | `Singleflight[K]` + mid 占位/post 释放（panic 也释放），`singleflight` 配置分节 | `internal/router/singleflight.go` |
+| F-20 背压队列 | 泛型有界队列（DropNewest/DropOldest/Block、worker 池、排空关闭），事件分发改走队列 | `internal/backpressure/` |
+| F-50 二值向量检索 | 阈值量化、分桶、汉明距离、Top-k 一致排序、可直接落库的 Entry | `internal/vector/` |
+| F-56 敏感词引擎 | AC 自动机、重叠消解、白名单、全角/半角与转义归一、构建期拒绝、原子热替换 | `internal/textguard/` |
+| F-62 感知哈希去重 | aHash/dHash/pHash + 分桶缓存（TTL+LRU、可配阈值）与 `__derived_desc__` 回写契约 | `internal/imagehash/` |
+| F-77 基准测试 | 规格点名的 7 个基准齐备 + 路由预算校验 + `cmd/benchcmp` 替代 make bench-compare | 各包 `*_test.go`、`cmd/benchcmp/` |
+| F-79 接口断言与文档同步 | 编译期接口断言 + 两条文档同步测试（示例配置键、指标名） | 各实现文件、`internal/config`、`internal/metrics` |
+
+仍未落地：F-07/F-22/F-24/F-27/F-29/F-31/F-32/F-46/F-49/F-51/F-52/F-57/F-58/F-61/F-63/F-64/F-65/F-66/F-71/F-72/F-74/F-75/F-82（F-07/F-27 按本轮范围排除）。
+
 ### 5.4 M3 补记 · 生产可用五项（本次补齐）
 
 M3 原计划还包含限速/开关/审计/指标/探针，本轮一并落地（对应 F-18 / F-19 / F-60 / F-68 / F-69）：

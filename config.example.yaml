@@ -206,3 +206,12 @@ ops:
   auth_token: ""
   ready_cache_ttl: 10s
   probe_timeout: 1s
+
+# ---- 单飞（反并发，F-17）----
+# 同一用户连点两次时，第二次在入口被拒，避免触发两次昂贵调用。
+# key: user（只看用户）或 user_group（用户+群，默认）。
+singleflight:
+  enabled: false
+  key: user_group
+  # 被拒绝时是否回一句"正在处理中"；默认关闭以免刷屏。
+  notice: false

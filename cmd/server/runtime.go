@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/drysaltyfish/agentbot/internal/bot"
 	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
@@ -16,6 +17,21 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/transport"
 )
+
+// 编译期断言：装配层的适配器必须始终满足它们所实现的接口（F-79）。
+var (
+	_ bot.Component        = namedComponent{}
+	_ session.PendingStore = pendingStoreAdapter{}
+)
+
+// eventJob 是一次待分发的事件（F-20 背压队列的元素）。
+//
+// 队列元素必须自带 ctx 与 caller：它们决定这次分发属于哪条链路、用哪个通道回包。
+type eventJob struct {
+	ctx    context.Context
+	event  *event.Event
+	caller transport.Caller
+}
 
 // callerBox 让工具的 API 通道可以**迟到绑定**。
 //

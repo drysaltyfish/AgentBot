@@ -228,6 +228,18 @@ type Audit struct {
 	ContentLimit *int `yaml:"content_limit"`
 }
 
+// Singleflight 描述单飞（反并发）中间件（F-17）。
+//
+// 默认关闭：它会让"同一 key 的第二次并发请求"被拒绝，属于改变行为的开关。
+type Singleflight struct {
+	// Enabled 为 nil 时按关闭处理。
+	Enabled *bool `yaml:"enabled"`
+	// Key 是单飞的粒度：user（按用户）或 user_group（按用户+群，默认）。
+	Key string `yaml:"key"`
+	// Notice 为 true 时对被拒绝的请求回一句提示；默认 false，避免刷屏。
+	Notice *bool `yaml:"notice"`
+}
+
 // Ops 描述指标与探针的独立监听（F-68 / F-69）。
 //
 // 默认只监听回环地址：指标与探针不需要对外暴露，这也是默认不配鉴权也安全的前提。

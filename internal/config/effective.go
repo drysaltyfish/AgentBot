@@ -186,3 +186,17 @@ func (o Ops) EffectiveReadyCacheTTL() time.Duration {
 func (o Ops) EffectiveProbeTimeout() time.Duration {
 	return o.ProbeTimeout.Or(defaultOpsProbeTimeout)
 }
+
+// EffectiveEnabled 返回是否启用单飞中间件；未配置时默认关闭。
+func (s Singleflight) EffectiveEnabled() bool { return orBool(s.Enabled, false) }
+
+// EffectiveKey 返回单飞粒度；未配置时默认 user_group。
+func (s Singleflight) EffectiveKey() string {
+	if strings.TrimSpace(s.Key) == "" {
+		return defaultSingleflightKey
+	}
+	return s.Key
+}
+
+// EffectiveNotice 返回拒绝时是否回提示；未配置时默认关闭。
+func (s Singleflight) EffectiveNotice() bool { return orBool(s.Notice, defaultSingleflightNotice) }

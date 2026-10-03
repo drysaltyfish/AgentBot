@@ -207,3 +207,9 @@ func sortKeys(keys []Key) {
 		return keys[i].GroupID < keys[j].GroupID
 	})
 }
+
+// 编译期断言：两种 Store 实现必须始终满足接口（F-79）。
+var (
+	_ Store = (*MemoryStore)(nil)
+	_ Store = (*FileStore)(nil)
+)
