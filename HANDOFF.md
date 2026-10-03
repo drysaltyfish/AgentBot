@@ -13,7 +13,7 @@
 
 - HEAD = 1572003（外加本提交），与 origin/main 一致，工作区干净，CI 绿。
 - **功能：85/89 完成**；剩 F-23、F-65。
-- **接线：5/15 完成**。这是最大的缺口：按仓库自己的 **F-79**，未接线 = 未交付。
+- **接线：8/15 完成**（含 F-36/F-37、F-71、F-66 计量与 /cost）。这是最大的缺口：按仓库自己的 **F-79**，未接线 = 未交付。
 
 ### 已完成的接线（5 处）
 
@@ -45,7 +45,7 @@ F-82 的 RouteKey / Fingerprint 是 F-65 的输入。
 |---|---|---|---|
 | 1 | admin 命令入口 | cmd/server/serve.go 的消息路径 | 包已就绪（internal/admin）。同时挂 /switch（toggle）与 /ban 系列（internal/moderation 的 Commander）。Authorizer 复用 moderation.super_users |
 | 2 | cost 会话维度 + 持久化 | 会话键需进 LLM 调用链 | 当前只做全局计量；要强制 session/user 配额，必须把会话键经 ctx 传到 observedLLM，再实现 SQLite cost.Store |
-| 3 | agent.paradigm（F-36/F-37） | cmd/server/build.go 的 buildAgent | **必须先写 LLM 驱动的 Evaluator**：ReflexionAgent 在 Evaluator==nil 时只是原样返回初稿（reflexion.go:98），接了等于空转 |
+| 3 | ~~agent.paradigm（F-36/F-37）~~ **已完成** | — | 已接：LLM Evaluator + wrapParadigm；F-37 目前只有默认单 worker，无 workers 列表配置 |
 | 4 | agent.memory 切分层记忆（F-49/F-51） | buildAgent 里 memory 的构造处 | **需要 SQLite TierStore 实现**（internal/memory 只给接口与内存实现）；否则重启丢记忆，是行为退化 |
 | 5 | semcache（F-63） | LLM 请求路径 | 需要 Vectorize（embedding 或二值哈希）+ 出口过滤（F-55）。可接在 observedLLM 层 |
 | 6 | tree 摘要树（F-52） | 摄入路径 | 需要注入 Summarizer / Embedder |
