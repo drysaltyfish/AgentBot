@@ -206,6 +206,16 @@ func (c *Config) Validate() error {
 	if c.Ops.ProbeTimeout != nil && c.Ops.ProbeTimeout.D <= 0 {
 		add("ops.probe_timeout", "必须为正")
 	}
+	switch c.Moderation.Action {
+	case "", "mask", "block":
+	default:
+		add("moderation.action", "必须是 mask / block 之一，实际为 "+strconv.Quote(c.Moderation.Action))
+	}
+	if c.Moderation.SensitiveWordsFile != "" {
+		if _, ferr := os.Stat(c.Moderation.SensitiveWordsFile); ferr != nil {
+			add("moderation.sensitive_words_file", "无法读取: "+ferr.Error())
+		}
+	}
 	switch c.Singleflight.Key {
 	case "", "user", "user_group":
 	default:

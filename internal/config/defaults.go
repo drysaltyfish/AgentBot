@@ -46,6 +46,12 @@ const (
 	// defaultSingleflightKey / defaultSingleflightNotice 是单飞的默认粒度与提示开关（F-17）。
 	defaultSingleflightKey    = "user_group"
 	defaultSingleflightNotice = false
+	// 以下为 F-57 / F-58 的默认值（与 internal/moderation 的默认保持一致）。
+	defaultModerationAction          = "mask"
+	defaultModerationSpamWindow      = 10 * time.Second
+	defaultModerationSpamMaxMessages = 20
+	defaultModerationBanDuration     = 60 * time.Second
+	defaultModerationDuplicateRepeat = 5
 )
 
 // Default 返回带默认值的配置。可选字段用指针，nil 表示“未设置”。

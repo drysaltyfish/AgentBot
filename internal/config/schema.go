@@ -67,4 +67,5 @@ type Config struct {
 	Audit        Audit        `yaml:"audit"`
 	Ops          Ops          `yaml:"ops"`
 	Singleflight Singleflight `yaml:"singleflight"`
+	Moderation   Moderation   `yaml:"moderation"`
 }

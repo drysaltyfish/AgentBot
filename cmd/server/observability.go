@@ -14,12 +14,14 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/config"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/metrics"
+	"github.com/drysaltyfish/agentbot/internal/moderation"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/ops"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/router"
 	"github.com/drysaltyfish/agentbot/internal/secrets"
 	"github.com/drysaltyfish/agentbot/internal/store"
+	"github.com/drysaltyfish/agentbot/internal/textguard"
 	"github.com/drysaltyfish/agentbot/internal/toggle"
 )
 
@@ -303,5 +305,144 @@ func approvalAuditHook(alog *audit.Logger) func(agent.ApprovalRecord) {
 			DurationMS: rec.WaitMS,
 			Params:     map[string]string{"reason": rec.Reason, "verdict": rec.Verdict.String()},
 		})
+	}
+}
+
+// buildModeration 构造入站审查引擎（F-57 / F-58）；未启用时返回 nil。
+//
+// 审计与指标注入放在组合根（而不是 engine 的回调里）：决策已经带着 Rule/Reason，
+// 在这里既省一层适配，也让"什么算拦截"只有一个判据。
+func buildModeration(cfg *config.Config, lg *observe.Logger) (*moderation.Engine, error) {
+	if !cfg.Moderation.EffectiveEnabled() {
+		return nil, nil
+	}
+	mlog := lg.Component("moderation")
+
+	words, err := loadSensitiveWords(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var matcher *textguard.Engine
+	if len(words) > 0 {
+		rules := make([]textguard.Rule, 0, len(words))
+		for _, w := range words {
+			rules = append(rules, textguard.Rule{Word: w})
+		}
+		replacement := "***"
+		if cfg.Moderation.MaskReplacement != nil {
+			replacement = *cfg.Moderation.MaskReplacement
+		}
+		m, merr := textguard.New(rules, textguard.Options{DefaultReplacement: replacement, Normalize: true})
+		if merr != nil {
+			return nil, fmt.Errorf("compile sensitive words: %w", merr)
+		}
+		matcher = textguard.NewEngine(m)
+	}
+
+	bans, berr := buildBlacklist(cfg, func(msg string) { mlog.Warn(msg) })
+	if berr != nil {
+		return nil, berr
+	}
+
+	sensitive := moderation.SensitiveMask
+	if cfg.Moderation.EffectiveAction() == "block" {
+		sensitive = moderation.SensitiveBlock
+	}
+	spam := moderation.NewAntiSpam(moderation.AntiSpamConfig{
+		Window:          cfg.Moderation.EffectiveSpamWindow(),
+		MaxMessages:     cfg.Moderation.EffectiveSpamMaxMessages(),
+		BanDuration:     cfg.Moderation.EffectiveBanDuration(),
+		DuplicateRepeat: cfg.Moderation.EffectiveDuplicateRepeat(),
+	})
+	mlog.Info("inbound moderation is enabled",
+		"words", len(words), "action", cfg.Moderation.EffectiveAction(),
+		"spam_window", cfg.Moderation.EffectiveSpamWindow().String(),
+		"spam_max", cfg.Moderation.EffectiveSpamMaxMessages(),
+		"blacklist_file", cfg.Moderation.BlacklistFile)
+
+	return moderation.New(moderation.Options{
+		Matcher:   matcher,
+		Sensitive: sensitive,
+		Blacklist: bans,
+		AntiSpam:  spam,
+		Warn:      func(msg string) { mlog.Warn(msg) },
+	}), nil
+}
+
+// buildBlacklist 构造黑名单；文件不可用时退回内存并告警（可用性优先）。
+func buildBlacklist(cfg *config.Config, warn func(string)) (*moderation.Blacklist, error) {
+	opts := moderation.BlacklistOptions{
+		SelfID:     cfg.Transport.EffectiveSelfID(),
+		SuperUsers: cfg.Moderation.SuperUsers,
+		Warn:       warn,
+	}
+	if path := strings.TrimSpace(cfg.Moderation.BlacklistFile); path != "" {
+		store, err := moderation.NewFileBanStore(path)
+		if err == nil {
+			return moderation.NewBlacklist(store, opts)
+		}
+		warn(fmt.Sprintf("cannot open blacklist store; using memory (state will not survive restart): %v (path=%s)", err, path))
+	}
+	return moderation.NewBlacklist(moderation.NewMemoryBanStore(), opts)
+}
+
+// loadSensitiveWords 合并内联词表与文件词表；文件按行读，忽略空行与 # 注释。
+func loadSensitiveWords(cfg *config.Config) ([]string, error) {
+	words := append([]string{}, cfg.Moderation.SensitiveWords...)
+	path := strings.TrimSpace(cfg.Moderation.SensitiveWordsFile)
+	if path == "" {
+		return words, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read sensitive words %s: %w", path, err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		words = append(words, line)
+	}
+	return words, nil
+}
+
+// moderationPreHook 把入站审查挂成 pre 钩子：拦截的事件不进入任何路由。
+func moderationPreHook(eng *moderation.Engine, cat *metrics.Catalog, alog *audit.Logger, lg *observe.Logger) router.Rule {
+	mlog := lg.Component("moderation")
+	return func(c *router.Ctx) bool {
+		if c == nil || c.Event == nil {
+			return true
+		}
+		decision, err := eng.Review(c, moderation.Message{Text: c.MessageString()}, moderation.Meta{
+			UserID:    c.Event.UserID,
+			GroupID:   c.Event.GroupID,
+			SelfID:    c.Event.SelfID,
+			Role:      string(agentRole(c.Event)),
+			Addressed: c.Event.GroupID == 0 || router.AtMe()(c),
+		})
+		if err != nil {
+			// 规格要求 guard 超时/失败默认放行：审查是保护措施，不该变成故障点。
+			mlog.Warn("review failed; allowing the message", "error", err)
+			return true
+		}
+		if !decision.Blocked() {
+			return true
+		}
+		if cat != nil {
+			cat.GuardBlocks.With(metrics.Labels{"guard": "moderation", "reason": decision.Rule}).Inc()
+		}
+		if alog != nil {
+			alog.Log(audit.Event{
+				Type: audit.EventInboundBlocked, TraceID: observe.TraceID(c),
+				UserID: c.Event.UserID, GroupID: c.Event.GroupID,
+				Action: decision.Rule, Result: audit.ResultDenied,
+				Params: map[string]string{"reason": decision.Reason},
+			})
+		}
+		mlog.Info("inbound message blocked",
+			"rule", decision.Rule, "reason", decision.Reason,
+			"user_id", c.Event.UserID, "group_id", c.Event.GroupID)
+		return false
 	}
 }

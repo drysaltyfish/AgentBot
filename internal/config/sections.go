@@ -244,6 +244,40 @@ type Singleflight struct {
 	Notice *bool `yaml:"notice"`
 }
 
+// Moderation 描述入站内容审查与黑名单（F-57 / F-58）。
+//
+// 默认关闭：它会改写或拦截入站消息，属于改变行为的开关。
+type Moderation struct {
+	// Enabled 为 nil 时按关闭处理。
+	Enabled *bool `yaml:"enabled"`
+	// SensitiveWords 是敏感词表（内联）；与文件叠加。
+	SensitiveWords []string `yaml:"sensitive_words"`
+	// SensitiveWordsFile 是敏感词表文件（每行一个词，忽略空行与 # 注释）。
+	SensitiveWordsFile string `yaml:"sensitive_words_file"`
+	// Action 是命中后的动作：mask（脱敏放行，默认）或 block（拦截）。
+	Action string `yaml:"action"`
+	// MaskReplacement 是脱敏替换串；为空时按命中长度生成等长掩码。
+	MaskReplacement *string `yaml:"mask_replacement"`
+	// BlacklistFile 是封禁记录的落盘路径；为空表示仅进程内（重启即丢）。
+	BlacklistFile string `yaml:"blacklist_file"`
+	// SuperUsers 是永不封禁的超管用户 ID。
+	SuperUsers []int64 `yaml:"super_users"`
+	// AntiSpam 是防刷参数（F-58）。
+	AntiSpam ModerationAntiSpam `yaml:"antispam"`
+}
+
+// ModerationAntiSpam 描述防刷参数（F-58）。
+type ModerationAntiSpam struct {
+	// Window 是速率统计窗口；未配置或非正时取默认 10s。
+	Window *Duration `yaml:"window"`
+	// MaxMessages 是窗口内允许的最大消息数；未配置或非正时取默认 20。
+	MaxMessages *int `yaml:"max_messages"`
+	// BanDuration 是触发后的临时封禁时长；未配置或非正时取默认 60s。
+	BanDuration *Duration `yaml:"ban_duration"`
+	// DuplicateRepeat 是连续相同消息的阈值；未配置或非正时取默认 5。
+	DuplicateRepeat *int `yaml:"duplicate_repeat"`
+}
+
 // Ops 描述指标与探针的独立监听（F-68 / F-69）。
 //
 // 默认只监听回环地址：指标与探针不需要对外暴露，这也是默认不配鉴权也安全的前提。
