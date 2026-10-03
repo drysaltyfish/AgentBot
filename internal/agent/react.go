@@ -37,6 +37,8 @@ const (
 	DefaultStepTimeout = 30 * time.Second
 	// FinishReasonMaxIterations 是循环达上限时的结束原因。
 	FinishReasonMaxIterations = "max_iterations"
+	// FinishReasonEndOfTurn 是模型主动结束本轮时的结束原因（伴随 ErrEndOfTurn）。
+	FinishReasonEndOfTurn = "end_of_turn"
 )
 
 // ReactAgent 实现 ReAct 循环（F-35）：先想 → 调工具 → 看结果 → 再想。
@@ -56,6 +58,9 @@ type ReactAgent struct {
 	ParallelTools bool
 	// Protocol 为空时按 ProtocolAuto 处理。
 	Protocol Protocol
+	// Memory 若不为 nil，其结果会被注入到 system 之后、历史之前（见 ADR-0002）。
+	// 这样 system 段（所有会话共享的大头）仍然稳定命中缓存。
+	Memory Memory
 	// Warn 接收降级/抢救告警（不要吞掉，否则会长期掩盖 provider 侧问题）。
 	Warn func(string)
 	// Now 注入时间源（测试用）。
@@ -72,9 +77,19 @@ func (a *ReactAgent) Run(ctx context.Context, in Input) (*Output, error) {
 		return out, ErrNoToolRegistry
 	}
 
-	messages := make([]llm.Message, 0, len(in.History)+2)
+	messages := make([]llm.Message, 0, len(in.History)+3)
 	if a.SystemPrompt != "" {
 		messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: a.SystemPrompt})
+	}
+	// ADR-0002：记忆是独立消息，放在 system 之后、历史之前。
+	// 不进 system 是为了保住 system 段的全局缓存；不放到最后是为了让记忆本身也能被缓存。
+	if a.Memory != nil {
+		items, err := a.Memory.Recall(ctx)
+		if err != nil {
+			a.warnf("cannot recall memory: %v", err)
+		} else if block := RenderMemory(items); block != "" {
+			messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: block})
+		}
 	}
 	messages = append(messages, in.History...)
 	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: in.Query})
@@ -146,6 +161,14 @@ func (a *ReactAgent) Run(ctx context.Context, in Input) (*Output, error) {
 				ToolCallID: call.ID,
 				Content:    res.String(),
 			})
+
+			// F-40：虚拟动作 end_action 结束本轮。用哨兵错误表达控制流，
+			// 调用方据此决定"不发送任何消息"，这属于正常收尾而不是失败。
+			if res.Metadata[ControlMetadataKey] == ControlEndOfTurn {
+				out.FinishReason = FinishReasonEndOfTurn
+				out.AddStep(Step{Type: StepObservation, Content: ActionEndTurn})
+				return out, ErrEndOfTurn
+			}
 		}
 	}
 
