@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/drysaltyfish/agentbot/internal/admin"
 	"github.com/drysaltyfish/agentbot/internal/agent"
 	"github.com/drysaltyfish/agentbot/internal/audit"
 	"github.com/drysaltyfish/agentbot/internal/config"
@@ -547,4 +548,89 @@ func buildCostTracker(cfg *config.Config, lg *observe.Logger, cat *metrics.Catal
 		"models", len(prices.Prices), "quotas", len(quotas),
 		"unknown_model", cfg.Cost.EffectiveUnknownModel())
 	return t, nil
+}
+
+// buildAdminModule 构造管理命令模块（F-71）。
+//
+// 只注册组合根有能力提供数据的命令；/help 由 admin.New 自带。
+// 鉴权统一走 moderation.super_users：仓库里已经有"谁说了算"的配置，
+// 不该再造第二份。
+func buildAdminModule(cfg *config.Config, alog *audit.Logger, lg *observe.Logger, mod *moderation.Engine) *admin.Module {
+	supers := make(map[int64]bool, len(cfg.Moderation.SuperUsers))
+	for _, id := range cfg.Moderation.SuperUsers {
+		supers[id] = true
+	}
+	mlog := lg.Component("admin")
+
+	m := admin.New(admin.Options{
+		Checker: func(_ context.Context, inv admin.Invocation) bool { return supers[inv.UserID] },
+		Auditor: func(ev admin.AuditEvent) {
+			if alog == nil {
+				return
+			}
+			res := audit.ResultDenied
+			if ev.Authorized {
+				res = audit.ResultOK
+			}
+			alog.Log(audit.Event{
+				Type:    audit.EventAdminCommand,
+				UserID:  ev.UserID,
+				GroupID: ev.GroupID,
+				Action:  ev.Command,
+				Result:  res,
+			})
+		},
+		DenyMode: admin.DenyExplicit,
+	})
+
+	if mod != nil {
+		bans := mod.Blacklist()
+		if bans != nil {
+			_ = m.Register("ban", "/ban <用户号> [原因] —— 永久封禁", func(_ context.Context, inv admin.Invocation) (string, error) {
+				if len(inv.Args) == 0 {
+					return "", fmt.Errorf("%w: 需要用户号", admin.ErrUsage)
+				}
+				reason := "管理员指令"
+				if len(inv.Args) > 1 {
+					reason = strings.Join(inv.Args[1:], " ")
+				}
+				if err := bans.Ban(moderation.BanUser, inv.Args[0], reason, 0); err != nil {
+					return "", fmt.Errorf("ban: %w", err)
+				}
+				return "已封禁 " + inv.Args[0], nil
+			})
+			_ = m.Register("unban", "/unban <用户号> —— 解除封禁", func(_ context.Context, inv admin.Invocation) (string, error) {
+				if len(inv.Args) == 0 {
+					return "", fmt.Errorf("%w: 需要用户号", admin.ErrUsage)
+				}
+				ok, err := bans.Unban(moderation.BanUser, inv.Args[0])
+				if err != nil {
+					return "", fmt.Errorf("unban: %w", err)
+				}
+				if !ok {
+					return "该用户不在黑名单里", nil
+				}
+				return "已解封 " + inv.Args[0], nil
+			})
+			_ = m.Register("banlist", "/banlist —— 列出当前封禁", func(_ context.Context, _ admin.Invocation) (string, error) {
+				entries := bans.List()
+				if len(entries) == 0 {
+					return "黑名单为空", nil
+				}
+				var b strings.Builder
+				fmt.Fprintf(&b, "黑名单 %d 条：", len(entries))
+				for i, e := range entries {
+					if i >= 20 {
+						b.WriteString(" …")
+						break
+					}
+					fmt.Fprintf(&b, " %s", e.ID)
+				}
+				return b.String(), nil
+			})
+		}
+	}
+
+	mlog.Info("admin commands registered", "commands", len(m.Commands()))
+	return m
 }

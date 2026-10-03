@@ -34,6 +34,8 @@ const (
 	EventInboundBlocked EventType = "inbound_blocked"
 	EventRateLimited    EventType = "rate_limited"
 	EventConfigChanged  EventType = "config_changed"
+	// EventAdminCommand 是管理命令的调用记录（F-71），无论授权与否都记。
+	EventAdminCommand EventType = "admin_command"
 )
 
 // Result 是审计事件的结果。

@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/drysaltyfish/agentbot/internal/admin"
 	"github.com/drysaltyfish/agentbot/internal/agent"
 	"github.com/drysaltyfish/agentbot/internal/audit"
 	"github.com/drysaltyfish/agentbot/internal/config"
@@ -338,4 +340,45 @@ func (s stubLLM) Chat(context.Context, *llm.ChatRequest) (*llm.ChatResponse, err
 
 func (s stubLLM) ChatStream(context.Context, *llm.ChatRequest) (<-chan llm.Chunk, error) {
 	return nil, nil
+}
+
+// Test_F71_AdminModuleAuthorizesAndAudits 覆盖 F-71 的接线：
+// 超管能执行、非超管被拒、两种情形都留下审计。
+func Test_F71_AdminModuleAuthorizesAndAudits(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Moderation.SuperUsers = []int64{42}
+
+	var buf bytes.Buffer
+	alog := audit.New(audit.Options{Writer: &buf, QueueSize: 16, Now: time.Now})
+	m := buildAdminModule(cfg, alog, testLogger(t), nil)
+
+	if _, err := m.Dispatch(context.Background(), admin.Request{Text: "/help", UserID: 42, Source: admin.SourceMessage}); err != nil {
+		t.Fatalf("超管执行 /help 不应报错: %v", err)
+	}
+	reply, err := m.Dispatch(context.Background(), admin.Request{Text: "/help", UserID: 7, Source: admin.SourceMessage})
+	if err != nil {
+		t.Fatalf("未授权不应返回错误（应走 DenyExplicit 回复）: %v", err)
+	}
+	if reply == "" {
+		t.Fatalf("DenyExplicit 模式下未授权应得到明确拒绝回复")
+	}
+
+	// 未知命令不能被管理模块吞掉（否则普通聊天里的斜杠会消失）。
+	if _, err := m.Dispatch(context.Background(), admin.Request{Text: "/不存在的命令", UserID: 42}); !errors.Is(err, admin.ErrUnknownCommand) {
+		t.Fatalf("未知命令应返回 ErrUnknownCommand: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := alog.Close(ctx); err != nil {
+		t.Fatalf("audit Close: %v", err)
+	}
+	if !strings.Contains(buf.String(), "admin_command") {
+		t.Fatalf("应记录 admin_command 审计: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "denied") {
+		t.Fatalf("被拒调用也必须留痕: %s", buf.String())
+	}
 }
