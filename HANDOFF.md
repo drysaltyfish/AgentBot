@@ -11,11 +11,11 @@
 
 ## 2. 当前状态（干净、已推送）
 
-- HEAD = 1572003（外加本提交），与 origin/main 一致，工作区干净，CI 绿。
-- **功能：85/89 完成**；剩 F-23、F-65。
-- **接线：8/15 完成**（含 F-36/F-37、F-71、F-66 计量与 /cost）。这是最大的缺口：按仓库自己的 **F-79**，未接线 = 未交付。
+- HEAD = 21059e7，已推送；工作区干净，本轮本地 build/vet/test/gofmt 全绿，CI 走 `gh run watch`。
+- **功能：86/89 完成**；剩 F-23（F-65 已于本轮完成三段式前缀与 `/prompt-hash`）。
+- **接线：10/15 完成**（含 F-36/F-37、F-71、F-66 计量与 /cost，以及本轮 F-65 + F-82）。这是最大的缺口：按仓库自己的 **F-79**，未接线 = 未交付。
 
-### 已完成的接线（5 处）
+### 已完成的接线（7 处）
 
 | Feature | 接线内容 | 证明它的测试 |
 |---|---|---|
@@ -26,24 +26,29 @@
 | F-66（半） | cost 分节 + observedLLM 按真实 usage 记账 + `/cost` 命令 | Test_F66_ObservedLLMRecordsCost、Test_F66_AdminCostCommandReportsUsage |
 | F-71 | admin 模块（/help、/ban、/unban、/banlist）+ 超管鉴权 + 审计 | Test_F71_AdminModuleAuthorizesAndAudits |
 | F-36 / F-37 | LLM Evaluator + `agent.paradigm`（reflexion / orchestrator） | Test_F36_ReflexionParadigmDrivesEvaluation（断言评估器被调用 2 次） |
+| F-65 | 三段式前缀（静态/半静态/动态）+ `/prompt-hash` 接线 | Test_F65_StaticSegmentIsByteStableAcrossDynamicInputs、Test_F65_HalfStaticTracksPersonaNotScope、Test_F65_PromptHashWithoutPersonaStillReportsStatic |
+| F-82（剩余） | SQLite 会话人格持久化 + `/persona` 切换 + RouteKey/Fingerprint 喂半静态段 | Test_F82_PersonaPersistsAcrossReopen、Test_F82_PersonaSwitchChangesPromptHash、Test_F82_DefaultPersonaDoesNotDuplicateTheStaticSegment |
 
 ## 3. 剩余工作
 
 ### 3.1 功能（2 条）
 
 - **F-23 会话生命周期与回收**（FEATURES.md:713，属"验收"）。
-- **F-65 提示词前缀稳定化**（FEATURES.md:1876，属"验收"）。
+- ~~**F-65 提示词前缀稳定化**（FEATURES.md:1876，属"验收"）~~ **已完成**（21059e7）：
+  `conversation.Assembler` 支持半静态段与 `Segments` 哈希报告，`/prompt-hash` 已接线，
+  静态段 100 次渲染逐字节稳定有测试守住。
 
-建议做法：这两条不要各补一个单点测试，而应做**端到端验收**——
+剩 F-23，建议做法：不要补单点测试，而应做**端到端验收**——
 多轮工具调用、人格切换后 ComparePrefix 的类别变化、会话回收后的内存/历史释放。
 internal/textsim 已有 ComparePrefix（RelationSlid / Diverged 等），
 F-82 的 RouteKey / Fingerprint 是 F-65 的输入。
 
-### 3.2 接线（10 处，按建议顺序）
+### 3.2 接线（剩 7 处，按建议顺序）
+
+~~#1 admin 命令入口~~、~~#3 agent.paradigm~~、~~#10 F-82 剩余~~ 均已完成，不再列出。
 
 | # | 项 | 入口 | 前置条件 / 风险 |
 |---|---|---|---|
-| 1 | admin 命令入口 | cmd/server/serve.go 的消息路径 | 包已就绪（internal/admin）。同时挂 /switch（toggle）与 /ban 系列（internal/moderation 的 Commander）。Authorizer 复用 moderation.super_users |
 | 2 | cost 会话维度 + 持久化 | 会话键需进 LLM 调用链 | 当前只做全局计量；要强制 session/user 配额，必须把会话键经 ctx 传到 observedLLM，再实现 SQLite cost.Store |
 | 3 | ~~agent.paradigm（F-36/F-37）~~ **已完成** | — | 已接：LLM Evaluator + wrapParadigm；F-37 目前只有默认单 worker，无 workers 列表配置 |
 | 4 | agent.memory 切分层记忆（F-49/F-51） | buildAgent 里 memory 的构造处 | **需要 SQLite TierStore 实现**（internal/memory 只给接口与内存实现）；否则重启丢记忆，是行为退化 |
@@ -52,7 +57,6 @@ F-82 的 RouteKey / Fingerprint 是 F-65 的输入。
 | 7 | stream -> outbound（F-64） | 发送路径 | llm.NewStreamSplitter{Flush: outbound.NewStreamSender(...).Handler(ctx)}；不要改动请求侧（前缀缓存） |
 | 8 | trace（F-72） | 入站上下文 + 出站 HTTP 头 | internal/trace 是自包含 traceparent 子集（**无 OTLP**）。serve 已有 observe.WithTraceID 机制，可桥接 |
 | 9 | reload 其余资产（F-24） | 提示词/开关/限速 | 目前只接了敏感词表；提示词热加载要重建 Assembler，需评估前缀缓存语义 |
-| 10 | F-82 剩余 | 会话人格持久化 + RouteKey 喂半静态段 | 实现 scoped.PersonaStore（SQLite），把 Manager.RouteKey/Fingerprint 接进半静态段（F-65 前置） |
 
 ## 4. 已知偏离与诚实标注（不要当成"已完成"）
 
@@ -62,6 +66,10 @@ F-82 的 RouteKey / Fingerprint 是 F-65 的输入。
 4. **F-66 仅全局计量**，session/user 配额未生效；持久化走内存。
 5. **F-24 只交付敏感词表热加载**（组合根里唯一真正读文件的运行时资产）。
 6. **F-63 自定义 Similarity 时退化为有界线性扫描**（包注释已写明理由与上限）。
+7. **F-65 的静态段报告只覆盖 system 正文**：工具 schema 随请求的 Tools 字段发送，
+   顺序由 F-41 的注册顺序固定，不在 `/prompt-hash` 的 static 段里。
+   另：`DefaultPersona` 不注入半静态正文（内置 default.yml 与 `DefaultSystemPrompt`
+   逐字相同，再注入一次等于每个请求发两遍同一段话）。
 
 ## 5. 工作方式约定（务必遵守）
 
