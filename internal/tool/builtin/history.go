@@ -14,6 +14,14 @@ type HistoryReader interface {
 	Messages(ctx context.Context, key string) ([]history.Item, error)
 }
 
+// HistorySearcher 是历史存储的**可选**检索能力（F-84）。
+//
+// 能存不等于能搜：只有支持检索的实现才提供它。有检索时走索引并拿到片段与上下文，
+// 没有时才退化为"读全量再子串过滤"——后者在大历史上是 O(n)，且给不出片段。
+type HistorySearcher interface {
+	Search(ctx context.Context, key, query string, limit int) ([]history.Hit, error)
+}
+
 // DefaultRecallLimit 是一次召回最多返回多少条。
 const DefaultRecallLimit = 10
 
@@ -47,6 +55,66 @@ type recallHistoryArgs struct {
 // 会话键从 ctx 取（tool.ScopeFrom）：工具签名固定为 Execute(ctx, args)，
 // 而"这次调用属于哪个会话"本来就是上下文信息。取不到就明确失败——
 // 绝不能退化成"读全部会话的历史"，那会串台。
+// renderHits 把检索结果渲染成给模型看的紧凑文本。
+//
+// 带上"上文/下文"是因为一句被检索出来的话常常脱离语境就看不懂——
+// 那正是历史召回最容易失效的地方。
+func renderHits(hits []history.Hit) string {
+	var b strings.Builder
+	for i, h := range hits {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		if !h.Item.At.IsZero() {
+			b.WriteString(h.Item.At.Format("01-02 15:04"))
+			b.WriteString(" ")
+		}
+		b.WriteString(speakerOf(h.Item.Kind))
+		b.WriteString("：")
+		b.WriteString(h.Item.Content)
+		if s := strings.TrimSpace(h.Snippet); s != "" && strings.Contains(s, "[") {
+			b.WriteString("\n    片段：")
+			b.WriteString(s)
+		}
+		if h.Before != nil {
+			b.WriteString("\n    上文：")
+			b.WriteString(speakerOf(h.Before.Kind))
+			b.WriteString("：")
+			b.WriteString(truncateRunes(h.Before.Content, 60))
+		}
+		if h.After != nil {
+			b.WriteString("\n    下文：")
+			b.WriteString(speakerOf(h.After.Kind))
+			b.WriteString("：")
+			b.WriteString(truncateRunes(h.After.Content, 60))
+		}
+	}
+	return b.String()
+}
+
+func speakerOf(k history.Kind) string {
+	// 未识别的类型一律当对方：宁可标签不精确，也不要丢内容。
+	//nolint:exhaustive // 见上：其余 Kind 共用同一个标签
+	switch k {
+	case history.KindAssistant, history.KindToolCall:
+		return "我"
+	case history.KindToolResult:
+		return "工具"
+	case history.KindMarker:
+		return "内部"
+	default:
+		return "对方"
+	}
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 func (t recallHistory) Execute(ctx context.Context, args json.RawMessage) (tool.Result, error) {
 	in, err := tool.ParseArgs[recallHistoryArgs](args)
 	if err != nil {
@@ -73,6 +141,21 @@ func (t recallHistory) Execute(ctx context.Context, args json.RawMessage) (tool.
 		limit = MaxRecallLimit
 	}
 	needle := strings.ToLower(strings.TrimSpace(in.Query))
+
+	// 有检索能力就走检索：能拿到片段与前后文，且不必把整段历史读进内存。
+	if searcher, ok := t.deps.History.(HistorySearcher); ok {
+		hits, err := searcher.Search(ctx, key, strings.TrimSpace(in.Query), limit)
+		if err != nil {
+			return tool.Failure(err.Error()), nil
+		}
+		if len(hits) == 0 {
+			if needle == "" {
+				return tool.Success("（还没有历史记录）"), nil
+			}
+			return tool.Success("（没有找到提到「" + in.Query + "」的历史）"), nil
+		}
+		return tool.Success(truncateOutput(renderHits(hits))), nil
+	}
 
 	var hits []string
 	for _, it := range items {

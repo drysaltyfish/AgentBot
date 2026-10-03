@@ -29,13 +29,13 @@ type migration struct {
 // schemaSQL 是"期望的 schema"，全部语句必须幂等（IF NOT EXISTS）。
 //
 // 新表、新索引、新触发器都放这里；它们天然可重复执行。
-var schemaSQL = []string{
+var schemaSQL = append([]string{
 	`CREATE TABLE IF NOT EXISTS schema_version (
 		id      INTEGER PRIMARY KEY CHECK (id = 1),
 		version INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL
 	)`,
-}
+}, messagesSchema...)
 
 // columnSpec 描述一个声明式维护的列。
 type columnSpec struct {
@@ -48,9 +48,9 @@ type columnSpec struct {
 //
 // 只用于**加列**。改类型、改约束、改索引都不在这里做——那些必须进 migrations，
 // 因为 ALTER TABLE 表达不了，需要重建表或回填数据。
-var desiredColumns = []columnSpec{
-	// 各功能表由后续 ticket 追加（F-84 消息、F-85 台账、F-87 记忆、F-86 在途、F-89 快照）。
-}
+var desiredColumns = append([]columnSpec{
+	// 各功能表由后续 ticket 追加（F-85 台账、F-87 记忆、F-86 在途、F-89 快照）。
+}, messagesColumns...)
 
 // migrations 是版本门控链，按版本升序。
 //

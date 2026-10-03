@@ -438,29 +438,6 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	// 若由装配层每轮裁剪，前缀会逐轮变化，前缀缓存永远无法命中。
 	shape := sendShapeOf(cfg)
 	// 呈现窗口：每轮真正回灌给模型的条数（一轮 ≈ user + assistant 两条）。
-	histItems := historyTurns(cfg) * 2
-	// **存储**保留量远大于呈现窗口：否则 recall_history 只能返回已经出现在
-	// 提示词里的内容，等于摆设。两者分开是让那个工具真正有用的前提。
-	retention := intOr(cfg.History.Retention, 400)
-	if retention < histItems {
-		retention = histItems
-	}
-	var hist history.History
-	if path := strings.TrimSpace(cfg.History.File); path != "" {
-		hist = history.NewFile(path, retention).WithTrimmer(history.HighWater{
-			Max: retention,
-			Low: retention * 3 / 4,
-		})
-		lg.Component("session").Info("conversation history is persisted to disk",
-			"path", path, "retention", retention, "prompt_window", histItems)
-	} else {
-		hist = history.NewMemory(retention).WithTrimmer(history.HighWater{
-			Max: retention,
-			Low: retention * 3 / 4,
-		})
-		lg.Component("session").Warn("conversation history is in-process only; it will be lost on restart (set history.file to persist)",
-			"retention", retention, "prompt_window", histItems)
-	}
 	// F-83：持久层。打不开就启动失败——不得静默降级为内存（那会悄悄丢数据）。
 	// 打开与迁移给一个独立预算：卡住时要在启动阶段暴露，而不是拖到第一条消息。
 	openCtx, cancelOpen := context.WithTimeout(context.Background(), 30*time.Second)
@@ -481,6 +458,49 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	lg.Component("store").Info("persistence store is ready",
 		"path", st.Path(), "schema_version", store.SchemaVersion)
 
+	histItems := historyTurns(cfg) * 2
+	// **存储**保留量远大于呈现窗口：否则 recall_history 只能返回已经出现在
+	// 提示词里的内容，等于摆设。两者分开是让那个工具真正有用的前提。
+	retention := intOr(cfg.History.Retention, 400)
+	if retention < histItems {
+		retention = histItems
+	}
+	// F-84：历史落在持久层。JSONL 实现保留下来只用于导入与故障排查。
+	sqliteHist := history.NewSQLite(st, retention).WithTrimmer(history.HighWater{
+		Max: retention,
+		Low: retention * 3 / 4,
+	})
+	var hist history.History = sqliteHist
+	lg.Component("session").Info("conversation history is stored in the database",
+		"retention", retention, "prompt_window", histItems)
+
+	// 一次性迁移：库为空且存在旧 JSONL 时导入。导入本身幂等，因此这里只在空库时触发，
+	// 避免每次启动都白读一遍文件。
+	if legacy := strings.TrimSpace(cfg.History.File); legacy != "" {
+		// 迁移是一次性的启动动作，给它独立预算，不占用请求 ctx。
+		migCtx, cancelMig := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancelMig()
+		total, err := st.TotalMessageCount(migCtx)
+		switch {
+		case err != nil:
+			lifecycle.Warn("cannot check message count; skipping legacy import", "error", err)
+		case total > 0:
+			lg.Component("session").Info("database already has messages; skipping legacy JSONL import",
+				"messages", total, "legacy_path", legacy)
+		default:
+			imported, skipped, ierr := sqliteHist.ImportJSONL(migCtx, legacy)
+			switch {
+			case errors.Is(ierr, history.ErrImportSourceMissing):
+				lg.Component("session").Info("no legacy history file to import", "path", legacy)
+			case ierr != nil:
+				lifecycle.Warn("legacy history import failed; starting with an empty history",
+					"error", ierr, "path", legacy)
+			default:
+				lg.Component("session").Info("legacy JSONL history imported",
+					"path", legacy, "imported", imported, "skipped", skipped)
+			}
+		}
+	}
 	sessions := session.New(
 		session.WithHistory(hist),
 		session.WithTTL(session.DefaultTTL),

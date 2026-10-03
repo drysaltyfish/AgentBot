@@ -349,3 +349,66 @@ func execWith(t *testing.T, r *tool.Registry, ctx context.Context, name, args st
 	}
 	return res
 }
+
+// searchableHistory 额外实现 HistorySearcher，用于验证 recall_history 优先走检索。
+type searchableHistory struct {
+	memHistory
+	searched  int
+	lastQuery string
+	hits      []history.Hit
+}
+
+func (s *searchableHistory) Search(ctx context.Context, key, query string, limit int) ([]history.Hit, error) {
+	s.searched++
+	s.lastQuery = query
+	if key != "k1" {
+		return nil, nil
+	}
+	return s.hits, nil
+}
+
+// Test_F84_RecallHistoryPrefersSearch 守住"有检索能力时走检索"。
+func Test_F84_RecallHistoryPrefersSearch(t *testing.T) {
+	t.Parallel()
+	sh := &searchableHistory{hits: []history.Hit{{
+		Item:    history.Item{Kind: history.KindUser, Content: "我喜欢喝橙汁", At: time.Now()},
+		Snippet: "我喜欢[喝橙汁]",
+		Before:  &history.Item{Kind: history.KindAssistant, Content: "记住啦"},
+	}}}
+	r := newRegistry(t, Deps{History: sh})
+	ctx := tool.WithScope(context.Background(), "k1")
+
+	res := execWith(t, r, ctx, "recall_history", `{"query":"橙汁"}`)
+	if res.Failed() {
+		t.Fatalf("召回失败: %+v", res)
+	}
+	if sh.searched != 1 {
+		t.Fatalf("应走检索路径，实际调用 %d 次", sh.searched)
+	}
+	if sh.lastQuery != "橙汁" {
+		t.Fatalf("关键词未透传: %q", sh.lastQuery)
+	}
+	if !strings.Contains(res.Output, "我喜欢喝橙汁") {
+		t.Fatalf("应包含命中内容: %q", res.Output)
+	}
+	if !strings.Contains(res.Output, "片段") || !strings.Contains(res.Output, "[") {
+		t.Fatalf("应带片段: %q", res.Output)
+	}
+	if !strings.Contains(res.Output, "上文") {
+		t.Fatalf("应带上文: %q", res.Output)
+	}
+}
+
+// Test_F84_RecallHistorySearchNoHits 覆盖检索无结果的可读提示。
+func Test_F84_RecallHistorySearchNoHits(t *testing.T) {
+	t.Parallel()
+	sh := &searchableHistory{}
+	r := newRegistry(t, Deps{History: sh})
+	res := execWith(t, r, tool.WithScope(context.Background(), "k1"), "recall_history", `{"query":"不存在"}`)
+	if res.Failed() {
+		t.Fatalf("无结果不该报错: %+v", res)
+	}
+	if !strings.Contains(res.Output, "没有找到") {
+		t.Fatalf("应给出可读提示: %q", res.Output)
+	}
+}
