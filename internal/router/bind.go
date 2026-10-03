@@ -105,14 +105,15 @@ func setBoundField(field reflect.Value, raw any) error {
 	if raw == nil {
 		return fmt.Errorf("期望 %s，实际为 nil", field.Type())
 	}
-	switch kind := field.Kind(); {
+	kind := field.Kind()
+	switch {
 	case kind == reflect.String:
 		s, ok := raw.(string)
 		if !ok {
 			return bindTypeErr(field.Type(), raw)
 		}
 		field.SetString(s)
-	case kind == reflect.Int, kind == reflect.Int64:
+	case kind == reflect.Int || kind == reflect.Int64:
 		switch n := raw.(type) {
 		case int:
 			field.SetInt(int64(n))

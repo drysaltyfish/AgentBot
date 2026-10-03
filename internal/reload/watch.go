@@ -8,6 +8,8 @@ package reload
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -68,8 +70,11 @@ func (w *Watcher[T]) Start(ctx context.Context) {
 	if w == nil || len(w.paths) == 0 {
 		return
 	}
+	// 先同步取一次指纹再起循环：否则"写入发生在 loop 取基准之前"会被漏掉——
+	// 循环看到的已经是新状态，永远检测不到变化（CI 上就复现了这个竞态）。
+	last := w.fingerprint()
 	w.tryLoad()
-	go w.loop(ctx)
+	go w.loop(ctx, last)
 }
 
 // Stop 停止监听（幂等）。
@@ -84,11 +89,9 @@ func (w *Watcher[T]) Stop() {
 	}
 }
 
-func (w *Watcher[T]) loop(ctx context.Context) {
+func (w *Watcher[T]) loop(ctx context.Context, last string) {
 	ticker := time.NewTicker(w.opts.Interval)
 	defer ticker.Stop()
-
-	last := w.fingerprint()
 	var pendingSince time.Time
 	for {
 		select {
@@ -193,7 +196,11 @@ func (w *Watcher[T]) waitRetry() bool {
 	}
 }
 
-// fingerprint 汇总被监听文件的 mtime 与大小；缺失标记为 missing。
+// fingerprint 汇总被监听文件的"身份"：mtime + 大小；缺失标记为 missing。
+//
+// 小文件额外算内容摘要：文件系统时间戳粒度可能很粗（CI 容器里尤其如此），
+// 而"把 A 改成 B"这种同长度的改动在只看 mtime+size 时会漏掉——那是致命的，
+// 因为配置改一个字正是最常见的场景。
 func (w *Watcher[T]) fingerprint() string {
 	var b strings.Builder
 	for _, p := range w.paths {
@@ -202,7 +209,26 @@ func (w *Watcher[T]) fingerprint() string {
 			b.WriteString(p + "=missing;")
 			continue
 		}
-		fmt.Fprintf(&b, "%s=%d:%d;", p, info.ModTime().UnixNano(), info.Size())
+		fmt.Fprintf(&b, "%s=%d:%d", p, info.ModTime().UnixNano(), info.Size())
+		if info.Size() <= maxDigestBytes {
+			if sum, derr := fileDigest(p); derr == nil {
+				b.WriteString(":" + sum)
+			}
+		}
+		b.WriteString(";")
 	}
 	return b.String()
+}
+
+// maxDigestBytes 是"直接算内容摘要"的文件大小上限（配置与提示词都远小于它）。
+const maxDigestBytes = 1 << 16
+
+// fileDigest 返回文件内容的短摘要；读取失败时返回错误（调用方退回只看元信息）。
+func fileDigest(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:8]), nil
 }
