@@ -25,6 +25,8 @@ type Options struct {
 	Judge Judge
 	// DeterministicThreshold <= 0 时用 textsim.Threshold。
 	DeterministicThreshold float64
+	// MaxPerScope <= 0 时不限制；否则每次写入后淘汰到该条数（F-48 的每作用域 200 条）。
+	MaxPerScope int
 	// Warn 接收降级告警。
 	Warn func(string)
 }
@@ -41,10 +43,11 @@ type Options struct {
 // 分带的意义在于**大多数写入不付额外调用**：字符相似度足以处理明显的情况，
 // 只有真正含糊的那一小撮才值得问一次模型。
 type Store struct {
-	st        *store.Store
-	judge     Judge
-	threshold float64
-	warn      func(string)
+	st          *store.Store
+	judge       Judge
+	threshold   float64
+	warn        func(string)
+	maxPerScope int
 
 	// 观测计数：判定走了哪条路。
 	judgedFallbacks int
@@ -56,7 +59,10 @@ func New(opts Options) *Store {
 	if threshold <= 0 {
 		threshold = textsim.Threshold
 	}
-	return &Store{st: opts.Store, judge: opts.Judge, threshold: threshold, warn: opts.Warn}
+	return &Store{
+		st: opts.Store, judge: opts.Judge, threshold: threshold,
+		warn: opts.Warn, maxPerScope: opts.MaxPerScope,
+	}
 }
 
 // Save 实现 agent.Memory：把一条事实写入当前作用域。
@@ -99,6 +105,17 @@ func (s *Store) Save(ctx context.Context, text string) error {
 	}
 	if s.warn != nil && res.Decision != store.MemoryIgnored {
 		s.warn(fmt.Sprintf("memory %s: %s", res.Decision, res.Reason))
+	}
+	// 留存：写入后顺手淘汰，不让作用域无界增长。
+	if s.maxPerScope > 0 {
+		if n, terr := s.st.TrimMemories(ctx, scope, s.maxPerScope); terr != nil {
+			// 淘汰失败不影响这次写入的成功语义，但必须留痕。
+			if s.warn != nil {
+				s.warn("memory retention trim failed: " + terr.Error())
+			}
+		} else if n > 0 && s.warn != nil {
+			s.warn(fmt.Sprintf("memory retention evicted %d entr(ies) in scope %s", n, scope))
+		}
 	}
 	return nil
 }

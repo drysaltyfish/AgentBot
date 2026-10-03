@@ -50,6 +50,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	checkOnly := fs.Bool("check-config", false, "只校验配置并打印生效配置（脱敏）后退出，不启动服务")
 	selfTest := fs.Int64("selftest", 0, "连接平台后向该 QQ 号发送一条自检消息，然后退出")
 	showStats := fs.Bool("stats", false, "打印用量台账后退出（F-85）")
+	exportMem := fs.String("export-memories", "", "把全部记忆导出到该 JSONL 文件后退出（F-88）")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -79,7 +80,49 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *showStats {
 		return runStats(cfg, stdout, stderr)
 	}
+	if *exportMem != "" {
+		return runExportMemories(cfg, *exportMem, stdout, stderr)
+	}
 	return serve(cfg, stderr)
+}
+
+// runExportMemories 把全部记忆导出为 JSONL（F-88）。
+//
+// 导出**跨作用域**，因此它是维护命令而不是会话内能力——
+// 会话内只能看见自己的作用域。
+func runExportMemories(cfg *config.Config, path string, stdout, stderr io.Writer) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	st, err := store.Open(ctx, store.Options{
+		Path:        cfg.Store.Path,
+		BusyTimeout: durationOr(cfg.Store.BusyTimeout, store.DefaultBusyTimeout),
+	})
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer func() { _ = st.Close() }()
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer func() { _ = f.Close() }()
+
+	n, err := st.ExportMemories(ctx, f)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	scopes, err := st.MemoryScopes(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	_, _ = fmt.Fprintf(stdout, "已导出 %d 条记忆（%d 个作用域）到 %s\n", n, len(scopes), path)
+	return 0
 }
 
 // runStats 打印用量台账（F-85）。
@@ -380,11 +423,20 @@ func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist histor
 		}
 	}
 
-	var mem agent.Memory
+	var (
+		mem     agent.Memory
+		memImpl *memory.Store
+		// 注意：不能把 nil 的 *memory.Store 直接塞进接口——那样接口不为 nil，
+		// 工具会以为管理能力可用，调用时才炸。
+		memAdmin builtin.MemoryAdmin
+	)
 	if boolOr(cfg.Agent.Memory, true) {
-		mem = memory.New(memory.Options{
-			Store: st, Judge: judge, Warn: func(msg string) { lg.Component("memory").Info(msg) },
+		memImpl = memory.New(memory.Options{
+			Store: st, Judge: judge, MaxPerScope: maxPerScope,
+			Warn: func(msg string) { lg.Component("memory").Info(msg) },
 		})
+		mem = memImpl
+		memAdmin = memImpl
 		lg.Component("memory").Info("long-term memory is stored in the database",
 			"max_per_scope", maxPerScope, "judge", judge != nil)
 	}
@@ -406,7 +458,7 @@ func buildAgent(cfg *config.Config, model llm.LLM, sysPrompt string, hist histor
 	}
 
 	// 内置工具：先全量注册再按配置裁剪，这样顺序始终等于内置顺序（前缀缓存需要稳定）。
-	deps := builtin.Deps{Memory: mem, HTTP: httpx.Defaults(), Now: time.Now, History: hist}
+	deps := builtin.Deps{Memory: mem, HTTP: httpx.Defaults(), Now: time.Now, History: hist, MemoryAdmin: memAdmin}
 	if err := builtin.Register(registry, deps); err != nil {
 		return nil, nil, fmt.Errorf("register builtin tools: %w", err)
 	}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/httpx"
+	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/tool"
 )
 
@@ -42,7 +43,7 @@ func Test_F44_RegisterIsOrderStable(t *testing.T) {
 	if strings.Join(r1.Names(), ",") != strings.Join(r2.Names(), ",") {
 		t.Fatalf("注册顺序不稳定: %v vs %v", r1.Names(), r2.Names())
 	}
-	want := "calculator,current_time,json_query,http_fetch,memory_save,memory_recall,recall_history"
+	want := "calculator,current_time,json_query,http_fetch,memory_save,memory_recall,recall_history,forget_memory,list_memories"
 	if got := strings.Join(r1.Names(), ","); got != want {
 		t.Fatalf("内置工具集顺序: actual=%q expected=%q", got, want)
 	}
@@ -410,5 +411,127 @@ func Test_F84_RecallHistorySearchNoHits(t *testing.T) {
 	}
 	if !strings.Contains(res.Output, "没有找到") {
 		t.Fatalf("应给出可读提示: %q", res.Output)
+	}
+}
+
+// adminMemory 实现 MemoryAdmin，用于测试遗忘与检视工具。
+type adminMemory struct {
+	items      []store.Memory
+	forgot     []int64
+	scopeWiped bool
+}
+
+func (a *adminMemory) Forget(ctx context.Context, id int64) (bool, error) {
+	a.forgot = append(a.forgot, id)
+	for i, it := range a.items {
+		if it.ID == id {
+			a.items = append(a.items[:i], a.items[i+1:]...)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (a *adminMemory) ForgetScope(ctx context.Context) (int, error) {
+	a.scopeWiped = true
+	n := len(a.items)
+	a.items = nil
+	return n, nil
+}
+
+func (a *adminMemory) List(ctx context.Context, limit int) ([]store.Memory, error) {
+	if limit < len(a.items) {
+		return a.items[:limit], nil
+	}
+	return a.items, nil
+}
+
+func Test_F88_ForgetMemoryTool(t *testing.T) {
+	t.Parallel()
+	am := &adminMemory{items: []store.Memory{{ID: 7, Text: "要被忘掉的事"}}}
+	r := newRegistry(t, Deps{MemoryAdmin: am})
+
+	res := execWith(t, r, context.Background(), "forget_memory", `{"id":7}`)
+	if res.Failed() {
+		t.Fatalf("遗忘失败: %+v", res)
+	}
+	if len(am.forgot) != 1 || am.forgot[0] != 7 {
+		t.Fatalf("应调用 Forget(7): %v", am.forgot)
+	}
+	if !strings.Contains(res.Output, "已忘掉") {
+		t.Fatalf("应给出可读确认: %q", res.Output)
+	}
+
+	// 幂等：删不存在的 id 不报错，但要说明没删到。
+	res = execWith(t, r, context.Background(), "forget_memory", `{"id":999}`)
+	if res.Failed() {
+		t.Fatalf("删不存在的 id 不该报错: %+v", res)
+	}
+	if !strings.Contains(res.Output, "没有找到") {
+		t.Fatalf("应说明没删到: %q", res.Output)
+	}
+}
+
+func Test_F88_ForgetAllRequiresExplicitFlag(t *testing.T) {
+	t.Parallel()
+	am := &adminMemory{items: []store.Memory{{ID: 1, Text: "a"}, {ID: 2, Text: "b"}}}
+	r := newRegistry(t, Deps{MemoryAdmin: am})
+
+	// 没给 all、也没给 id -> 必须明确失败，不能默认清空。
+	res := execWith(t, r, context.Background(), "forget_memory", `{}`)
+	if !res.Failed() {
+		t.Fatalf("既没 id 也没 all 时必须失败，不得默认清空: %+v", res)
+	}
+	if am.scopeWiped {
+		t.Fatalf("不得清空全部记忆")
+	}
+
+	res = execWith(t, r, context.Background(), "forget_memory", `{"all":true}`)
+	if res.Failed() || !am.scopeWiped {
+		t.Fatalf("显式 all=true 才清空: %+v", res)
+	}
+}
+
+func Test_F88_ListMemoriesTool(t *testing.T) {
+	t.Parallel()
+	am := &adminMemory{items: []store.Memory{
+		{ID: 1, Text: "喜欢橘子"}, {ID: 2, Text: "住在杭州"}, {ID: 3, Text: "养了只猫"},
+	}}
+	r := newRegistry(t, Deps{MemoryAdmin: am})
+
+	res := execWith(t, r, context.Background(), "list_memories", `{}`)
+	if res.Failed() {
+		t.Fatalf("列出失败: %+v", res)
+	}
+	for _, want := range []string{"#1 喜欢橘子", "#2 住在杭州", "#3 养了只猫"} {
+		if !strings.Contains(res.Output, want) {
+			t.Fatalf("应列出 %q: %q", want, res.Output)
+		}
+	}
+
+	// limit 生效。
+	res = execWith(t, r, context.Background(), "list_memories", `{"limit":1}`)
+	if strings.Contains(res.Output, "#2") {
+		t.Fatalf("limit=1 时不该列出第二条: %q", res.Output)
+	}
+}
+
+func Test_F88_MemoryAdminUnavailableFailsLoudly(t *testing.T) {
+	t.Parallel()
+	r := newRegistry(t, Deps{})
+	for _, name := range []string{"forget_memory", "list_memories"} {
+		res := execWith(t, r, context.Background(), name, `{}`)
+		if !res.Failed() {
+			t.Fatalf("%s 在未配置时应明确失败: %+v", name, res)
+		}
+	}
+}
+
+func Test_F88_ListMemoriesEmpty(t *testing.T) {
+	t.Parallel()
+	r := newRegistry(t, Deps{MemoryAdmin: &adminMemory{}})
+	res := execWith(t, r, context.Background(), "list_memories", `{}`)
+	if res.Failed() || !strings.Contains(res.Output, "还没有记住") {
+		t.Fatalf("空记忆应给出可读提示: %+v", res)
 	}
 }

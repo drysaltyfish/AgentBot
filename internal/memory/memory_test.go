@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -238,5 +239,91 @@ func Test_LLMJudge_CachesByUnorderedPair(t *testing.T) {
 	_ = s.Save(ctx, "用户喜欢喝橙汁")
 	if j.calls != before {
 		t.Fatalf("重复写入不该再问判官: %d -> %d", before, j.calls)
+	}
+}
+
+// Test_F88_RetentionEvictsLowestScore 覆盖 F-88 的留存执行。
+func Test_F88_RetentionEvictsLowestScore(t *testing.T) {
+	t.Parallel()
+	st, err := store.Open(context.Background(), store.Options{
+		Path: filepath.Join(t.TempDir(), "ret.db"),
+	})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	s := New(Options{Store: st, MaxPerScope: 3})
+
+	ctx := ctxScope("g")
+	// 四条不同的事实（长度足够以免被合并）。
+	for _, text := range []string{"喜欢喝橙汁", "喜欢看动漫", "住在杭州市", "养了一只猫"} {
+		if err := s.Save(ctx, text); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+	if n, err := st.CountMemories(ctx, "g"); err != nil || n != 3 {
+		t.Fatalf("留存应把作用域压到 3 条: n=%d err=%v", n, err)
+	}
+	// 淘汰的是**最旧的**（分值同为 0 时按更新时间）。
+	got := recall(t, s, "g")
+	for _, text := range got {
+		if text == "喜欢喝橙汁" {
+			t.Fatalf("最旧的一条应被淘汰: %v", got)
+		}
+	}
+}
+
+// Test_F88_ExportAndList 覆盖导出（跨作用域）与列表（本作用域）。
+func Test_F88_ExportAndList(t *testing.T) {
+	t.Parallel()
+	st, err := store.Open(context.Background(), store.Options{
+		Path: filepath.Join(t.TempDir(), "exp.db"),
+	})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	s := New(Options{Store: st})
+	_ = s.Save(ctxScope("a"), "甲的偏好")
+	_ = s.Save(ctxScope("b"), "乙的偏好")
+
+	scopes, err := st.MemoryScopes(context.Background())
+	if err != nil {
+		t.Fatalf("MemoryScopes: %v", err)
+	}
+	if len(scopes) != 2 {
+		t.Fatalf("应有两个作用域: %v", scopes)
+	}
+
+	var buf strings.Builder
+	n, err := st.ExportMemories(context.Background(), &buf)
+	if err != nil {
+		t.Fatalf("ExportMemories: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("应导出 2 条: %d", n)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "甲的偏好") || !strings.Contains(out, "乙的偏好") {
+		t.Fatalf("导出应含两个作用域的内容: %q", out)
+	}
+	// 导出行必须可解析，且字段与内部表一致。
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		var rec store.MemoryExportRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("导出行不可解析: %v", err)
+		}
+		if rec.ScopeKey == "" || rec.Text == "" {
+			t.Fatalf("导出字段缺失: %+v", rec)
+		}
+	}
+
+	// List 只返回本作用域。
+	items, err := s.List(ctxScope("a"), 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 || !strings.Contains(items[0].Text, "甲") {
+		t.Fatalf("List 应只返回本作用域: %+v", items)
 	}
 }
