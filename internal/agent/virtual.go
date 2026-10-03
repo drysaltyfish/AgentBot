@@ -89,6 +89,12 @@ func (t saveMemoryTool) Execute(ctx context.Context, args json.RawMessage) (tool
 	if t.mem == nil {
 		return tool.Failure("memory is not configured"), nil
 	}
+	// 本轮已由规则触发（用户明确说"记住：xxx"）写入过：不要再写一遍。
+	// 实测过的事故：规则写入「我喜欢喝橙汁」后，模型又写了一条「用户喜欢喝橙汁」。
+	if MemoryCaptured(ctx) {
+		return tool.Success("本轮已根据用户的明确指令记录了这条记忆，无需重复保存"), nil
+	}
+
 	var in struct {
 		Text string `json:"text"`
 	}
