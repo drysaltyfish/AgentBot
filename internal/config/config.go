@@ -47,6 +47,7 @@ func (d Duration) String() string { return d.D.String() }
 
 // Config 是 AgentBot 的全部配置。
 type Config struct {
+	Store     Store     `yaml:"store"`
 	Transport Transport `yaml:"transport"`
 	LLM       LLM       `yaml:"llm"`
 	Agent     Agent     `yaml:"agent"`
@@ -67,6 +68,14 @@ const (
 	// ReplyOnMention 仅在 @ 机器人时回复（群聊默认，避免刷屏）。
 	ReplyOnMention = "on_mention"
 )
+
+// Store 描述持久层（F-83）。
+type Store struct {
+	// Path 是数据库文件路径；为空时用 store.DefaultPath()。
+	Path string `yaml:"path"`
+	// BusyTimeout <= 0 时用 store.DefaultBusyTimeout（1s）。
+	BusyTimeout *Duration `yaml:"busy_timeout"`
+}
 
 // History 描述对话历史的存储（F-38 的落盘选项）。
 type History struct {
@@ -427,6 +436,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Agent.ApprovalTimeout != nil && c.Agent.ApprovalTimeout.D <= 0 {
 		add("agent.approval_timeout", "必须为正")
+	}
+	if c.Store.BusyTimeout != nil && c.Store.BusyTimeout.D <= 0 {
+		add("store.busy_timeout", "必须为正")
 	}
 	if c.History.Retention != nil && *c.History.Retention < 1 {
 		add("history.retention", "必须 >= 1")
