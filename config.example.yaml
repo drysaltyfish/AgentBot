@@ -75,14 +75,22 @@ agent:
   #   json_query: [member, private]
   approval_timeout: 60s
 
-  # F-48 的**规则触发**：用户说"记住：xxx"时自动写入记忆，不依赖模型是否调工具。
-  # 确定性、无额外 LLM 调用、每条写入都有日志可审计。
-  # 刻意不做"让模型判断什么重要"——那是 F-49 的固化（P2/M4），是概率性的补充，
-  # 而这里是用户明确说"记住"时的可靠通道。
+  # ---- 长期记忆的两条写入通道（相互独立，可任选其一或同时开启）----
+
+  # 通道一：关键词规则触发。用户说"记住：xxx"时无条件写入。
+  # 确定性、无额外 LLM 调用、每条写入都有日志可审计；但依赖用户明说"记住"。
   auto_memory:
-    enabled: true
+    enabled: false
     # 留空使用内置触发词（记住：/ 帮我记住：/ 记一下：/ 别忘了： 等）
     triggers: []
+
+  # 通道二：由模型自己判断（默认）。在系统提示词末尾追加一段指令，
+  # 要求模型遇到值得长期记住的事实就主动调用 save_memory。
+  # 这是**概率性**的：可能漏记也可能误记；好处是不依赖用户说"记住"。
+  proactive_memory:
+    enabled: true
+    # 留空使用内置指令（agent.DefaultProactiveMemoryInstruction）
+    instruction: ""
 
 behavior:
   # 私聊策略：always / never

@@ -110,17 +110,30 @@ type Agent struct {
 	Allow map[string][]string `yaml:"allow"`
 	// AutoMemory 是显式记忆指令的自动写入（F-48 的规则触发）。
 	AutoMemory AutoMemory `yaml:"auto_memory"`
+	// ProactiveMemory 让模型自己判断什么值得长期记住。
+	ProactiveMemory ProactiveMemory `yaml:"proactive_memory"`
 }
 
 // AutoMemory 描述"记住：xxx"这类指令的自动写入。
 //
-// 只做**规则触发**，不做"让模型判断什么重要"——后者是 F-49 的固化（P2/M4）。
-// 规则触发是用户明确说"记住"时的可靠通道，且完全确定性。
+// 只做**规则触发**：确定性、不额外调用 LLM。与 ProactiveMemory 是两条独立通道，
+// 可任选其一或同时开启。
 type AutoMemory struct {
-	// Enabled 为 nil 时按启用处理。
-	Enabled *bool `yaml:"enabled"`
+	// Enabled 为 true 时启用。**默认关闭**。
+	Enabled bool `yaml:"enabled"`
 	// Triggers 覆盖默认触发词；为空时使用 agent.DefaultMemoryTriggers。
 	Triggers []string `yaml:"triggers"`
+}
+
+// ProactiveMemory 通过系统提示词要求模型主动保存值得记住的事实。
+//
+// 与规则触发的区别：这是**概率性**的（模型自行判断），可能漏记也可能误记；
+// 好处是不依赖用户说"记住"，能从自由对话里捕捉重要信息。
+type ProactiveMemory struct {
+	// Enabled 为 nil 时按启用处理（这是默认的记忆写入通道）。
+	Enabled *bool `yaml:"enabled"`
+	// Instruction 覆盖内置指令；为空时使用 agent.DefaultProactiveMemoryInstruction。
+	Instruction string `yaml:"instruction"`
 }
 
 // Behavior 描述回复行为（F-13 路由策略的配置面）。
