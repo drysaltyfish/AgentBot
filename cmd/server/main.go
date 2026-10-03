@@ -1362,6 +1362,17 @@ func handleReply(ctx context.Context, lg *observe.Logger, p replyPipeline, j rep
 		items = items[:n-1]
 	}
 
+	// 装配统计：让"环境消息被压成什么样"在日志里可见（否则只能靠猜）。
+	if n := len(items); n > 0 {
+		var amb int
+		for _, it := range items {
+			if it.Ambient {
+				amb++
+			}
+		}
+		rlog.Debug("history assembled", "items", n, "ambient", amb, "convo", n-amb)
+	}
+
 	// 两条路径（ReAct / 直连）在调用方看完全同形。
 	// 走 ReAct 时，记忆的注入位置由 Agent 按 ADR-0002 处理（system 之后、历史之前）。
 	out, runErr := p.brain.Run(callCtx, agent.Input{

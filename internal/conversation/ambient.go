@@ -130,10 +130,23 @@ func mergeAdjacentIdentical(items []history.Item) []history.Item {
 			i = j
 			continue
 		}
-		// 合并：说话人不再是某一个人，因此清掉 speaker，用「N人」标注。
+		// 合并标签必须区分「同一人重复」与「多个人各发一次」——
+		// 实测踩过：一个人连发 10 条相同表情，标签写成「10人重复」会让模型
+		// 以为有十个人在刷屏，把事实搞反（而它恰好要回答"我发了几次"）。
+		speakers := map[int64]struct{}{}
+		for k := i; k < j; k++ {
+			speakers[items[k].SpeakerID] = struct{}{}
+		}
 		merged := items[i]
 		merged.SpeakerID = 0
-		merged.SpeakerName = fmt.Sprintf("%d人重复", j-i)
+		switch {
+		case len(speakers) <= 1:
+			merged.SpeakerName = fmt.Sprintf("同一人重复%d次", j-i)
+		case len(speakers) == j-i:
+			merged.SpeakerName = fmt.Sprintf("%d人各发一次", j-i)
+		default:
+			merged.SpeakerName = fmt.Sprintf("%d人共发%d次", len(speakers), j-i)
+		}
 		merged.Content = strings.TrimSpace(items[i].Content)
 		out = append(out, merged)
 		i = j
