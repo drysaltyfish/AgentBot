@@ -118,6 +118,7 @@ AgentBot/
 | 38 | F-45 | 工具权限与人工审批 | P1 | M2 | 34 | `issues/38-tool-approval.md` |
 | 39 | F-15 | 一次性 / 临时路由 | P0 | M2 | 无 | `issues/39-temp-routes.md` |
 | 40 | F-16 | 交互式等待（Await/Stream） | P0 | M2 | 39 | `issues/40-await-stream.md` |
+| 41 | F-35 等 | Agent 接入组合根（M2 收口） | P0 | M2 | 34, 37, 38, 39 | `issues/41-agent-wiring.md` |
 
 M2 的 Feature 范围来自附录 A：F-15, F-16, F-35, F-40, F-41~F-45。
 完成判据：Await 多轮对话可用 + F-75 中"多轮工具调用契约"通过。
