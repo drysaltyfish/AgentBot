@@ -20,15 +20,50 @@ type wsConn interface {
 // DialFunc 建立一条 wsConn；测试可替换成内存管道。
 type DialFunc func(ctx context.Context, url string) (wsConn, error)
 
-type frame struct {
-	Status        string          `json:"status"`
-	RetCode       int64           `json:"retcode"`
-	Data          json.RawMessage `json:"data"`
-	Message       string          `json:"message"`
-	Wording       string          `json:"wording"`
-	Echo          uint64          `json:"echo"`
-	PostType      string          `json:"post_type"`
-	MetaEventType string          `json:"meta_event_type"`
+// 信封解析必须是逐字段容错的，不能整帧映射到一个结构体。
+//
+// OneBot 的同名字段在不同帧里类型不同：
+//   - message：事件帧是消息段数组，API 回包是字符串
+//   - status：心跳帧是对象（online/good），API 回包是字符串
+//
+// 只要其中任意一个字段类型不符，整帧 json.Unmarshal 就会失败；早期版本因此把全部
+// 消息事件静默丢掉（只有不含这些字段的生命周期帧能通过）。所以这里先解成
+// map[string]json.RawMessage，再按字段各自容错取值。
+
+// rawText 读取字符串字段；类型不是字符串时返回空串，不影响整帧解析。
+func rawText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
+}
+
+// rawUint 读取无符号整数字段。
+func rawUint(raw json.RawMessage) (uint64, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	var n uint64
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// rawInt 读取有符号整数字段。
+func rawInt(raw json.RawMessage) (int64, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	var n int64
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // WSClient 是正向 WebSocket 驱动，同时实现 Driver 与 Caller
@@ -44,6 +79,9 @@ type WSClient struct {
 	conn       wsConn
 	closed     bool
 	heartbeats atomic.Uint64
+
+	frameErrors  atomic.Uint64
+	onFrameError func(raw []byte, err error)
 }
 
 // WSClientOption 配置 WSClient。
@@ -52,6 +90,14 @@ type WSClientOption func(*WSClient)
 // WithDialer 注入自定义拨号函数（测试用内存管道）。
 func WithDialer(d DialFunc) WSClientOption {
 	return func(c *WSClient) { c.dial = d }
+}
+
+// WithFrameErrorHook 注入帧解析失败的回调。
+//
+// 解析失败的帧必须被计数并上报，绝不允许静默丢弃——否则协议不匹配会表现为
+// 机器人完全没有反应，而日志里什么都没有。
+func WithFrameErrorHook(fn func(raw []byte, err error)) WSClientOption {
+	return func(c *WSClient) { c.onFrameError = fn }
 }
 
 // NewWSClient 构造正向 WS 客户端。
@@ -171,21 +217,28 @@ func (c *WSClient) Listen(ctx context.Context, sink Sink) error {
 }
 
 func (c *WSClient) dispatch(raw []byte, sink Sink) error {
-	var f frame
-	if err := json.Unmarshal(raw, &f); err != nil {
-		// 不认识的帧不该杀死读循环。
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &env); err != nil {
+		// 连 JSON 都不是：计数并上报，但绝不杀死读循环。
+		c.frameErrors.Add(1)
+		if c.onFrameError != nil {
+			c.onFrameError(raw, err)
+		}
 		return nil
 	}
-	if f.Echo != 0 {
+
+	if echo, ok := rawUint(env["echo"]); ok && echo != 0 {
 		resp := Response{
-			Status:  f.Status,
-			Data:    f.Data,
-			Message: f.Message,
-			Wording: f.Wording,
-			RetCode: f.RetCode,
-			Echo:    f.Echo,
+			Status:  rawText(env["status"]),
+			Data:    env["data"],
+			Message: rawText(env["message"]),
+			Wording: rawText(env["wording"]),
+			Echo:    echo,
 		}
-		if v, ok := c.pending.LoadAndDelete(f.Echo); ok {
+		if code, ok := rawInt(env["retcode"]); ok {
+			resp.RetCode = code
+		}
+		if v, ok := c.pending.LoadAndDelete(echo); ok {
 			ch := v.(chan Response)
 			select {
 			case ch <- resp:
@@ -197,10 +250,12 @@ func (c *WSClient) dispatch(raw []byte, sink Sink) error {
 		// 无人等待的回包：丢弃（计数交由上层指标）。
 		return nil
 	}
-	if f.PostType == "" {
+
+	postType := rawText(env["post_type"])
+	if postType == "" {
 		return nil
 	}
-	if f.PostType == "meta_event" && f.MetaEventType == "heartbeat" {
+	if postType == "meta_event" && rawText(env["meta_event_type"]) == "heartbeat" {
 		c.heartbeats.Add(1)
 		return nil
 	}
@@ -212,6 +267,9 @@ func (c *WSClient) dispatch(raw []byte, sink Sink) error {
 
 // Heartbeats 返回已丢弃的心跳帧数量。
 func (c *WSClient) Heartbeats() uint64 { return c.heartbeats.Load() }
+
+// FrameErrors 返回无法解析的帧数量（应当恒为 0）。
+func (c *WSClient) FrameErrors() uint64 { return c.frameErrors.Load() }
 
 // PendingCalls 返回尚未完成的调用数，用于断言没有泄漏。
 func (c *WSClient) PendingCalls() int {

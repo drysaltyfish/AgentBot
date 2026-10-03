@@ -69,12 +69,17 @@ type Bot struct {
 	components      map[Phase][]Component
 	wg              sync.WaitGroup
 	intakeStop      func(ctx context.Context) error
+	inflightWait    func(ctx context.Context) error
 	shutdownTimeout time.Duration
 	inflightTimeout time.Duration
 	running         bool
 	once            sync.Once
 	shutdownErr     error
 	closedNames     []string
+
+	// baseCtx 是全部后台 goroutine 的父上下文，在第 3 步（停止后台任务）被取消。
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
 }
 
 // Option 配置 Bot。
@@ -103,12 +108,23 @@ func WithIntakeStop(fn func(ctx context.Context) error) Option {
 	return func(b *Bot) { b.intakeStop = fn }
 }
 
+// WithInflightWait 自定义第 2 步"等待在途工作"的实现。
+//
+// 不设置时退化为等待全部 Go() 启动的 goroutine 退出；组合根通常需要更精确的
+// 语义（例如只等未完成的回复任务），此时用它覆盖。
+func WithInflightWait(fn func(ctx context.Context) error) Option {
+	return func(b *Bot) { b.inflightWait = fn }
+}
+
 // New 构造 Bot；默认关闭超时 10s。
 func New(opts ...Option) *Bot {
+	baseCtx, baseCancel := context.WithCancel(context.Background())
 	b := &Bot{
 		components:      make(map[Phase][]Component),
 		shutdownTimeout: 10 * time.Second,
 		inflightTimeout: 0,
+		baseCtx:         baseCtx,
+		baseCancel:      baseCancel,
 	}
 	for _, o := range opts {
 		o(b)
@@ -121,6 +137,9 @@ func New(opts ...Option) *Bot {
 
 // ShutdownTimeout 返回当前配置的关闭总超时。
 func (b *Bot) ShutdownTimeout() time.Duration { return b.shutdownTimeout }
+
+// Context 返回全部后台 goroutine 共享的上下文；它在第 3 步关闭阶段被取消。
+func (b *Bot) Context() context.Context { return b.baseCtx }
 
 // MarkRunning 之后不再允许注册组件（避免关到一半又冒出新组件）。
 func (b *Bot) MarkRunning() {
@@ -143,17 +162,19 @@ func (b *Bot) Register(phase Phase, c Component) error {
 	return nil
 }
 
-// Go 在 Bot 的生命周期内启动一个后台 goroutine，Shutdown 会等待它退出。
+// Go 在 Bot 的生命周期内启动一个后台 goroutine。
+//
+// 传入的 ctx 来自 Bot.Context()，在第 3 步（停止后台任务）被取消；Shutdown 会等待
+// 它退出。后台 goroutine 的 panic 不会杀死进程。
 func (b *Bot) Go(name string, fn func(ctx context.Context)) {
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()
 		defer func() {
-			// 后台 goroutine 的 panic 不得杀死进程。
 			_ = recover()
 		}()
-		fn(context.Background())
 		_ = name
+		fn(b.baseCtx)
 	}()
 }
 
@@ -198,6 +219,13 @@ func (b *Bot) doShutdown(ctx context.Context) error {
 		unfinished = append(unfinished, "in-flight handlers")
 	}
 
+	// 3. 停止后台任务：先取消父上下文，再等 goroutine 退出，最后关后台组件。
+	b.baseCancel()
+	if err := b.waitBackground(cctx); err != nil {
+		errs = append(errs, fmt.Errorf("phase %s: %w", PhaseBackground, err))
+		unfinished = append(unfinished, "background goroutines")
+	}
+
 	// 3..6. 各批次组件逆序关闭。
 	for _, ph := range shutdownOrder[1:] {
 		for _, c := range b.componentsIn(ph) {
@@ -233,6 +261,14 @@ func (b *Bot) componentsIn(ph Phase) []Component {
 }
 
 func (b *Bot) waitInflight(ctx context.Context) error {
+	if b.inflightWait != nil {
+		return b.inflightWait(ctx)
+	}
+	return b.waitBackground(ctx)
+}
+
+// waitBackground 等待全部 Go() 启动的 goroutine 退出，受 ctx 与超时双重约束。
+func (b *Bot) waitBackground(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() { b.wg.Wait(); close(done) }()
 
@@ -244,6 +280,6 @@ func (b *Bot) waitInflight(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timer.C:
-		return fmt.Errorf("in-flight handlers did not finish within %s", b.inflightTimeout)
+		return fmt.Errorf("goroutines did not finish within %s", b.inflightTimeout)
 	}
 }

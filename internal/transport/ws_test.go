@@ -8,8 +8,11 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/drysaltyfish/agentbot/internal/event"
 )
 
 type pipeShared struct {
@@ -279,5 +282,170 @@ func Test_F04_WSClientListenReturnsOnCancel(t *testing.T) {
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatalf("Listen did not return after ctx cancel")
+	}
+}
+
+// Test_F04_MessageEventsWithArrayMessageReachSink 是一条回归测试。
+//
+// 事件帧里的 message 是消息段数组，而 API 回包的 message 是字符串。早期把信封的
+// message 字段声明为 string，导致所有消息事件在 json.Unmarshal 阶段整帧失败并被
+// 静默丢弃——只有生命周期事件（没有 message 字段）能通过。
+func Test_F04_MessageEventsWithArrayMessageReachSink(t *testing.T) {
+	t.Parallel()
+	clientEnd, serverEnd := newPipePair()
+	c := newTestClient(t, clientEnd)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := c.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	got := make(chan []byte, 1)
+	go func() { _ = c.Listen(ctx, func(raw []byte, _ Caller) { got <- raw }) }()
+
+	frame := `{"time":1,"self_id":3828937966,"post_type":"message","message_type":"private","sub_type":"friend","user_id":3315793548,"message_id":5,"message":[{"type":"text","data":{"text":"你好"}}],"sender":{"user_id":3315793548}}`
+	if err := serverEnd.WriteMessage(ctx, []byte(frame)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	select {
+	case raw := <-got:
+		ev := event.NewEvent(raw)
+		if ev.Kind != event.KindMessage || ev.Sub != "private" {
+			t.Fatalf("event normalization: actual=(%q,%q) expected=(message,private)", ev.Kind, ev.Sub)
+		}
+		if got := ev.Message.PlainText(); got != "你好" {
+			t.Fatalf("message text: actual=%q expected=%q", got, "你好")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("message event was swallowed: frameErrors=%d", c.FrameErrors())
+	}
+	if n := c.FrameErrors(); n != 0 {
+		t.Fatalf("frame errors: actual=%d expected=0", n)
+	}
+}
+
+// Test_F04_MalformedFramesAreCountedNotSwallowed 保证解析失败可观测，且不影响读循环。
+func Test_F04_MalformedFramesAreCountedNotSwallowed(t *testing.T) {
+	t.Parallel()
+	clientEnd, serverEnd := newPipePair()
+	var reported atomic.Int64
+	c := NewWSClient("ws://in-memory", nil,
+		WithDialer(func(ctx context.Context, rawURL string) (wsConn, error) { return clientEnd, nil }),
+		WithFrameErrorHook(func(raw []byte, err error) { reported.Add(1) }),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := c.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	events := make(chan []byte, 1)
+	go func() { _ = c.Listen(ctx, func(raw []byte, _ Caller) { events <- raw }) }()
+
+	if err := serverEnd.WriteMessage(ctx, []byte("this is not json")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	waitFor(t, "frame error reported", func() bool { return reported.Load() == 1 })
+	if n := c.FrameErrors(); n != 1 {
+		t.Fatalf("FrameErrors: actual=%d expected=1", n)
+	}
+
+	// 读循环必须还活着。
+	if err := serverEnd.WriteMessage(ctx, []byte(`{"post_type":"meta_event","meta_event_type":"lifecycle"}`)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case <-events:
+	case <-time.After(time.Second):
+		t.Fatalf("read loop died after a malformed frame")
+	}
+}
+
+// Test_F04_HeartbeatWithObjectStatusIsNotAFrameError 是第二条回归测试。
+//
+// 心跳帧的 status 是对象（online/good），API 回包的 status 是字符串。任何把整帧映射到
+// 一个结构体的做法都会因这个字段整体失败——这正是继 message 之后暴露的第二个同类问题。
+func Test_F04_HeartbeatWithObjectStatusIsNotAFrameError(t *testing.T) {
+	t.Parallel()
+	clientEnd, serverEnd := newPipePair()
+	c := newTestClient(t, clientEnd)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := c.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	events := make(chan []byte, 2)
+	go func() { _ = c.Listen(ctx, func(raw []byte, _ Caller) { events <- raw }) }()
+
+	heartbeat := `{"time":1,"self_id":3828937966,"post_type":"meta_event","meta_event_type":"heartbeat","status":{"online":true,"good":true},"interval":30000}`
+	if err := serverEnd.WriteMessage(ctx, []byte(heartbeat)); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+	waitFor(t, "heartbeat counted", func() bool { return c.Heartbeats() == 1 })
+	select {
+	case raw := <-events:
+		t.Fatalf("heartbeat leaked to sink: %s", raw)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	msg := `{"time":2,"self_id":3828937966,"post_type":"message","message_type":"private","sub_type":"friend","user_id":3315793548,"message_id":9,"message":[{"type":"text","data":{"text":"在吗"}}]}`
+	if err := serverEnd.WriteMessage(ctx, []byte(msg)); err != nil {
+		t.Fatalf("write message: %v", err)
+	}
+	select {
+	case raw := <-events:
+		ev := event.NewEvent(raw)
+		if ev.Kind != event.KindMessage || ev.Message.PlainText() != `在吗` {
+			t.Fatalf("event after heartbeat: actual=(%q,%q)", ev.Kind, ev.Message.PlainText())
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("message after heartbeat was swallowed")
+	}
+	if n := c.FrameErrors(); n != 0 {
+		t.Fatalf("frame errors: actual=%d expected=0", n)
+	}
+}
+
+// Test_F04_ResponseFramesStillParse 保证容错改造没有破坏 API 回包路径。
+func Test_F04_ResponseFramesStillParse(t *testing.T) {
+	t.Parallel()
+	clientEnd, serverEnd := newPipePair()
+	c := newTestClient(t, clientEnd)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := c.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	go func() { _ = c.Listen(ctx, func([]byte, Caller) {}) }()
+
+	go func() {
+		raw, err := serverEnd.ReadMessage(ctx)
+		if err != nil {
+			return
+		}
+		var rq Request
+		_ = json.Unmarshal(raw, &rq)
+		body, _ := json.Marshal(map[string]any{
+			"status":  "ok",
+			"retcode": 0,
+			"message": "ok",
+			"echo":    rq.Echo,
+			"data":    map[string]any{"user_id": 3828937966},
+		})
+		_ = serverEnd.WriteMessage(ctx, body)
+	}()
+
+	resp, err := c.Call(ctx, Request{Action: "get_login_info"})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if resp.Status != "ok" || resp.RetCode != 0 {
+		t.Fatalf("response: actual=(%q,%d)", resp.Status, resp.RetCode)
+	}
+	if !strings.Contains(string(resp.Data), "3828937966") {
+		t.Fatalf("response data: actual=%s", resp.Data)
 	}
 }

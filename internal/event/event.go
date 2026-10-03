@@ -108,11 +108,17 @@ func (e *Event) normalize() {
 	if e.Kind == KindMessage {
 		if msg, ok := doc["message"]; ok {
 			if b, err := json.Marshal(msg); err == nil {
-				parsed, _, perr := ParseMessage(b)
-				if perr == nil {
+				parsed, warns, perr := ParseMessage(b)
+				switch {
+				case perr != nil:
+					if e.DecodeWarning == "" {
+						e.DecodeWarning = "parse message: " + perr.Error()
+					}
+				default:
 					e.Message = parsed
-				} else if e.DecodeWarning == "" {
-					e.DecodeWarning = "parse message: " + perr.Error()
+					if len(warns) > 0 && e.DecodeWarning == "" {
+						e.DecodeWarning = "message: " + strings.Join(warns, "; ")
+					}
 				}
 			}
 		}
