@@ -110,16 +110,38 @@ AgentBot/
 | 30 | F-53 | 权限即提示词 | P0 | M1 | 26 | `issues/30-policy-prompt.md` |
 | 31 | F-55 | 统一出口过滤链 | P0 | M1 | 11 | `issues/31-outbound-filter.md` |
 | 32 | F-59 | 出站 HTTP 安全 | P0 | M1 | 无 | `issues/32-outbound-http.md` |
+| 33 | F-41, F-42 | 工具注册表与自描述接口 | P0 | M2 | 无 | `issues/33-tool-registry.md` |
+| 34 | F-35 | ReAct 循环 | P0 | M2 | 33 | `issues/34-react-loop.md` |
+| 35 | F-40 | 虚拟动作闭环 | P1 | M2 | 34 | `issues/35-virtual-actions.md` |
+| 36 | F-43 | 泛型参数解析 | P1 | M2 | 33 | `issues/36-arg-parsing.md` |
+| 37 | F-44 | 内置安全工具集 | P1 | M2 | 33 | `issues/37-builtin-tools.md` |
+| 38 | F-45 | 工具权限与人工审批 | P1 | M2 | 34 | `issues/38-tool-approval.md` |
+| 39 | F-15 | 一次性 / 临时路由 | P0 | M2 | 无 | `issues/39-temp-routes.md` |
+| 40 | F-16 | 交互式等待（Await/Stream） | P0 | M2 | 39 | `issues/40-await-stream.md` |
 
-## 6. 已登记、尚未裁定
+M2 的 Feature 范围来自附录 A：F-15, F-16, F-35, F-40, F-41~F-45。
+完成判据：Await 多轮对话可用 + F-75 中"多轮工具调用契约"通过。
+**F-15（ticket 39）必须先于 F-16（ticket 40）完成。**
 
-以下三处是真正的双向门，**在其所属 Feature 落地前必须单独确认**，不得默默二选一：
+## 6. 已登记的分歧点
+
+### 6.1 已裁定（2026-10-03）
+
+| 编号 | 分歧点 | 裁定 | 记录 |
+|---|---|---|---|
+| G7 | F-35 的 `tool_calls` 管道与 F-39/F-40 的 Action 管道如何共存、是否合并为一条 | **原生 `tool_calls` 为唯一执行通道**；F-39 的解析器降级为抢救通道（scavenge）；F-40 的虚拟动作注册为普通工具；配置 `agent.protocol: native \| auto`，默认 `auto` | `docs/adr/0001-tool-call-protocol.md` |
+| G8 | `save_memory` 的记忆注入位置——与"不可变前缀"的缓存设计正面冲突 | 记忆作为**独立消息放在 system 之后、历史之前**；长度上限 2 KiB；内容确定性排序 | `docs/adr/0002-memory-injection-position.md` |
+
+G8 是本轮做前缀缓存优化时新发现的分歧点：把它并入 system 会让每次记忆更新都报废整块缓存。
+
+### 6.2 尚未裁定
+
+以下两处仍是真正的双向门，**在其所属 Feature 落地前必须单独确认**，不得默默二选一：
 
 | 编号 | 冲突点 | 何时必须裁定 |
 |---|---|---|
 | G3 | F-55 出口过滤 × F-64 流式前缀差：逐增量过滤会让跨分片敏感词失效；整段过滤再做差分会把截断标记带进前缀差 | F-64 落地前（M3） |
 | G5 | F-32 `Budget.Fit` 与 F-38 `TokenBudget` 谁先裁剪、pinned system 与配对完整性冲突时谁优先 | F-32 落地前（M3） |
-| G7 | F-35 的 `tool_calls` 管道与 F-39/F-40 的 Action 管道如何共存、是否合并为一条 | F-35 落地前（M2） |
 
 其余跨 Feature 接线缺口按"谁先定义谁负责 + M1 链路优先"的规则在各自 Feature 内解决。
 
