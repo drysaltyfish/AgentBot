@@ -196,8 +196,10 @@ func Test_F71_Builtins(t *testing.T) {
 		Cost: func(_ context.Context, scope string) (Cost, error) {
 			return Cost{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, AmountUSD: 0.5}, nil
 		},
-		Reload:     func(context.Context) error { reloaded++; return nil },
-		PromptHash: func(context.Context) ([]HashSegment, error) { return []HashSegment{{Name: "system", Hash: "abc"}}, nil },
+		Reload: func(context.Context) error { reloaded++; return nil },
+		PromptHash: func(context.Context, Invocation) ([]HashSegment, error) {
+			return []HashSegment{{Name: "system", Hash: "abc"}}, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)

@@ -22,6 +22,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/reload"
 	"github.com/drysaltyfish/agentbot/internal/router"
+	"github.com/drysaltyfish/agentbot/internal/scoped"
 	"github.com/drysaltyfish/agentbot/internal/secrets"
 	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/textguard"
@@ -555,7 +556,7 @@ func buildCostTracker(cfg *config.Config, lg *observe.Logger, cat *metrics.Catal
 // 只注册组合根有能力提供数据的命令；/help 由 admin.New 自带。
 // 鉴权统一走 moderation.super_users：仓库里已经有"谁说了算"的配置，
 // 不该再造第二份。
-func buildAdminModule(cfg *config.Config, alog *audit.Logger, lg *observe.Logger, mod *moderation.Engine, costTracker *cost.Tracker) *admin.Module {
+func buildAdminModule(cfg *config.Config, alog *audit.Logger, lg *observe.Logger, mod *moderation.Engine, costTracker *cost.Tracker, personas *scoped.Manager, promptHash admin.PromptHashFunc) *admin.Module {
 	supers := make(map[int64]bool, len(cfg.Moderation.SuperUsers))
 	for _, id := range cfg.Moderation.SuperUsers {
 		supers[id] = true
@@ -639,6 +640,17 @@ func buildAdminModule(cfg *config.Config, alog *audit.Logger, lg *observe.Logger
 				today.Calls, today.Cost, all.Calls, all.Cost), nil
 		}); err != nil {
 			mlog.Warn("register cost command", "error", err)
+		}
+	}
+
+	// F-82：人格切换入口。只改持久化的作用域键，不重建会话。
+	if err := registerPersonaCommand(m, personas, cfg.Transport.EffectiveSelfID()); err != nil {
+		mlog.Warn("register persona command", "error", err)
+	}
+	// F-65：/prompt-hash——按调用者会话报告三段哈希。
+	if promptHash != nil {
+		if err := m.RegisterBuiltins(admin.Builtins{PromptHash: promptHash}); err != nil {
+			mlog.Warn("register prompt-hash command", "error", err)
 		}
 	}
 
