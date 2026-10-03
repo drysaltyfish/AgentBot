@@ -197,6 +197,11 @@ func (c *Config) Validate() error {
 	if c.Ops.ProbeTimeout != nil && c.Ops.ProbeTimeout.D <= 0 {
 		add("ops.probe_timeout", "必须为正")
 	}
+	switch c.Singleflight.Key {
+	case "", "user", "user_group":
+	default:
+		add("singleflight.key", "必须是 user / user_group 之一，实际为 "+strconv.Quote(c.Singleflight.Key))
+	}
 	if c.Ops.EffectiveEnabled() {
 		if _, _, err := net.SplitHostPort(c.Ops.EffectiveAddr()); err != nil {
 			add("ops.addr", "必须是 host:port 形式（如 127.0.0.1:9090）: "+err.Error())

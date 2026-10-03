@@ -52,18 +52,19 @@ const (
 
 // Config 是 AgentBot 的全部配置。
 type Config struct {
-	Store     Store     `yaml:"store"`
-	Transport Transport `yaml:"transport"`
-	LLM       LLM       `yaml:"llm"`
-	Agent     Agent     `yaml:"agent"`
-	History   History   `yaml:"history"`
-	Behavior  Behavior  `yaml:"behavior"`
-	Prompt    Prompt    `yaml:"prompt"`
-	Policy    Policy    `yaml:"policy"`
-	Log       Log       `yaml:"log"`
-	Shutdown  Shutdown  `yaml:"shutdown"`
-	RateLimit RateLimit `yaml:"ratelimit"`
-	Toggle    Toggle    `yaml:"toggle"`
-	Audit     Audit     `yaml:"audit"`
-	Ops       Ops       `yaml:"ops"`
+	Store        Store        `yaml:"store"`
+	Transport    Transport    `yaml:"transport"`
+	LLM          LLM          `yaml:"llm"`
+	Agent        Agent        `yaml:"agent"`
+	History      History      `yaml:"history"`
+	Behavior     Behavior     `yaml:"behavior"`
+	Prompt       Prompt       `yaml:"prompt"`
+	Policy       Policy       `yaml:"policy"`
+	Log          Log          `yaml:"log"`
+	Shutdown     Shutdown     `yaml:"shutdown"`
+	RateLimit    RateLimit    `yaml:"ratelimit"`
+	Toggle       Toggle       `yaml:"toggle"`
+	Audit        Audit        `yaml:"audit"`
+	Ops          Ops          `yaml:"ops"`
+	Singleflight Singleflight `yaml:"singleflight"`
 }

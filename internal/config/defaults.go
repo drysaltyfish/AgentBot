@@ -43,6 +43,9 @@ const (
 	defaultOpsProbeTimeout  = time.Second
 	defaultAuditFile        = "./data/audit.jsonl"
 	defaultToggleFile       = "./data/toggles.json"
+	// defaultSingleflightKey / defaultSingleflightNotice 是单飞的默认粒度与提示开关（F-17）。
+	defaultSingleflightKey    = "user_group"
+	defaultSingleflightNotice = false
 )
 
 // Default 返回带默认值的配置。可选字段用指针，nil 表示“未设置”。
@@ -68,6 +71,7 @@ func Default() *Config {
 	opsOn := true
 	opsTTL := Duration{D: defaultOpsReadyCacheTTL}
 	opsProbe := Duration{D: defaultOpsProbeTimeout}
+	sfNotice := defaultSingleflightNotice
 	return &Config{
 		Transport: Transport{Mode: "wsclient", Backoff: &backoff},
 		LLM: LLM{
@@ -92,9 +96,10 @@ func Default() *Config {
 			UserPerMinute: &rlUser, UserBurst: &rlUserBurst,
 			GroupPerMinute: &rlGroup, GroupBurst: &rlGroupBurst,
 		},
-		Toggle: Toggle{DefaultOn: &toggleDefaultOn, File: defaultToggleFile},
-		Audit:  Audit{File: defaultAuditFile, QueueSize: &auditQueue, ContentLimit: &auditLimit},
-		Ops:    Ops{Enabled: &opsOn, Addr: defaultOpsAddr, ReadyCacheTTL: &opsTTL, ProbeTimeout: &opsProbe},
+		Toggle:       Toggle{DefaultOn: &toggleDefaultOn, File: defaultToggleFile},
+		Audit:        Audit{File: defaultAuditFile, QueueSize: &auditQueue, ContentLimit: &auditLimit},
+		Ops:          Ops{Enabled: &opsOn, Addr: defaultOpsAddr, ReadyCacheTTL: &opsTTL, ProbeTimeout: &opsProbe},
+		Singleflight: Singleflight{Key: defaultSingleflightKey, Notice: &sfNotice},
 	}
 }
 
