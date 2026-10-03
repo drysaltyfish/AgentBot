@@ -122,21 +122,31 @@ func toMessage(it history.Item) (llm.Message, bool) {
 	}
 }
 
-// trimHistory 在超出上限时按整轮从最前裁剪，并对齐到 user 边界。
+// trimHistory 返回要呈现给模型的历史窗口。
 //
-// 注意权衡：裁剪会改变请求前缀，从而牺牲一部分缓存命中。但它只在超限时发生
-// （窗口内保持稳定），并且对齐到轮边界，避免把 assistant/tool 序列从中间截断。
+// 与"每轮取最近 N 条"不同：窗口起点按 margin（max 的一半）对齐，因此每
+// margin/2 轮才向前移动一次。窗口在两次移动之间**完全稳定**——逐轮滑动的窗口
+// 会让请求前缀每轮都变，前缀缓存必然失效。
+//
+// 这样存储层可以保留远多于窗口的历史（见 config.History.Retention），
+// recall_history 才有"窗口之外"的东西可召回；否则那个工具只能返回
+// 已经出现在提示词里的内容，等于摆设。
 func trimHistory(items []history.Item, max int) []history.Item {
 	if max <= 0 || len(items) <= max {
 		return items
 	}
-	start := len(items) - max
-	for start < len(items) && items[start].Kind != history.KindUser {
+	margin := max / 2
+	if margin < 1 {
+		margin = 1
+	}
+	start := ((len(items) - max) / margin) * margin
+	// 尽量对齐到 user 轮边界（从 assistant/tool 中间开始会让模型看到孤立的回答），
+	// 但最多向前找 margin 条，避免窗口被压得过小。
+	for i := 0; i < margin && start < len(items) && items[start].Kind != history.KindUser; i++ {
 		start++
 	}
 	if start >= len(items) {
-		// 窗口内没有任何 user 边界：整段保留，交给上层预算处理。
-		return items
+		start = len(items) - 1
 	}
 	return items[start:]
 }

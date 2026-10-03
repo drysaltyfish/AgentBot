@@ -158,3 +158,82 @@ func Test_CacheFirst_ToolItemsRoundTrip(t *testing.T) {
 		t.Fatalf("tool_result mapping wrong: %+v", msgs[3])
 	}
 }
+
+// Test_CacheFirst_WindowSlidesInBatches 守住"呈现窗口不能逐轮滑动"。
+//
+// 存储保留量远大于窗口（让 recall_history 有用），但窗口若每轮都动，
+// 请求前缀就会每轮都变，前缀缓存必然失效。窗口必须按批量移动。
+func Test_CacheFirst_WindowSlidesInBatches(t *testing.T) {
+	t.Parallel()
+	const window = 40 // 与默认配置一致（history_turns=20 -> 40 条）
+	a := New(Options{System: "S", MaxHistory: window})
+
+	var (
+		hist  []history.Item
+		prev  []llm.Message
+		moves int
+	)
+	const turns = 60
+	for turn := 1; turn <= turns; turn++ {
+		msgs := a.Build(hist, fmt.Sprintf("u%d", turn))
+		if prev != nil && !isPrefix(prev, msgs) {
+			moves++
+		}
+		prev = msgs
+		hist = append(hist,
+			history.Item{Kind: history.KindUser, Content: fmt.Sprintf("u%d", turn)},
+			history.Item{Kind: history.KindAssistant, Content: fmt.Sprintf("a%d", turn)},
+		)
+	}
+	if moves == 0 {
+		t.Fatalf("窗口从未移动，说明窗口没有生效（存储会无限增长）")
+	}
+	// margin = window/2 = 20，每 margin/2 = 10 轮才移动一次；
+	// 60 轮的理论值约 6 次，给一倍余量。
+	if moves > 12 {
+		t.Fatalf("窗口移动过于频繁（%d/%d 轮），会打碎前缀缓存", moves, turns)
+	}
+}
+
+// Test_CacheFirst_StoreLargerThanWindow 证明"存储比窗口大"这件事真的成立。
+//
+// 这正是 recall_history 有用的前提：窗口外的历史仍在存储里，工具才召得回来。
+func Test_CacheFirst_StoreLargerThanWindow(t *testing.T) {
+	t.Parallel()
+	const window = 6
+	a := New(Options{System: "S", MaxHistory: window})
+
+	hist := make([]history.Item, 0, 60)
+	for i := 0; i < 30; i++ {
+		hist = append(hist,
+			history.Item{Kind: history.KindUser, Content: fmt.Sprintf("u%d", i)},
+			history.Item{Kind: history.KindAssistant, Content: fmt.Sprintf("a%d", i)},
+		)
+	}
+	msgs := a.Build(hist, "现在")
+	// 呈现的消息数 = system + 窗口 + 当前输入；必须显著少于 60+2。
+	if len(msgs) > window+10 {
+		t.Fatalf("窗口未生效: %d 条消息", len(msgs))
+	}
+	// 而最早的若干条不应出现在提示词里——它们仍在存储中，等待被 recall_history 召回。
+	joined := ""
+	for _, m := range msgs {
+		joined += m.Content + "|"
+	}
+	if strings.Contains(joined, "u0|") {
+		t.Fatalf("最旧的历史不应出现在提示词里（它应由 recall_history 按需召回）")
+	}
+}
+
+// isPrefix 判断 prev 是否为 next 的前缀。
+func isPrefix(prev, next []llm.Message) bool {
+	if len(prev) > len(next) {
+		return false
+	}
+	for i, m := range prev {
+		if next[i].Role != m.Role || next[i].Content != m.Content {
+			return false
+		}
+	}
+	return true
+}

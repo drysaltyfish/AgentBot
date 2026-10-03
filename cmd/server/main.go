@@ -421,23 +421,29 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 	// 缓存优先（二）：历史裁剪交给存储层，且用高水位批量裁剪。
 	// 若由装配层每轮裁剪，前缀会逐轮变化，前缀缓存永远无法命中。
 	shape := sendShapeOf(cfg)
-	histItems := historyTurns(cfg) * 2 // 一轮 ≈ user + assistant 两条
-	// 对话历史：可落盘（F-38 的 JSONL），留空则仅进程内。
-	// 裁剪统一用高水位批量进行，避免每次追加都缩短前缀、白白失效缓存。
+	// 呈现窗口：每轮真正回灌给模型的条数（一轮 ≈ user + assistant 两条）。
+	histItems := historyTurns(cfg) * 2
+	// **存储**保留量远大于呈现窗口：否则 recall_history 只能返回已经出现在
+	// 提示词里的内容，等于摆设。两者分开是让那个工具真正有用的前提。
+	retention := intOr(cfg.History.Retention, 400)
+	if retention < histItems {
+		retention = histItems
+	}
 	var hist history.History
 	if path := strings.TrimSpace(cfg.History.File); path != "" {
-		hist = history.NewFile(path, histItems).WithTrimmer(history.HighWater{
-			Max: histItems,
-			Low: histItems * 3 / 4,
+		hist = history.NewFile(path, retention).WithTrimmer(history.HighWater{
+			Max: retention,
+			Low: retention * 3 / 4,
 		})
 		lg.Component("session").Info("conversation history is persisted to disk",
-			"path", path, "max_items", histItems)
+			"path", path, "retention", retention, "prompt_window", histItems)
 	} else {
-		hist = history.NewMemory(histItems).WithTrimmer(history.HighWater{
-			Max: histItems,
-			Low: histItems * 3 / 4,
+		hist = history.NewMemory(retention).WithTrimmer(history.HighWater{
+			Max: retention,
+			Low: retention * 3 / 4,
 		})
-		lg.Component("session").Warn("conversation history is in-process only; it will be lost on restart (set history.file to persist)")
+		lg.Component("session").Warn("conversation history is in-process only; it will be lost on restart (set history.file to persist)",
+			"retention", retention, "prompt_window", histItems)
 	}
 	sessions := session.New(
 		session.WithHistory(hist),
@@ -453,7 +459,9 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		lifecycle.Error("cannot load system prompt", "error", err)
 		return 1
 	}
-	asm := conversation.New(conversation.Options{System: sysPrompt})
+	// 呈现窗口交给装配层：窗口按批量滑动（见 conversation.trimHistory），
+	// 因此存储可以留得更多而不打碎前缀缓存。
+	asm := conversation.New(conversation.Options{System: sysPrompt, MaxHistory: histItems})
 	lg.Component("llm").Info("cache-first layout pinned",
 		"prefix_hash", asm.PrefixHash(), "prefix_runes", len([]rune(sysPrompt)),
 		"history_items", histItems, "trim_high_water", histItems, "trim_low_water", histItems*3/4)
@@ -739,6 +747,7 @@ func handleReply(ctx context.Context, lg *observe.Logger, brain agent.Agent, sen
 		"prefix_hash", asm.PrefixHash(),
 		"steps", len(out.Steps),
 		"tool_calls", len(out.ToolCalls),
+		"tools", toolNames(out.ToolCalls),
 		"prompt_tokens", out.Usage.PromptTokens,
 		"completion_tokens", out.Usage.CompletionTokens,
 		"reasoning_tokens", out.Usage.ReasoningTokens,
@@ -772,6 +781,18 @@ func handleReply(ctx context.Context, lg *observe.Logger, brain agent.Agent, sen
 		"cache_hit_ratio", fmt.Sprintf("%.1f%%", out.Usage.CacheHitRatio()*100),
 		"cache_hit_tokens", out.Usage.PromptCacheHitTokens,
 		"cache_miss_tokens", out.Usage.PromptCacheMissTokens)
+}
+
+// toolNames 汇总本轮用到的工具名，便于在日志里核对"到底调了什么"。
+func toolNames(calls []llm.ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(calls))
+	for _, c := range calls {
+		names = append(names, c.Name)
+	}
+	return strings.Join(names, ",")
 }
 
 // segmentDetail 渲染非文本段的全部字段，用于确认平台真实载荷。
