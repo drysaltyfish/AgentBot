@@ -350,7 +350,7 @@ func Test_F71_AdminModuleAuthorizesAndAudits(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Default()
-	cfg.Moderation.SuperUsers = []int64{42}
+	cfg.Access.Roles = map[string][]int64{"superuser": {42}}
 
 	var buf bytes.Buffer
 	alog := audit.New(audit.Options{Writer: &buf, QueueSize: 16, Now: time.Now})
@@ -391,7 +391,7 @@ func Test_F66_AdminCostCommandReportsUsage(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Default()
-	cfg.Moderation.SuperUsers = []int64{42}
+	cfg.Access.Roles = map[string][]int64{"superuser": {42}}
 	cfg.Cost.Enabled = ptr(true)
 	cfg.Cost.Prices = map[string]config.CostPrice{"m": {InputPer1K: 0.01, OutputPer1K: 0.02}}
 

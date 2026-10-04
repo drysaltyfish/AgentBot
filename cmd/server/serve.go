@@ -263,9 +263,9 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 	}
 	policyTables := newPolicyState(policyTable)
 	// F-58 运维扩展：名单（路由层直接丢弃）与"QQ 号 → 角色"的显式指定。
-	// 超管名单取 moderation.super_users 与 access.roles.superuser 的并集，只保留这一份。
+	// 超管只有 access.roles.superuser 一个位置；旧的 moderation.super_users 出现即启动失败。
 	accessCtl := buildAccessControls(cfg, lg)
-	superUsers := superUsersFrom(cfg, accessCtl.Roles)
+	superUsers := superUsersFrom(accessCtl.Roles)
 
 	personaReg, personaMgr, personaErr := buildPersonas(cfg, personaStoreAdapter{st: st}, lg)
 	if personaErr != nil {
@@ -486,7 +486,7 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 	// F-71：管理命令（/help、/ban、/unban、/banlist）。
 	// 注意：/switch 已由既有路由处理，这里不重复注册——两条授权路径比没有更难维护。
 	// 只在配置了超管时才启用：没有授权者就没有"管理"可言。
-	if adminMod := buildAdminModule(cfg, auditLog, lg, modEngine, costTracker, personaMgr, promptHash); len(cfg.Moderation.SuperUsers) > 0 {
+	if adminMod := buildAdminModule(cfg, auditLog, lg, modEngine, costTracker, personaMgr, promptHash); len(superUsers) > 0 {
 		engine.UsePre(func(c *router.Ctx) bool {
 			if c == nil || c.Event == nil {
 				return true
@@ -744,7 +744,7 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 			Semcache:        semCache != nil,
 			Streaming:       streamFactory != nil,
 			Moderation:      modEngine != nil,
-			Admin:           len(cfg.Moderation.SuperUsers) > 0,
+			Admin:           len(superUsers) > 0,
 			Toggles:         cfg.Toggle.EffectiveEnabled(),
 			ProactiveMemory: cfg.Agent.ProactiveMemory.EffectiveEnabled(),
 			ToolHint:        cfg.Agent.Enabled && cfg.Agent.ToolHint.EffectiveEnabled(),

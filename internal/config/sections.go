@@ -466,8 +466,12 @@ type Moderation struct {
 	MaskReplacement *string `yaml:"mask_replacement"`
 	// BlacklistFile 是封禁记录的落盘路径；为空表示仅进程内（重启即丢）。
 	BlacklistFile string `yaml:"blacklist_file"`
-	// SuperUsers 是永不封禁的超管用户 ID。
-	SuperUsers []int64 `yaml:"super_users"`
+	// LegacySuperUsers 只用于**捕获已移除的旧键** moderation.super_users。
+	//
+	// 它不是有效配置：一旦出现就报错并给出迁移指引，而不是被静默忽略——
+	// 静默忽略会表现成"我明明是超管，怎么命令不管用了"，比启动失败难查得多。
+	// 超管只有一个位置：access.roles.superuser。
+	LegacySuperUsers []int64 `yaml:"super_users,omitempty"`
 	// AntiSpam 是防刷参数（F-58）。
 	AntiSpam ModerationAntiSpam `yaml:"antispam"`
 }

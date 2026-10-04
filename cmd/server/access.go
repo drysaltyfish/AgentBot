@@ -41,15 +41,14 @@ func buildAccessControls(cfg *config.Config, lg *observe.Logger) *accessControls
 	return controls
 }
 
-// superUsersFrom 返回"谁说了算"的唯一名单：moderation.super_users 与
-// access.roles.superuser 的并集。管理命令授权、权限判定、名单绕过都读它，
-// 避免出现第二份超管名单而彼此不一致。
-func superUsersFrom(cfg *config.Config, roles *access.Roles) map[int64]struct{} {
-	out := make(map[int64]struct{}, len(cfg.Moderation.SuperUsers))
-	for _, id := range cfg.Moderation.SuperUsers {
-		out[id] = struct{}{}
-	}
-	for _, id := range roles.SuperUsers() {
+// superUsersFrom 返回"谁说了算"的**唯一**名单：access.roles.superuser。
+//
+// 管理命令授权、权限判定、名单绕过、never-ban 都读这一份。配置里只有这一个位置
+// （旧的 moderation.super_users 已移除，出现即启动失败并给出迁移指引）。
+func superUsersFrom(roles *access.Roles) map[int64]struct{} {
+	ids := roles.SuperUsers()
+	out := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
 		out[id] = struct{}{}
 	}
 	return out

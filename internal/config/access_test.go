@@ -102,3 +102,44 @@ func Test_F58_AccessDefaults(t *testing.T) {
 		t.Fatalf("启用但未写模式应归一为 off: %q", on.EffectiveMode())
 	}
 }
+
+// Test_F58_LegacySuperUsersKeyIsRejected 钉住破坏性变更的迁移路径：
+// 旧键 moderation.super_users 已移除，出现时必须**报错并指路**，
+// 而不是被静默忽略（那会表现成"我明明是超管，命令却不管用"）。
+func Test_F58_LegacySuperUsersKeyIsRejected(t *testing.T) {
+	t.Parallel()
+	raw := []byte("transport:\n  mode: wsclient\n  url: ws://127.0.0.1:1\nllm:\n  model: m\nmoderation:\n  super_users: [12345]\n")
+	cfg, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Moderation.LegacySuperUsers) != 1 || cfg.Moderation.LegacySuperUsers[0] != 12345 {
+		t.Fatalf("旧键应被解出以便报错: %+v", cfg.Moderation.LegacySuperUsers)
+	}
+	verr := cfg.Validate()
+	if verr == nil {
+		t.Fatal("旧键必须让校验失败")
+	}
+	msg := verr.Error()
+	for _, want := range []string{"moderation.super_users", "access.roles.superuser", "12345"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("错误信息应包含 %q，实际: %v", want, msg)
+		}
+	}
+}
+
+// Test_F58_SuperUsersLiveInAccessRoles 确认新位置可用且旧字段不参与任何生效值。
+func Test_F58_SuperUsersLiveInAccessRoles(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.LLM.Model = "m"
+	cfg.Transport.Mode = "wsclient"
+	cfg.Transport.URL = "ws://127.0.0.1:1"
+	cfg.Access.Roles = map[string][]int64{"superuser": {7}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(cfg.Moderation.LegacySuperUsers) != 0 {
+		t.Fatal("新配置不应触发旧键")
+	}
+}

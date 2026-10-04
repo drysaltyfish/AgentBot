@@ -1731,8 +1731,9 @@
   与黑名单的分工：名单只看得到 QQ/群号（最彻底），需要看内容的审查仍走 moderation。
 - **角色（`access.roles`）**：用 QQ 号直接指定 `superuser` / `owner` / `admin` / `member`，
   优先于平台上报的群成员角色；同一 QQ 出现在多个角色时按权限取高。
-- **超管名单是并集**：`moderation.super_users` ∪ `access.roles.superuser`（管理命令授权、
-  权限判定、名单绕过都读这一份）。默认超管绕过名单，避免"配错白名单把自己锁在门外"。
+- **超管只有一处**：`access.roles.superuser`（管理命令授权、权限判定、名单绕过、never-ban
+  都读这一份）。旧的 `moderation.super_users` 已移除：该键出现即启动失败并给出迁移指引。
+  默认超管绕过名单，避免"配错白名单把自己锁在门外"。
 - 每次丢弃进审计（`inbound_blocked`）与 `events_dropped{reason="access"}` 指标。
 
 ---

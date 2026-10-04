@@ -436,8 +436,9 @@ func buildModeration(cfg *config.Config, lg *observe.Logger) (*moderation.Engine
 // buildBlacklist 构造黑名单；文件不可用时退回内存并告警（可用性优先）。
 func buildBlacklist(cfg *config.Config, warn func(string)) (*moderation.Blacklist, error) {
 	opts := moderation.BlacklistOptions{
-		SelfID:     cfg.Transport.EffectiveSelfID(),
-		SuperUsers: cfg.Moderation.SuperUsers,
+		SelfID: cfg.Transport.EffectiveSelfID(),
+		// 永不可封禁名单 = 超管名单（唯一来源：access.roles.superuser）。
+		SuperUsers: access.NewRoles(cfg.Access.Roles).SuperUsers(),
 		Warn:       warn,
 	}
 	if path := strings.TrimSpace(cfg.Moderation.BlacklistFile); path != "" {
@@ -604,9 +605,9 @@ func buildCostTracker(cfg *config.Config, lg *observe.Logger, cat *metrics.Catal
 // 鉴权统一走 moderation.super_users：仓库里已经有"谁说了算"的配置，
 // 不该再造第二份。
 func buildAdminModule(cfg *config.Config, alog *audit.Logger, lg *observe.Logger, mod *moderation.Engine, costTracker *cost.Tracker, personas *scoped.Manager, promptHash admin.PromptHashFunc) *admin.Module {
-	// 超管名单 = moderation.super_users ∪ access.roles.superuser（与组合根同一份并集）。
+	// 超管名单只有一处：access.roles.superuser（与组合根同一份）。
 	supers := make(map[int64]bool)
-	for id := range superUsersFrom(cfg, access.NewRoles(cfg.Access.Roles)) {
+	for id := range superUsersFrom(access.NewRoles(cfg.Access.Roles)) {
 		supers[id] = true
 	}
 	mlog := lg.Component("admin")

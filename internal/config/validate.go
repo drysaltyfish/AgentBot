@@ -262,8 +262,13 @@ func (c *Config) Validate() error {
 			add("access.roles", "角色名必须是 superuser / owner / admin / member 之一，实际为 "+strconv.Quote(role))
 		}
 	}
+	if len(c.Moderation.LegacySuperUsers) > 0 {
+		add("moderation.super_users",
+			"该字段已移除；超管请改用 access.roles.superuser（例：access: {roles: {superuser: ["+
+				strconv.FormatInt(c.Moderation.LegacySuperUsers[0], 10)+"]}}）")
+	}
 	if c.Access.BypassSuperUsers != nil && !*c.Access.BypassSuperUsers && c.Access.EffectiveEnabled() {
-		hasSuper := len(c.Moderation.SuperUsers) > 0
+		hasSuper := false
 		for role, ids := range c.Access.Roles {
 			if strings.EqualFold(strings.TrimSpace(role), "superuser") && len(ids) > 0 {
 				hasSuper = true

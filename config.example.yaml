@@ -255,7 +255,8 @@ moderation:
   mask_replacement: "***"
   # 封禁记录落盘路径；留空则仅进程内（重启即丢）。
   blacklist_file: ./data/blacklist.json
-  super_users: []
+  # 注意：超管**不再**配置在这里。moderation.super_users 已移除，
+  # 请改用下面的 access.roles.superuser（出现旧键会让启动失败并给出迁移指引）。
   antispam:
     window: 10s
     max_messages: 20
@@ -287,8 +288,8 @@ access:
   bypass_super_users: true
   # 是否逐条记录被丢弃的消息（默认 false）。无论开关，丢弃都会进审计与 events_dropped 指标。
   log_drops: false
-  # 用 QQ 号直接指定角色，优先于平台上报的群成员角色：
-  #   superuser —— 管理命令授权、policy 的 superuser 角色、永不封禁
+  # 用 QQ 号直接指定角色（**超管的唯一位置**），优先于平台上报的群成员角色：
+  #   superuser —— 管理命令授权、policy 的 superuser 角色、永不封禁、绕过名单
   #   owner / admin / member —— policy 的角色（决定模型能用哪些 action）；
   #                              owner/admin 还能用 /switch
   # 同一个 QQ 写在多个角色里时按权限取高（不会因为书写顺序变权限）。

@@ -47,7 +47,7 @@ func Test_F58_AccessRuleDropsUnlistedAtRouting(t *testing.T) {
 	cfg.Access.Users = []int64{100}
 	cfg.Access.Groups = []int64{900}
 	controls := buildAccessControls(cfg, testLogger(t))
-	supers := superUsersFrom(cfg, controls.Roles)
+	supers := superUsersFrom(controls.Roles)
 	cat := metrics.NewCatalog(metrics.CatalogOptions{})
 
 	engine, hits := accessEngine(accessRule(controls, supers, cat, nil, testLogger(t)))
@@ -83,7 +83,7 @@ func Test_F58_DenyModeDropsListedOnly(t *testing.T) {
 	cfg.Access.Mode = "deny"
 	cfg.Access.Users = []int64{666}
 	controls := buildAccessControls(cfg, testLogger(t))
-	supers := superUsersFrom(cfg, controls.Roles)
+	supers := superUsersFrom(controls.Roles)
 
 	engine, hits := accessEngine(accessRule(controls, supers, nil, nil, testLogger(t)))
 	if n := engine.Dispatch(context.Background(), accessEvent(t, 666, 900, "member"), nil); n != 0 {
@@ -106,7 +106,7 @@ func Test_F58_SuperUsersBypassTheList(t *testing.T) {
 	cfg.Access.Users = []int64{100}
 	cfg.Access.Roles = map[string][]int64{"superuser": {42}}
 	controls := buildAccessControls(cfg, testLogger(t))
-	supers := superUsersFrom(cfg, controls.Roles)
+	supers := superUsersFrom(controls.Roles)
 
 	engine, _ := accessEngine(accessRule(controls, supers, nil, nil, testLogger(t)))
 	if n := engine.Dispatch(context.Background(), accessEvent(t, 42, 900, "member"), nil); n != 1 {
@@ -143,7 +143,7 @@ func Test_F58_RoleForEventPrefersExplicitRoles(t *testing.T) {
 		"member":    {9},
 	}
 	controls := buildAccessControls(cfg, testLogger(t))
-	supers := superUsersFrom(cfg, controls.Roles)
+	supers := superUsersFrom(controls.Roles)
 
 	if got := roleForEvent(accessEvent(t, 1, 5, "member"), controls, supers); got != policy.RoleSuperUser {
 		t.Fatalf("显式超管: %q", got)
@@ -174,7 +174,7 @@ func Test_F58_AgentRoleForMapsSuperUserToOwner(t *testing.T) {
 	cfg := config.Default()
 	cfg.Access.Roles = map[string][]int64{"superuser": {1}}
 	controls := buildAccessControls(cfg, testLogger(t))
-	supers := superUsersFrom(cfg, controls.Roles)
+	supers := superUsersFrom(controls.Roles)
 
 	cases := []struct {
 		userID int64
@@ -192,21 +192,26 @@ func Test_F58_AgentRoleForMapsSuperUserToOwner(t *testing.T) {
 	}
 }
 
-// Test_F58_SuperUsersFromUnionsBothSources 钉住"超管只有一份名单"：
-// moderation.super_users 与 access.roles.superuser 取并集。
-func Test_F58_SuperUsersFromUnionsBothSources(t *testing.T) {
+// Test_F58_SuperUsersComeFromAccessRolesOnly 钉住"超管只有一份名单"：
+// 唯一来源是 access.roles.superuser（旧的 moderation.super_users 已移除，出现即启动失败）。
+func Test_F58_SuperUsersComeFromAccessRolesOnly(t *testing.T) {
 	t.Parallel()
-	cfg := config.Default()
-	cfg.Moderation.SuperUsers = []int64{10}
-	roles := access.NewRoles(map[string][]int64{"superuser": {20}})
-	got := superUsersFrom(cfg, roles)
-	if len(got) != 2 {
-		t.Fatalf("超管并集应为 2 个: %v", got)
-	}
-	if _, ok := got[10]; !ok {
-		t.Fatalf("moderation.super_users 应计入: %v", got)
+	roles := access.NewRoles(map[string][]int64{
+		"superuser": {20},
+		"owner":     {30},
+	})
+	got := superUsersFrom(roles)
+	if len(got) != 1 {
+		t.Fatalf("超管名单应只含 superuser: %v", got)
 	}
 	if _, ok := got[20]; !ok {
 		t.Fatalf("access.roles.superuser 应计入: %v", got)
+	}
+	if _, ok := got[30]; ok {
+		t.Fatalf("owner 不是超管，不应计入: %v", got)
+	}
+	// 没有配置时为空集合（管理命令因此不会注册）。
+	if len(superUsersFrom(access.NewRoles(nil))) != 0 {
+		t.Fatal("未配置角色时超管名单应为空")
 	}
 }

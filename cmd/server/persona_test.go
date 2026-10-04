@@ -31,7 +31,7 @@ func Test_F82_PersonaSwitchChangesPromptHash(t *testing.T) {
 	writePersonaFile(t, dir, "alt.yml", "name: alt\nsystem_prompt: 另一个人格正文\n")
 
 	cfg := config.Default()
-	cfg.Moderation.SuperUsers = []int64{42}
+	cfg.Access.Roles = map[string][]int64{"superuser": {42}}
 	cfg.Prompt.PersonasDir = ptr(dir)
 
 	st, err := store.Open(ctx, store.Options{Path: filepath.Join(t.TempDir(), "persona.db")})
@@ -157,7 +157,7 @@ func Test_F65_PromptHashWithoutPersonaStillReportsStatic(t *testing.T) {
 	writePersonaFile(t, dir, "default.yml", "name: default\nsystem_prompt: 默认人格正文\n")
 
 	cfg := config.Default()
-	cfg.Moderation.SuperUsers = []int64{42}
+	cfg.Access.Roles = map[string][]int64{"superuser": {42}}
 	cfg.Prompt.PersonasDir = ptr(dir)
 	lg := testLogger(t)
 	defer func() { _ = lg.Close(ctx) }()

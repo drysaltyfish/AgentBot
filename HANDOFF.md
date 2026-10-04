@@ -93,7 +93,8 @@ F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 7. **F-58 扩展：名单与角色（access 分节）**：在既有 moderation 黑名单之外，新增了**路由层直接丢弃**的名单
    （access.mode = allow/deny，按 QQ 号与群号）与**用 QQ 号显式指定角色**（access.roles）。
    与 F-58 的分工：名单只看得到 QQ/群号，最彻底；需要看内容的审查仍在 moderation。
-   超管名单是 moderation.super_users ∪ access.roles.superuser 的并集（只此一份）。
+   超管名单**只有一处**：access.roles.superuser。旧的 moderation.super_users 已**移除**：
+   该键出现即启动失败并给出迁移指引（不静默忽略——否则会表现成"我明明是超管，命令却不管用"）。
    影响面：路由 pre 钩子、policy 角色解析、审批角色（agentRoleFor）、/switch 授权。
 8. **`llm.max_iterations` 是空转字段**：它会被校验（<=0 报错）并出现在示例配置里，但全仓库没有消费方；
    工具调用轮数实际由 `agent.max_iterations` 控制。已在 README 与示例配置里如实标注，

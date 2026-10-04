@@ -244,7 +244,7 @@ moderation:
 
 | 命令 | 作用 | 权限 |
 |---|---|---|
-| /help | 列出全部可用管理命令 | 超管（moderation.super_users） |
+| /help | 列出全部可用管理命令 | 超管（access.roles.superuser） |
 | /switch <plugin> on\|off | 按群开关某个插件，状态落盘、重启保持 | 群 owner / admin（需 toggle.enabled） |
 | /ban <用户号> [原因] | 永久封禁 | 超管（需 moderation.enabled） |
 | /unban <用户号> | 解除封禁 | 超管（需 moderation.enabled） |
@@ -270,15 +270,11 @@ moderation:
 
 #### 怎么设置超管（按 QQ 号）
 
-超级管理员 = **moderation.super_users** 与 **access.roles.superuser** 的并集（只有这一份名单），
+超级管理员只有一个位置：**access.roles.superuser**（moderation.super_users 已移除），
 拥有：聊天内管理命令授权、policy 的 superuser 角色、永不封禁、绕过名单。
 
 @@@yaml
-moderation:
-  super_users: [10001]      # 最直接的写法：超管 QQ 号
-  # 需要 /ban 等命令时还要开：enabled: true
-
-# 等价的显式角色写法（推荐，角色语义更清楚）：
+# 超管的**唯一**位置（moderation.super_users 已移除，出现旧键会启动失败）：
 access:
   roles:
     superuser: [10001]      # 超管
@@ -371,7 +367,7 @@ roles 支持的角色名（写错会让启动失败）：
 
 说明：
 
-- **超管名单是并集**：moderation.super_users ∪ access.roles.superuser。管理命令授权、权限判定、名单绕过读的都是这一份并集，不存在第二份"谁说了算"。
+- **超管只有一个位置**：access.roles.superuser。管理命令授权、权限判定、名单绕过、never-ban 读的都是这一份。旧键 moderation.super_users **已移除**：出现即启动失败并给出迁移指引（不静默忽略，免得表现成"我明明是超管，命令却不管用"）。
 - **角色优先级**：access.roles 显式指定 > 超管名单 > 平台上报的群成员角色 > everyone。
 - **冲突按权限取高**：同一个 QQ 被写进多个角色时取权限更高的那个，不让配置书写顺序决定权限。
 - **只会看到 QQ 号与群号**：需要按消息内容拦截（敏感词等）请用 moderation，两者可同时开启。
@@ -490,7 +486,7 @@ roles 支持的角色名（写错会让启动失败）：
 |---|---|---|---|
 | file | string | actions.yaml | 权限表文件。**覆盖**语义：文件不存在用内置默认表并记日志；存在但解析/校验失败则启动失败；存在时热加载 |
 
-权限表用于两处：渲染进提示词的半静态段（按角色），以及在平台 API 出口硬拦截（角色不允许的 action 直接拒绝）。角色映射：超管名单（moderation.super_users）优先，其次平台上报的 owner / admin / member，其余按 everyone（fail-closed）。
+权限表用于两处：渲染进提示词的半静态段（按角色），以及在平台 API 出口硬拦截（角色不允许的 action 直接拒绝）。角色映射：超管名单（access.roles.superuser）优先，其次平台上报的 owner / admin / member，其余按 everyone（fail-closed）。
 
 ### 4.10 log：结构化日志
 
@@ -567,7 +563,7 @@ roles 支持的角色名（写错会让启动失败）：
 | action | string | mask | mask（脱敏放行）或 block（拦截） |
 | mask_replacement | string | 按命中长度生成等长掩码 | 脱敏替换串 |
 | blacklist_file | string | 空 | 封禁落盘路径；为空仅进程内（重启即丢） |
-| super_users | []int64 | 空 | 超管 QQ 号：永不封禁、管理命令授权、policy 的 superuser 角色。与 access.roles.superuser 取**并集**（见 4.2） |
+| super_users | []int64 | — | **已移除**：超管请改用 access.roles.superuser（见 4.2）。旧键出现会让启动失败并给出迁移指引 |
 | antispam.window | duration | 10s | 速率统计窗口 |
 | antispam.max_messages | int | 20 | 窗口内允许的最大消息数 |
 | antispam.ban_duration | duration | 60s | 触发后的临时封禁时长 |
