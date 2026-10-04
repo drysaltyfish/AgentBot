@@ -223,7 +223,7 @@ func ParseFacts(raw string, maxFacts, maxLen int) ([]ReflectedFact, error) {
 	}
 	var facts []ReflectedFact
 	if err := json.Unmarshal([]byte(text[start:end+1]), &facts); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrReflectUnparsed, err)
+		return nil, fmt.Errorf("%w: %w", ErrReflectUnparsed, err)
 	}
 
 	out := make([]ReflectedFact, 0, len(facts))

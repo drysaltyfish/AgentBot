@@ -160,15 +160,25 @@ func Test_F24_ReloadsDirectoryContentChange(t *testing.T) {
 		t.Fatalf("首次加载=(%q,%v)", got, ok)
 	}
 
+	// 用**加载次数**而不是"看到第二版"做同步点。
+	//
+	// 曾经这里等 got == "第二版"，在慢机器（CI）上会偶发失败：第二次写入
+	// （INVALID）可能在 watcher 读盘之前就落盘，于是它直接读到 INVALID、
+	// 从未观察到"第二版"这个中间态。那是**测试自己的竞态**，不是监听的问题——
+	// 监听只需要保证"变化被检测到并重新加载"，而中间态是否被观察到取决于调度。
+	before := loads.Load()
 	writeFile(t, aPath, "第二版")
 	waitFor(t, "目录内文件内容变化被检测到", func() bool {
+		if loads.Load() <= before {
+			return false
+		}
 		got, ok := w.Current()
 		return ok && got == "第二版"
 	})
 
 	// 非法内容必须保留旧值，而不是把当前值清空。
 	writeFile(t, aPath, "INVALID")
-	waitFor(t, "至少尝试了一次重新加载", func() bool { return loads.Load() > 2 })
+	waitFor(t, "至少尝试了一次重新加载", func() bool { return loads.Load() > before+1 })
 	if got, _ := w.Current(); got != "第二版" {
 		t.Fatalf("非法内容应保留旧值，实际 %q", got)
 	}
