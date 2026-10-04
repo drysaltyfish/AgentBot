@@ -55,7 +55,7 @@ func Test_F53_PolicyRolePrefersSuperUsers(t *testing.T) {
 	t.Parallel()
 	supers := map[int64]struct{}{7: {}}
 
-	if got := policyRole(&event.Event{UserID: 7, Sender: event.Sender{Role: "member"}}, supers); got != policy.RoleSuperUser {
+	if got := roleForEvent(&event.Event{UserID: 7, Sender: event.Sender{Role: "member"}}, nil, supers); got != policy.RoleSuperUser {
 		t.Fatalf("超管应映射为 superuser: %q", got)
 	}
 	cases := []struct {
@@ -70,7 +70,7 @@ func Test_F53_PolicyRolePrefersSuperUsers(t *testing.T) {
 		{"nil event", nil, policy.RoleEveryone},
 	}
 	for _, tc := range cases {
-		if got := policyRole(tc.ev, supers); got != tc.want {
+		if got := roleForEvent(tc.ev, nil, supers); got != tc.want {
 			t.Fatalf("%s: policyRole=%q, want %q", tc.name, got, tc.want)
 		}
 	}

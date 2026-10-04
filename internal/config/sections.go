@@ -1,5 +1,33 @@
 package config
 
+// Access 描述「谁的消息会被处理」与「角色的 QQ 号显式指定」（F-58 的运维扩展）。
+//
+// 与 moderation 的黑名单不同：那里的封禁是**内容处理后**的拦截（要经过审查、防刷），
+// 这里是**路由层直接丢弃**——名单外的消息不进入路由匹配、不建会话、不落库、不产生
+// 任何模型调用。代价是它只看得到 QQ 号与群号，看不到内容。
+type Access struct {
+	// Enabled 为 true 时启用名单；未配置时默认关闭。
+	Enabled *bool `yaml:"enabled"`
+	// Mode 是名单模式：off（默认）/ allow（白名单）/ deny（黑名单）。
+	Mode string `yaml:"mode"`
+	// Users 是名单里的 QQ 号。
+	Users []int64 `yaml:"users"`
+	// Groups 是名单里的群号。
+	Groups []int64 `yaml:"groups"`
+	// CheckUsersInGroup 表示用户名单是否也在群里生效；未配置时按 true。
+	// allow 模式下为 true 时要求"群在名单 + 人在名单"；
+	// deny 模式下为 true 时，群里的用户名单同样会被丢弃。
+	CheckUsersInGroup *bool `yaml:"check_users_in_group"`
+	// BypassSuperUsers 表示超管是否绕过名单；未配置时按 true。
+	// 默认绕过是为了避免"配错白名单把自己锁在门外"——那只能改文件重启才能恢复。
+	BypassSuperUsers *bool `yaml:"bypass_super_users"`
+	// LogDrops 为 true 时每条被丢弃的消息都记一条日志；未配置时按 false。
+	// 无论是否开启，丢弃都会进审计与 events_dropped 指标。
+	LogDrops *bool `yaml:"log_drops"`
+	// Roles 用 QQ 号直接指定角色，优先于平台上报的群成员角色。
+	Roles map[string][]int64 `yaml:"roles"`
+}
+
 // Store 描述持久层（F-83）。
 type Store struct {
 	// Path 是数据库文件路径；为空时用 store.DefaultPath()。

@@ -240,6 +240,40 @@ func (c *Config) Validate() error {
 		add("semcache.max_entries", "必须 >= 1")
 	}
 
+	// F-58 运维扩展：名单模式与角色指定。
+	if c.Access.Enabled != nil && *c.Access.Enabled {
+		switch strings.ToLower(strings.TrimSpace(c.Access.Mode)) {
+		case "allow", "deny":
+		case "":
+			add("access.mode", "启用名单时必须显式写 allow 或 deny（不写会静默变成不限制）")
+		default:
+			add("access.mode", "必须是 allow / deny 之一，实际为 "+strconv.Quote(c.Access.Mode))
+		}
+		// allow 模式且两个名单都为空 = 把所有人挡在门外，这几乎总是配置事故。
+		if strings.EqualFold(strings.TrimSpace(c.Access.Mode), "allow") &&
+			len(c.Access.Users) == 0 && len(c.Access.Groups) == 0 {
+			add("access.users", "allow 模式下用户名单与群名单不能同时为空（否则没有任何消息会被处理）")
+		}
+	}
+	for role := range c.Access.Roles {
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "superuser", "owner", "admin", "member":
+		default:
+			add("access.roles", "角色名必须是 superuser / owner / admin / member 之一，实际为 "+strconv.Quote(role))
+		}
+	}
+	if c.Access.BypassSuperUsers != nil && !*c.Access.BypassSuperUsers && c.Access.EffectiveEnabled() {
+		hasSuper := len(c.Moderation.SuperUsers) > 0
+		for role, ids := range c.Access.Roles {
+			if strings.EqualFold(strings.TrimSpace(role), "superuser") && len(ids) > 0 {
+				hasSuper = true
+			}
+		}
+		if !hasSuper {
+			add("access.bypass_super_users", "关闭超管绕过，却又没有配置任何超管：一旦名单配错将无人能管理")
+		}
+	}
+
 	if len(problems) == 0 {
 		return nil
 	}

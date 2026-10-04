@@ -262,6 +262,42 @@ moderation:
     ban_duration: 60s
     duplicate_repeat: 5
 
+
+# ---- 名单与角色（按 QQ 号 / 群号）----
+# 与 moderation 的黑名单不同：这里是**路由层直接丢弃**——名单外的消息不进入路由匹配、
+# 不建会话、不落库、不产生任何模型调用（连"只记录"的兜底路由也不执行）。
+# 代价是它只看得到 QQ 号与群号，看不到内容。
+access:
+  enabled: false
+  # allow = 白名单（只有名单内处理）；deny = 黑名单（名单内丢弃）。
+  # 启用时必须显式写，不写会让启动失败（防止"以为开了其实没开"）。
+  mode: allow
+  # QQ 号列表。
+  users: []
+  # 群号列表。
+  groups: []
+  # 用户名单是否也在群里生效（默认 true）：
+  #   allow + true  → 群与人都要在名单里（只服务指定群里的指定人）
+  #   allow + false → 群在名单即放行整群，或人在名单即放行（跨群私聊式白名单）
+  #   deny  + true  → 群里的这些用户也会被丢弃
+  #   deny  + false → 用户名单只对私聊生效
+  check_users_in_group: true
+  # 超管是否绕过名单（默认 true）。默认绕过是为了避免"配错白名单把自己锁在门外"——
+  # 那种情况只能改文件重启才能恢复。关掉它需要至少配一个超管（否则启动失败）。
+  bypass_super_users: true
+  # 是否逐条记录被丢弃的消息（默认 false）。无论开关，丢弃都会进审计与 events_dropped 指标。
+  log_drops: false
+  # 用 QQ 号直接指定角色，优先于平台上报的群成员角色：
+  #   superuser —— 管理命令授权、policy 的 superuser 角色、永不封禁
+  #   owner / admin / member —— policy 的角色（决定模型能用哪些 action）；
+  #                              owner/admin 还能用 /switch
+  # 同一个 QQ 写在多个角色里时按权限取高（不会因为书写顺序变权限）。
+  roles:
+    superuser: []      # 例：[10001]
+    owner: []
+    admin: []
+    member: []
+
 # ---- 人格定义目录（F-82）----
 # 每个 <name>.yml 定义一个人格；name 必须与文件名一致。
 # 留空时默认取 prompt.dir 下的 personas 子目录（即 prompts/personas）。

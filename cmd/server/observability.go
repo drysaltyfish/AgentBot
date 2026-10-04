@@ -9,11 +9,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/drysaltyfish/agentbot/internal/access"
 	"github.com/drysaltyfish/agentbot/internal/admin"
 	"github.com/drysaltyfish/agentbot/internal/agent"
 	"github.com/drysaltyfish/agentbot/internal/audit"
 	"github.com/drysaltyfish/agentbot/internal/config"
 	"github.com/drysaltyfish/agentbot/internal/cost"
+	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/moderation"
@@ -470,7 +472,9 @@ func loadSensitiveWords(cfg *config.Config) ([]string, error) {
 }
 
 // moderationPreHook 把入站审查挂成 pre 钩子：拦截的事件不进入任何路由。
-func moderationPreHook(eng *moderation.Engine, cat *metrics.Catalog, alog *audit.Logger, lg *observe.Logger) router.Rule {
+//
+// roleOf 由组合根注入（含 access.roles 的显式指定），审查据此判定"这次发言是谁送的"。
+func moderationPreHook(eng *moderation.Engine, cat *metrics.Catalog, alog *audit.Logger, lg *observe.Logger, roleOf func(*event.Event) agent.Role) router.Rule {
 	mlog := lg.Component("moderation")
 	return func(c *router.Ctx) bool {
 		if c == nil || c.Event == nil {
@@ -480,7 +484,7 @@ func moderationPreHook(eng *moderation.Engine, cat *metrics.Catalog, alog *audit
 			UserID:    c.Event.UserID,
 			GroupID:   c.Event.GroupID,
 			SelfID:    c.Event.SelfID,
-			Role:      string(agentRole(c.Event)),
+			Role:      string(roleOf(c.Event)),
 			Addressed: c.Event.GroupID == 0 || router.AtMe()(c),
 		})
 		if err != nil {
@@ -600,8 +604,9 @@ func buildCostTracker(cfg *config.Config, lg *observe.Logger, cat *metrics.Catal
 // 鉴权统一走 moderation.super_users：仓库里已经有"谁说了算"的配置，
 // 不该再造第二份。
 func buildAdminModule(cfg *config.Config, alog *audit.Logger, lg *observe.Logger, mod *moderation.Engine, costTracker *cost.Tracker, personas *scoped.Manager, promptHash admin.PromptHashFunc) *admin.Module {
-	supers := make(map[int64]bool, len(cfg.Moderation.SuperUsers))
-	for _, id := range cfg.Moderation.SuperUsers {
+	// 超管名单 = moderation.super_users ∪ access.roles.superuser（与组合根同一份并集）。
+	supers := make(map[int64]bool)
+	for id := range superUsersFrom(cfg, access.NewRoles(cfg.Access.Roles)) {
 		supers[id] = true
 	}
 	mlog := lg.Component("admin")

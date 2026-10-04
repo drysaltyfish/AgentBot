@@ -292,6 +292,33 @@ func (r RetrievalTree) EffectiveClusterThreshold() float64 {
 	return *r.ClusterThreshold
 }
 
+// EffectiveEnabled 返回是否启用名单；未配置时默认关闭。
+func (a Access) EffectiveEnabled() bool { return orBool(a.Enabled, false) }
+
+// EffectiveMode 返回归一后的名单模式：allow / deny；其余（含空串）归 off。
+func (a Access) EffectiveMode() string {
+	if !a.EffectiveEnabled() {
+		return "off"
+	}
+	switch strings.ToLower(strings.TrimSpace(a.Mode)) {
+	case "allow":
+		return "allow"
+	case "deny":
+		return "deny"
+	default:
+		return "off"
+	}
+}
+
+// EffectiveCheckUsersInGroup 返回用户名单是否也在群里生效；未配置时按 true。
+func (a Access) EffectiveCheckUsersInGroup() bool { return orBool(a.CheckUsersInGroup, true) }
+
+// EffectiveBypassSuperUsers 返回超管是否绕过名单；未配置时按 true。
+func (a Access) EffectiveBypassSuperUsers() bool { return orBool(a.BypassSuperUsers, true) }
+
+// EffectiveLogDrops 返回是否记录每条被丢弃的消息；未配置时按 false。
+func (a Access) EffectiveLogDrops() bool { return orBool(a.LogDrops, false) }
+
 // EffectiveEnabled 返回是否启用混合检索；未配置时默认关闭。
 func (r Retrieval) EffectiveEnabled() bool { return orBool(r.Enabled, false) }
 

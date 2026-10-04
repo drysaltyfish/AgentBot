@@ -9,13 +9,10 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/drysaltyfish/agentbot/internal/reload"
-
-	"github.com/drysaltyfish/agentbot/internal/agent"
 	"github.com/drysaltyfish/agentbot/internal/config"
-	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/policy"
+	"github.com/drysaltyfish/agentbot/internal/reload"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/transport"
 )
@@ -53,28 +50,8 @@ func loadPolicy(cfg *config.Config, lg *observe.Logger) (*policy.Policy, error) 
 	return p, nil
 }
 
-// policyRole 把一次事件映射成权限表中的角色（F-53）。
-//
-// 超管优先于平台角色：仓库里"谁说了算"的唯一来源是 moderation.super_users，
-// 同一件事不该有第二份名单——两份名单迟早会不一致，而不一致的那次就是提权。
-func policyRole(ev *event.Event, supers map[int64]struct{}) string {
-	if ev == nil {
-		return policy.RoleEveryone
-	}
-	if _, ok := supers[ev.UserID]; ok {
-		return policy.RoleSuperUser
-	}
-	switch agentRole(ev) {
-	case agent.RoleOwner:
-		return policy.RoleOwner
-	case agent.RoleAdmin:
-		return policy.RoleAdmin
-	case agent.RoleMember, agent.RolePrivate:
-		return policy.RoleMember
-	default:
-		return policy.RoleEveryone
-	}
-}
+// 角色解析见 access.go 的 roleForEvent：显式指定 > 超管名单 > 平台角色 > everyone。
+// 这里不再单独实现一份，避免出现两处判定彼此漂移。
 
 // policyState 持有当前生效的权限表，支持原子替换（F-24 的"权限表"观察项）。
 //

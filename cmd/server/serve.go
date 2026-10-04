@@ -262,10 +262,10 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 		return 1
 	}
 	policyTables := newPolicyState(policyTable)
-	superUsers := make(map[int64]struct{}, len(cfg.Moderation.SuperUsers))
-	for _, id := range cfg.Moderation.SuperUsers {
-		superUsers[id] = struct{}{}
-	}
+	// F-58 运维扩展：名单（路由层直接丢弃）与"QQ 号 → 角色"的显式指定。
+	// 超管名单取 moderation.super_users 与 access.roles.superuser 的并集，只保留这一份。
+	accessCtl := buildAccessControls(cfg, lg)
+	superUsers := superUsersFrom(cfg, accessCtl.Roles)
 
 	personaReg, personaMgr, personaErr := buildPersonas(cfg, personaStoreAdapter{st: st}, lg)
 	if personaErr != nil {
@@ -311,6 +311,10 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 		}),
 		router.WithObserver(routeMetrics{cat: catalog}),
 	)
+
+	// 名单判定挂在**最前面**：命中即丢弃，后面的审查、连接、会话都不会发生。
+	// 先注册先执行，因此它必须在这行之前没有任何 pre 钩子时注册。
+	engine.UsePre(accessRule(accessCtl, superUsers, catalog, auditLog, lg))
 
 	auth := transport.NewAuth(
 		stringOr(cfg.Transport.AccessToken, ""),
@@ -454,7 +458,7 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 			UserID:      c.Event.UserID,
 			Text:        text,
 			TraceID:     observe.TraceID(c),
-			Role:        agentRole(c.Event),
+			Role:        agentRoleFor(c.Event, accessCtl, superUsers),
 			ShouldReply: shouldReply,
 			SpeakerID:   groupScopedUserID(c.Event.UserID, c.Event.GroupID),
 			SpeakerName: speakerDisplayName(c.Event.Sender, c.Event.GroupID),
@@ -476,7 +480,8 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 		return 1
 	}
 	if modEngine != nil {
-		engine.UsePre(moderationPreHook(modEngine, catalog, auditLog, lg))
+		engine.UsePre(moderationPreHook(modEngine, catalog, auditLog, lg,
+			func(ev *event.Event) agent.Role { return agentRoleFor(ev, accessCtl, superUsers) }))
 	}
 	// F-71：管理命令（/help、/ban、/unban、/banlist）。
 	// 注意：/switch 已由既有路由处理，这里不重复注册——两条授权路径比没有更难维护。
@@ -585,7 +590,9 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 			Named("switch").
 			Priority(router.PriorityEarly).
 			Block(true).
-			Handle(func(c *router.Ctx) { switchCommand(c, toggles, sender) })
+			Handle(func(c *router.Ctx) {
+				switchCommand(c, toggles, sender, roleForEvent(c.Event, accessCtl, superUsers))
+			})
 	}
 
 	routes.OnMessage(replyRule(cfg)).
@@ -673,7 +680,7 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 		}
 
 		// F-53：把已解析的角色放进 ctx——提示词侧渲染与执行侧拦截都用它。
-		ectx := policy.WithRole(eventTraceContext(listenCtx, ev), policyRole(ev, superUsers))
+		ectx := policy.WithRole(eventTraceContext(listenCtx, ev), roleForEvent(ev, accessCtl, superUsers))
 		eventQueue.Submit(eventJob{ctx: ectx, event: ev, caller: caller})
 	}
 

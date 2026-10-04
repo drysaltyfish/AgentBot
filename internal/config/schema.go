@@ -52,6 +52,7 @@ const (
 
 // Config 是 AgentBot 的全部配置。
 type Config struct {
+	Access       Access       `yaml:"access"`
 	Store        Store        `yaml:"store"`
 	Transport    Transport    `yaml:"transport"`
 	LLM          LLM          `yaml:"llm"`

@@ -153,6 +153,33 @@ WantedBy=multi-user.target
 | 环境变量 XXX 未设置 | 某个 `${VAR}` 引用指向不存在的环境变量（这是刻意的：静默变空串比启动失败更难查） |
 | 权限表 / 人格 / 敏感词正则非法 | fail-fast：安全与提示词资产配错不允许带病启动 |
 | 打开数据库失败 | store.path 不可写或磁盘损坏；不会降级为内存 |
+| 名单模式未写 / allow 模式名单为空 | access 的 fail-fast：防止"以为开了其实没开"或"把所有人挡在门外" |
+
+### 2.8 常用配置：超管与名单（按 QQ 号）
+
+只处理指定的群与人（其余消息在路由层直接丢弃）：
+
+@@@yaml
+access:
+  enabled: true
+  mode: allow                 # 白名单；deny 则是黑名单
+  users: [10001, 10002]       # 允许的 QQ 号
+  groups: [123456789]         # 允许的群号
+  check_users_in_group: true  # 群里也要求人在名单里
+  roles:
+    superuser: [10001]        # 超管（可用全部管理命令、永不封禁、绕过名单）
+    admin: [10002]            # policy 角色，可用 /switch
+@@@
+
+超管也可以继续写在原来的位置（两者取并集）：
+
+@@@yaml
+moderation:
+  enabled: true               # 需要 /ban 等命令时开启
+  super_users: [10001]
+@@@
+
+细则（角色能力对照、名单语义、审计与指标）见第 3.7 节与第 4.2 节。
 
 ---
 
@@ -228,27 +255,70 @@ WantedBy=multi-user.target
 
 命令的每一次调用（无论通过与否）都会进审计。
 
-### 3.7 群管理与防刷
+### 3.7 谁可以用它：名单与角色（按 QQ 号）
+
+- **名单**（access，默认关闭）：两种模式——allow（白名单，只有名单内处理）、deny（黑名单，名单内丢弃）。
+  命中即在**路由层直接丢弃**：不匹配路由、不建会话、不落库、不产生模型调用。
+  名单按 **QQ 号**与**群号**配置；用户名单可以用 check_users_in_group 控制"是否在群里也生效"。
+- **看得到内容 vs 看不到内容**：名单只看得到 QQ 号/群号（最省事、最彻底）；
+  如果规则需要看消息内容（敏感词等），那是 moderation 的职责，两者可以同时开。
+- **超管绕过名单**：默认开启，避免"白名单配错把自己锁在门外"——那种情况只能改文件重启。
+- **用 QQ 号指定角色**（access.roles）：superuser / owner / admin / member，
+  优先于平台上报的群成员角色。同一个 QQ 写在多个角色里时按权限取高。
+- **审计与指标**：每次丢弃都进审计（inbound_blocked）与 events_dropped 指标；
+  log_drops 打开时再额外逐条记日志。
+
+#### 怎么设置超管（按 QQ 号）
+
+超级管理员 = **moderation.super_users** 与 **access.roles.superuser** 的并集（只有这一份名单），
+拥有：聊天内管理命令授权、policy 的 superuser 角色、永不封禁、绕过名单。
+
+@@@yaml
+moderation:
+  super_users: [10001]      # 最直接的写法：超管 QQ 号
+  # 需要 /ban 等命令时还要开：enabled: true
+
+# 等价的显式角色写法（推荐，角色语义更清楚）：
+access:
+  roles:
+    superuser: [10001]      # 超管
+    owner:     [10002]      # policy 的最强角色；也能用 /switch
+    admin:     [10003]      # policy 角色；能用 /switch
+    member:    [10004]      # 普通成员（一般不用显式配）
+@@@
+
+角色能力对照：
+
+| 角色 | 管理命令 | policy 权限表 | 其他 |
+|---|---|---|---|
+| superuser | 全部（/help /ban /unban /banlist /cost /persona /prompt-hash） | 内置表里权限最高 | 永不封禁、绕过名单 |
+| owner | /switch | 内置表里次高 | 平台上报的群主也是这一档 |
+| admin | /switch | 内置表：不能禁言 | 平台上报的群管理员也是这一档 |
+| member | — | 内置表：只有 send_msg | 默认档 |
+
+> 平台上报的 owner/admin 无需配置；access.roles 用来**覆盖**它们（例如把某个 QQ 直接指定为超管）。
+
+### 3.8 群管理与防刷
 
 - **入站内容审查**（可选）：敏感词命中后按 mask（脱敏放行）或 block（拦截）处理；词表支持内联 + 文件（每行一个词，支持 # 注释），并且**热加载**。
 - **黑名单与防刷**（可选）：封禁用户/群；窗口内超阈值或连续重复消息触发临时封禁；超管永不封禁。
 - **限速**（可选，默认关闭）：令牌桶按用户与群限额，超限事件被整条丢弃（连「只记录」的兜底路由也不执行）；参数**热加载**。
 - **功能开关**：/switch 按群隔离，状态落盘。
 
-### 3.8 成本与缓存
+### 3.9 成本与缓存
 
 - **成本统计与配额**（可选）：按真实 usage 记账，支持 global / session / user 三个维度与 day / month / total 周期；软限告警、硬限在调用前拒绝（拒绝发生在花钱之前）。
 - **语义缓存**（可选，默认关闭）：常见问题命中缓存可直接作答，零 token；命中条件是「问题相似度达标 + 上下文指纹（人格/系统提示词）一致」；带工具调用的轮次不缓存。
 - **前缀缓存友好**：提示词前缀逐字节稳定，命中率可在 --stats 与指标里查；提示词快照记录每轮指纹，并区分「记忆变更（预期）」与「前缀意外分歧（告警）」。
 
-### 3.9 可观测性
+### 3.10 可观测性
 
 - **结构化日志**：JSON 行 + 组件标签 + trace_id；debug_content 打开时可记录内容（默认只记长度与摘要）。
 - **指标**：上述所有开关性的能力都有对应计数/耗时指标，/metrics 直接抓。
 - **审计**：管理员命令、封禁、审查拦截、审批等待、出站消息等安全相关事件，落地 JSONL 并可同时写 stdout。**审计不可关闭**。
 - **分布式追踪**：入站事件建立 W3C trace 上下文，日志与出站 traceparent 一致；采样默认 1%（传播不受采样影响）。
 
-### 3.10 稳定性与安全
+### 3.11 稳定性与安全
 
 - **优雅关闭**：收到信号后按预算关闭组件（默认 10s），期间不再接新事件，在途等待会被持久化。
 - **在途恢复**：交互式等待与审批落 SQLite，重启后至少能通知原会话，而不是让用户一直干等。
@@ -265,7 +335,7 @@ WantedBy=multi-user.target
 一份 YAML，全部字段见 [config.example.yaml](config.example.yaml)（带注释）与 internal/config/sections.go（唯一 schema）。
 本节按**特性**组织，逐项解释每个可配置项。默认值一栏写「未配置时」的解析结果。
 
-### 4.0 通用约定
+### 4.1 通用约定
 
 | 约定 | 含义 |
 |---|---|
@@ -275,7 +345,38 @@ WantedBy=multi-user.target
 | 校验时机 | 启动时全部校验并一次性报告全部问题（F-25）；CI 有测试保证示例配置的每个键都在 schema 里存在 |
 | 脱敏 | --check-config 输出的密钥一律替换为掩码 |
 
-### 4.1 transport：平台连接
+### 4.2 access：名单与角色（按 QQ 号 / 群号）
+
+默认关闭。开启后，名单外的消息在**路由层直接丢弃**（不匹配路由、不建会话、不落库、不调用模型）。
+
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| enabled | bool | false | 是否启用名单 |
+| mode | string | 无 | allow（白名单）/ deny（黑名单）；启用时必须显式写，否则启动失败 |
+| users | []int64 | 空 | 名单里的 **QQ 号** |
+| groups | []int64 | 空 | 名单里的**群号** |
+| check_users_in_group | bool | true | 用户名单是否也在群里生效：allow 模式下为 true 时要求"群在名单 + 人在名单"；deny 模式下为 true 时群内这些人也会被丢弃 |
+| bypass_super_users | bool | true | 超管是否绕过名单。默认绕过以避免"配错白名单把自己锁在门外"；关掉它且没有任何超管时启动失败 |
+| log_drops | bool | false | 是否逐条记录被丢弃的消息；无论开关，丢弃都会进审计与 events_dropped 指标 |
+| roles | map | 空 | 用 QQ 号直接指定角色，**独立于 enabled**：即使名单关闭，角色指定照样生效 |
+
+roles 支持的角色名（写错会让启动失败）：
+
+| 角色 | 效果 |
+|---|---|
+| superuser | 管理命令授权、policy 的 superuser 角色、永不封禁、绕过名单 |
+| owner | policy 的 owner 角色；可用 /switch |
+| admin | policy 的 admin 角色；可用 /switch |
+| member | policy 的 member 角色；可用来**降级**平台上报的 owner/admin |
+
+说明：
+
+- **超管名单是并集**：moderation.super_users ∪ access.roles.superuser。管理命令授权、权限判定、名单绕过读的都是这一份并集，不存在第二份"谁说了算"。
+- **角色优先级**：access.roles 显式指定 > 超管名单 > 平台上报的群成员角色 > everyone。
+- **冲突按权限取高**：同一个 QQ 被写进多个角色时取权限更高的那个，不让配置书写顺序决定权限。
+- **只会看到 QQ 号与群号**：需要按消息内容拦截（敏感词等）请用 moderation，两者可同时开启。
+
+### 4.3 transport：平台连接
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -287,7 +388,7 @@ WantedBy=multi-user.target
 | self_id | int64 | 0 | 机器人自身 QQ 号。用于识别「@ 自己」、会话键计算、自检目标 |
 | backoff | duration | 1s | 断线重连的退避基准 |
 
-### 4.2 llm：模型接入
+### 4.3 llm：模型接入
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -320,7 +421,7 @@ WantedBy=multi-user.target
 - **定价全 0 = 不统计成本**，但 token 与请求数照记——「花了多少 token」与「花了多少钱」是两件事。
 - system_prompt(_file) 在启动时固定，**刻意不热加载**：运行时读文件会让前缀在运行中变化、缓存全废。
 
-### 4.3 store：持久层
+### 4.4 store：持久层
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -329,14 +430,14 @@ WantedBy=multi-user.target
 
 开启 WAL、单写者串行化（BEGIN IMMEDIATE）、抖动重试；schema 统一在 internal/store/schema.go 声明并走版本化迁移。**打不开即启动失败**，不会退回内存。
 
-### 4.4 history：对话历史
+### 4.5 history：对话历史
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | file | string | 空 | 旧版 JSONL 历史路径；为空则不做旧数据导入（新数据始终落 SQLite） |
 | retention | int | 400 | **存储**保留条数上限，远大于呈现窗口；两者分开，recall_history 才召回得到窗口外的内容 |
 
-### 4.5 agent：Agent 循环、工具与记忆
+### 4.6 agent：Agent 循环、工具与记忆
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -363,7 +464,7 @@ WantedBy=multi-user.target
 | tool_hint.enabled | bool | 未配置按启用 | 追加工具使用提示（例如提示可用 recall_history 回溯） |
 | tool_hint.instruction | string | 内置提示 | 覆盖提示正文 |
 
-### 4.6 behavior：回复行为
+### 4.7 behavior：回复行为
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -373,7 +474,7 @@ WantedBy=multi-user.target
 | split_delay | duration | 400ms | 连发之间的间隔 |
 | max_segments | int | 4 | 单次回复最多拆几条，超出部分合并进最后一条 |
 
-### 4.7 prompt：提示词资产
+### 4.8 prompt：提示词资产
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -383,7 +484,7 @@ WantedBy=multi-user.target
 
 模板引擎会把静态前缀（基础提示词 + 记忆指令 + 身份 + 工具提示）按 dir 下的同名模板（如 system.tmpl）渲染；缺失则回退内置版本。模板在**启动期**校验（语法错误、变量名写错都会让启动失败），行尾统一为 LF。渲染结果只随配置变化，**不含时间**——静态前缀是所有会话共享的缓存前缀。
 
-### 4.8 policy：权限表
+### 4.9 policy：权限表
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -391,7 +492,7 @@ WantedBy=multi-user.target
 
 权限表用于两处：渲染进提示词的半静态段（按角色），以及在平台 API 出口硬拦截（角色不允许的 action 直接拒绝）。角色映射：超管名单（moderation.super_users）优先，其次平台上报的 owner / admin / member，其余按 everyone（fail-closed）。
 
-### 4.9 log：结构化日志
+### 4.10 log：结构化日志
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -401,13 +502,13 @@ WantedBy=multi-user.target
 | debug_content | bool | false | 是否记录消息正文；默认只记长度/摘要，避免日志成为内容泄漏渠道 |
 | queue_size | int | 1024 | 异步写队列容量；写不进去只丢日志并计数，不影响主流程 |
 
-### 4.10 shutdown：优雅关闭
+### 4.11 shutdown：优雅关闭
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | timeout | duration | 10s | 关闭预算：超时后强制结束，避免卡死在半关闭状态 |
 
-### 4.11 ratelimit：令牌桶限速
+### 4.12 ratelimit：令牌桶限速
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -419,7 +520,7 @@ WantedBy=multi-user.target
 
 键是用户与群；空闲键按 burst/rate×3 的 TTL 自动回收。**这几个参数热加载**：改配置文件后按新参数重建桶，从下一次请求生效。
 
-### 4.12 toggle：功能开关
+### 4.13 toggle：功能开关
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -427,7 +528,7 @@ WantedBy=multi-user.target
 | default_on | bool | true | 未显式设置过的 (plugin, group) 的默认状态 |
 | file | string | 空 | 开关状态落盘路径；为空仅进程内（重启即丢） |
 
-### 4.13 audit：审计日志
+### 4.14 audit：审计日志
 
 审计**不可关闭**（规格要求），只能调去处与内容保留量。
 
@@ -438,7 +539,7 @@ WantedBy=multi-user.target
 | queue_size | int | 4096 | 异步队列容量；满或写失败只丢审计并计数 |
 | content_limit | int | 20 | 用户内容只保留前 N 个字符，其余以 …(len=N) 代替 |
 
-### 4.14 ops：指标与探针
+### 4.15 ops：指标与探针
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -448,7 +549,7 @@ WantedBy=multi-user.target
 | ready_cache_ttl | duration | 10s | /readyz 结果缓存时长 |
 | probe_timeout | duration | 1s | 单次依赖检查超时 |
 
-### 4.15 singleflight：单飞（反并发）
+### 4.16 singleflight：单飞（反并发）
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -456,7 +557,7 @@ WantedBy=multi-user.target
 | key | string | user_group | user（按用户）或 user_group（用户+群） |
 | notice | bool | false | 被拒绝时是否回一句「正在处理中」 |
 
-### 4.16 moderation：入站审查、黑名单与防刷
+### 4.17 moderation：入站审查、黑名单与防刷
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -466,13 +567,13 @@ WantedBy=multi-user.target
 | action | string | mask | mask（脱敏放行）或 block（拦截） |
 | mask_replacement | string | 按命中长度生成等长掩码 | 脱敏替换串 |
 | blacklist_file | string | 空 | 封禁落盘路径；为空仅进程内（重启即丢） |
-| super_users | []int64 | 空 | 永不封禁的超管，同时是管理命令的授权名单 |
+| super_users | []int64 | 空 | 超管 QQ 号：永不封禁、管理命令授权、policy 的 superuser 角色。与 access.roles.superuser 取**并集**（见 4.2） |
 | antispam.window | duration | 10s | 速率统计窗口 |
 | antispam.max_messages | int | 20 | 窗口内允许的最大消息数 |
 | antispam.ban_duration | duration | 60s | 触发后的临时封禁时长 |
 | antispam.duplicate_repeat | int | 5 | 连续相同消息的阈值 |
 
-### 4.17 sandbox：工具执行沙箱
+### 4.18 sandbox：工具执行沙箱
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -488,7 +589,7 @@ WantedBy=multi-user.target
 
 注意：本仓库的沙箱是**策略层**实现（白名单 + 结构化拒绝），不是操作系统级隔离（无容器/命名空间）；需要强隔离请把进程本身放进容器。
 
-### 4.18 cost：成本统计与配额
+### 4.19 cost：成本统计与配额
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -509,7 +610,7 @@ WantedBy=multi-user.target
 | action | deny / downgrade / warn | 触限动作；**downgrade 目前未强制**（按请求切模型需要协议层支持），会告警并继续用原模型 |
 | downgrade_model | string | downgrade 动作建议使用的模型名（仅用于告警文案） |
 
-### 4.19 semcache：语义缓存
+### 4.20 semcache：语义缓存
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -522,7 +623,7 @@ WantedBy=multi-user.target
 
 命中条件 = 问题相似度达标 **且** 上下文指纹（人格 / 系统提示词）一致；缓存前会过一遍出口过滤链；带工具调用的轮次不进缓存。
 
-### 4.20 stream：流式增量发送
+### 4.21 stream：流式增量发送
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -536,7 +637,7 @@ WantedBy=multi-user.target
 
 只在**直连模型**路径（agent.enabled=false）生效；ReAct 路径开着会在启动时告警并自动退回整段发送。
 
-### 4.21 retrieval：历史召回
+### 4.22 retrieval：历史召回
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/drysaltyfish/agentbot/internal/agent"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
+	"github.com/drysaltyfish/agentbot/internal/policy"
 	"github.com/drysaltyfish/agentbot/internal/router"
 	"github.com/drysaltyfish/agentbot/internal/toggle"
 )
@@ -14,7 +14,7 @@ import (
 // switchCommand 处理 /switch <plugin> on|off（F-19）。
 //
 // 只在群里生效（开关按群隔离），且限 owner/admin——否则任何群成员都能把功能关掉。
-func switchCommand(c *router.Ctx, toggles *toggle.Toggle, sender *outbound.Sender) {
+func switchCommand(c *router.Ctx, toggles *toggle.Toggle, sender *outbound.Sender, role string) {
 	target := outbound.PrivateTarget(c.Event.UserID)
 	if c.Event.GroupID != 0 {
 		target = outbound.GroupTarget(c.Event.GroupID)
@@ -30,7 +30,8 @@ func switchCommand(c *router.Ctx, toggles *toggle.Toggle, sender *outbound.Sende
 		reply("这个开关按群生效，请在群里使用。")
 		return
 	}
-	if role := agentRole(c.Event); role != agent.RoleOwner && role != agent.RoleAdmin {
+	// 角色来自 roleForEvent：access.roles 的显式指定同样算数。
+	if role != policy.RoleOwner && role != policy.RoleAdmin {
 		reply("只有群管理可以改这个开关。")
 		return
 	}
