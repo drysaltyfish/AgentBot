@@ -61,12 +61,11 @@ F-36/F-37 已在本轮接入（LLM Evaluator + `agent.paradigm`），故不在�
 |---|---|---|
 | 分层记忆 / 混合检索 | F-49 / F-51 | 需 SQLite `TierStore`（否则重启丢记忆，是行为退化） |
 | 摘要树 | F-52 | 需注入 `Summarizer`/`Embedder` |
-| 流式增量发送 | F-64 | 需接 outbound 发送路径 |
 | 配置热加载（其余资产，**部分已接**） | F-24 | 已交付"敏感词表"与"人格目录"两项；开关读时查 store（外部改文件即生效）；提示词正文刻意不热加载（F-65 前缀缓存前提）；限速参数未热加载 |
 
 F-65/F-82 已于 21059e7 接入：三段式前缀（静态/半静态/动态）、`/prompt-hash`、
-SQLite 会话人格持久化、`/persona` 切换与 RouteKey 喂半静态段；F-66 会话维度与
-F-72 出站 traceparent 传播随后补齐，因此都不在此表。
+SQLite 会话人格持久化、`/persona` 切换与 RouteKey 喂半静态段；F-66 会话维度、
+F-72 出站 traceparent、F-63 语义缓存与 F-64 流式发送随后补齐，因此都不在此表。
 
 剩余工作的入口、前置条件、风险与已知偏离，见 [HANDOFF.md](HANDOFF.md)。
 
@@ -335,7 +334,7 @@ gofmt -l cmd internal          # 格式检查（应无输出）
 | F-27 | Provider 注册与多供应商路由 | P1 |
 | F-29 | 流式工具调用聚合 | P1 |
 | F-31 | 结构化输出 | P1 |
-| F-64 | 流式增量发送 | P1 |
+| F-64 | 流式增量发送 | P1 | **已接入**：`DirectAgent.RunStream` + 回复链路按 `agent.StreamingAgent` 分支；增量走统一出口与过滤链、不整段重发；ReAct 路径自动退回整段（配置开着时启动告警） |
 | F-74 | 黄金测试 | P1 |
 
 ### B. 部分实现（M3 计划内，5 条；已有代码但未按 Feature 完整验收）

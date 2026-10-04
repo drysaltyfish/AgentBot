@@ -86,6 +86,11 @@ type Deps struct {
 	// SemcacheTokens 估算一条答案的 token 数（"省下多少"的指标用它）；
 	// nil 时按 rune 数 / 4 估算。
 	SemcacheTokens func(answer string) int
+	// NewStreamSplitter 为一次回复构造流式切分器（F-64）；nil 表示禁用流式。
+	//
+	// 由组合根注入：阈值与"平台是否支持编辑消息"都属于配置，而切分器必须绑定
+	// 本次回复的目标与 ctx。只有实现了 agent.StreamingAgent 的 Brain 才会用到它。
+	NewStreamSplitter func(ctx context.Context, target outbound.Target) *llm.StreamSplitter
 }
 
 // Pipeline 执行一次回复轮次。
@@ -209,14 +214,42 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 		return
 	}
 
+	// 发送目标在生成前就要定下来：流式切分器需要它绑定增量发送器。
+	target := outbound.PrivateTarget(j.UserID)
+	if j.GroupID != 0 {
+		target = outbound.GroupTarget(j.GroupID)
+	}
+
 	// 两条路径（ReAct / 直连）在调用方看完全同形。
 	// 记忆的注入位置与呈现窗口由装配器按 ADR-0002 处理（system 之后、历史之前）。
-	out, runErr := p.deps.Brain.Run(callCtx, agent.Input{
+	brainInput := agent.Input{
 		Query:      queryText,
 		History:    items,
 		SessionKey: j.Key,
 		Role:       j.Role,
-	})
+	}
+	// F-64：只有实现了 StreamingAgent 的 Brain 才会边走边发（当前是 DirectAgent）。
+	// 组合根没注入切分器、或 Brain 不支持时，退回整段发送——对外语义不变。
+	var (
+		out      *agent.Output
+		runErr   error
+		streamed bool
+	)
+	if spl := p.streamSplitter(callCtx, target); spl != nil {
+		if sa, ok := p.deps.Brain.(agent.StreamingAgent); ok {
+			out, runErr = sa.RunStream(callCtx, brainInput, spl)
+			streamed = true
+			if runErr != nil && strings.TrimSpace(spl.Full()) == "" {
+				// 一个字都没发出去就失败：退回非流式，避免用户"看起来没反应"。
+				// 已经发出去一部分时不能回退——那会把同一段内容再说一遍。
+				streamed = false
+				out, runErr = p.deps.Brain.Run(callCtx, brainInput)
+			}
+		}
+	}
+	if !streamed {
+		out, runErr = p.deps.Brain.Run(callCtx, brainInput)
+	}
 
 	// F-85：把这一轮的用量累加进台账。失败只告警——用量统计与用户请求的价值不对等，
 	// 不能让它拖垮回复。
@@ -362,9 +395,13 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 		"cache_hit_ratio", fmt.Sprintf("%.1f%%", out.Usage.CacheHitRatio()*100),
 	)
 
-	target := outbound.PrivateTarget(j.UserID)
-	if j.GroupID != 0 {
-		target = outbound.GroupTarget(j.GroupID)
+	// F-64：增量已经通过 StreamSender 逐条发出（仍走 Sender → 出口过滤链）。
+	// 这里**不再整段重发**，否则用户会收到两遍。
+	if streamed {
+		rlog.Info("streamed reply delivered incrementally",
+			"runes", len([]rune(text)),
+			"cache_hit_ratio", fmt.Sprintf("%.1f%%", out.Usage.CacheHitRatio()*100))
+		return
 	}
 
 	// 真人是一条一条发的：按空行拆成多条分别发送，而不是一整块砸过去。
@@ -391,6 +428,14 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 		"cache_hit_ratio", fmt.Sprintf("%.1f%%", out.Usage.CacheHitRatio()*100),
 		"cache_hit_tokens", out.Usage.PromptCacheHitTokens,
 		"cache_miss_tokens", out.Usage.PromptCacheMissTokens)
+}
+
+// streamSplitter 为一次回复构造流式切分器；未启用时返回 nil。
+func (p *Pipeline) streamSplitter(ctx context.Context, target outbound.Target) *llm.StreamSplitter {
+	if p.deps.NewStreamSplitter == nil {
+		return nil
+	}
+	return p.deps.NewStreamSplitter(ctx, target)
 }
 
 // semcacheFingerprint 组合语义缓存的上下文指纹：系统提示词哈希 + 会话人格指纹。

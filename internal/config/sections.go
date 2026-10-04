@@ -250,6 +250,27 @@ type Singleflight struct {
 	Notice *bool `yaml:"notice"`
 }
 
+// Stream 描述流式增量发送（F-64）。默认关闭。
+//
+// 关闭是默认值：逐条发送会改变用户看到回复的节奏，也可能触发平台限流；
+// 开启前应当确认目标平台能接受高频短消息。
+type Stream struct {
+	// Enabled 为 true 时启用；未配置时默认关闭。
+	Enabled *bool `yaml:"enabled"`
+	// MaxChars 是触发发送的长度阈值；<=0 时用 llm.DefaultFlushChars（40）。
+	MaxChars *int `yaml:"max_chars"`
+	// MaxInterval 是"距上次发送超过此时长即触发"；<=0 时用 800ms。
+	MaxInterval *Duration `yaml:"max_interval"`
+	// MinInterval 是发送频率上限；<=0 时用 800ms。
+	MinInterval *Duration `yaml:"min_interval"`
+	// FirstMinChars 是首段最小长度；<=0 时用 llm.DefaultFirstMinChars（8）。
+	FirstMinChars *int `yaml:"first_min_chars"`
+	// EditMessages 为 true 时用"编辑消息"表达改写；平台不支持时会中止该流。
+	EditMessages *bool `yaml:"edit_messages"`
+	// TypingHint 非空时在首段正文前单发一条提示（如"正在输入…"）。
+	TypingHint string `yaml:"typing_hint"`
+}
+
 // Semcache 描述语义缓存（F-63）。默认关闭。
 //
 // 关闭是刻意的默认：缓存会改变"同一句话在不同时刻得到什么回答"，

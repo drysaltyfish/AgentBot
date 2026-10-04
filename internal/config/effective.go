@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/semcache"
 )
 
@@ -236,6 +237,36 @@ func (m Moderation) EffectiveSpamWindow() time.Duration {
 func (m Moderation) EffectiveSpamMaxMessages() int {
 	return orPositive(m.AntiSpam.MaxMessages, defaultModerationSpamMaxMessages)
 }
+
+// EffectiveEnabled 返回是否启用流式增量发送；未配置时默认关闭。
+func (s Stream) EffectiveEnabled() bool { return orBool(s.Enabled, false) }
+
+// EffectiveMaxChars 返回触发发送的长度阈值；未配置或非正时取 llm 默认值。
+func (s Stream) EffectiveMaxChars() int { return orPositive(s.MaxChars, llm.DefaultFlushChars) }
+
+// EffectiveFirstMinChars 返回首段最小长度；未配置或非正时取 llm 默认值。
+func (s Stream) EffectiveFirstMinChars() int {
+	return orPositive(s.FirstMinChars, llm.DefaultFirstMinChars)
+}
+
+// EffectiveMaxInterval 返回时间触发阈值；未配置或非正时取 llm 默认值。
+func (s Stream) EffectiveMaxInterval() time.Duration {
+	if s.MaxInterval == nil || s.MaxInterval.D <= 0 {
+		return llm.DefaultFlushInterval
+	}
+	return s.MaxInterval.D
+}
+
+// EffectiveMinInterval 返回发送频率上限；未配置或非正时取 llm 默认值。
+func (s Stream) EffectiveMinInterval() time.Duration {
+	if s.MinInterval == nil || s.MinInterval.D <= 0 {
+		return llm.DefaultFlushInterval
+	}
+	return s.MinInterval.D
+}
+
+// EffectiveEditMessages 返回是否用"编辑消息"表达改写；未配置时默认关闭。
+func (s Stream) EffectiveEditMessages() bool { return orBool(s.EditMessages, false) }
 
 // EffectiveEnabled 返回是否启用语义缓存；未配置时默认关闭。
 func (s Semcache) EffectiveEnabled() bool { return orBool(s.Enabled, false) }

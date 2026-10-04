@@ -287,3 +287,15 @@ semcache:
   max_entries: 4096
   skip_words: []             # 在内置跳过列表（时间/天气等）之外追加的易变话题关键词
   skip_patterns: []          # 附加正则；语法错误会让启动失败
+
+# ---- 流式增量发送（F-64）----
+# 默认关闭。只在"直连模型"路径生效（agent.enabled=false）：ReAct 每轮都在等完整的
+# 工具调用结果，边流边发会让用户先看到半截文本。增量仍走统一出口与过滤链。
+stream:
+  enabled: false
+  max_chars: 40              # 缓冲达到该长度即发送
+  max_interval: 800ms        # 距上次发送超过该时长即发送
+  min_interval: 800ms        # 发送频率上限，超限合并到下次
+  first_min_chars: 8         # 首段最小长度，避免先抛半个字
+  edit_messages: false       # 平台支持编辑消息时才开；否则改写会中止该流
+  typing_hint: ""            # 非空时首段前单发一条提示，如"正在输入…"

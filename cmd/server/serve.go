@@ -375,12 +375,20 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		return 1
 	}
 
+	// F-64：流式增量发送（默认关闭）。只有 DirectAgent 会用到它——ReAct 每轮
+	// 都在等完整的工具调用结果，边流边发会让用户先看到半截文本。
+	streamFactory := buildStreamSplitterFactory(cfg, sender, lg)
+	if streamFactory != nil && cfg.Agent.Enabled {
+		lg.Component("stream").Warn("llm streaming is enabled but the ReAct agent cannot stream tool rounds; replies will be sent in one piece")
+	}
+
 	pipeline := reply.New(reply.Deps{
 		Brain: brain, Sender: sender, Sessions: sessions, Assembler: asm,
 		Memory: mem, AutoMem: autoMem, Timeout: timeout, Shape: shape,
 		Store: st, Price: price, Log: lg,
 		Audit: auditLog, Catalog: catalog,
-		Semcache: semCache,
+		Semcache:          semCache,
+		NewStreamSplitter: streamFactory,
 		SemcacheFingerprint: func(ctx context.Context, key session.Key) string {
 			if personaMgr == nil {
 				return ""

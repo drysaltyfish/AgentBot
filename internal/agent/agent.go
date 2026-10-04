@@ -88,6 +88,17 @@ type Agent interface {
 	Run(ctx context.Context, in Input) (*Output, error)
 }
 
+// StreamingAgent 是 Agent 的**可选**能力：生成过程中把增量交给调用方（F-64）。
+//
+// 为什么只有部分实现提供它：ReAct 的每一轮都在等完整的工具调用结果，
+// 边流边发会让用户先看到半截文本、随后又收到工具调用之后的新文本；
+// 而 DirectAgent 一次模型调用就产出最终回答，流出多少就是回答多少。
+// 调用方用类型断言决定走哪条路——语义由接口表达，而不是让配置去猜。
+type StreamingAgent interface {
+	// RunStream 消费模型流：每个分片交给 splitter，返回聚合后的结果。
+	RunStream(ctx context.Context, in Input, splitter *llm.StreamSplitter) (*Output, error)
+}
+
 // MessageAssembler 把历史条目、记忆块与当前输入装配成一次请求的消息序列。
 //
 // 定义在 agent 侧，让 agent 只依赖"能装配"这一能力，而不依赖具体实现。
@@ -141,3 +152,70 @@ func (a *DirectAgent) Run(ctx context.Context, in Input) (*Output, error) {
 }
 
 var _ Agent = (*DirectAgent)(nil)
+var _ StreamingAgent = (*DirectAgent)(nil)
+
+// RunStream 实现 StreamingAgent：边流边发，返回与 Run 同形的结果。
+//
+// 流式与整段共用同一个装配点（Assembler）：F-64 明确"不要改动请求侧"——
+// 消息序列必须与整段路径逐字节相同，否则流式一开就让前缀缓存失效。
+func (a *DirectAgent) RunStream(ctx context.Context, in Input, splitter *llm.StreamSplitter) (*Output, error) {
+	out := &Output{}
+	if a == nil || a.LLM == nil {
+		return out, ErrNoLLM
+	}
+	if a.Assembler == nil {
+		return out, ErrNoAssembler
+	}
+	if splitter == nil {
+		// 没给切分器就没有"边"可流：退回整段，而不是报错。
+		return a.Run(ctx, in)
+	}
+
+	messages := a.Assembler.BuildFor(ctx, in.SessionKey, in.History, "", in.Query)
+	ch, err := a.LLM.ChatStream(ctx, &llm.ChatRequest{Messages: messages})
+	if err != nil {
+		out.AddStep(Step{Type: StepObservation, Error: err.Error()})
+		return out, err
+	}
+	out.LLMCalls = 1
+	out.PromptDigest = llm.Digest(messages)
+
+	streamErr := consumeStream(ctx, ch, splitter)
+	out.Text = splitter.Full()
+	if streamErr != nil {
+		out.AddStep(Step{Type: StepObservation, Error: streamErr.Error()})
+		return out, streamErr
+	}
+	out.FinishReason = "stop"
+	out.AddStep(Step{Type: StepThought, Content: out.Text})
+	return out, nil
+}
+
+// consumeStream 顺序消费分片，把"错误"与"结束"都收敛成一次 Finish。
+//
+// 不能直接用 splitter.ConsumeStream：它会丢掉分片里的 Err（F-28 明确错误也走
+// channel），于是"模型中途报错"会表现成"回答提前结束"——用户看到半截话，
+// 日志里却没有任何线索。
+func consumeStream(ctx context.Context, ch <-chan llm.Chunk, splitter *llm.StreamSplitter) error {
+	for {
+		select {
+		case <-ctx.Done():
+			splitter.Finish()
+			return ctx.Err()
+		case c, ok := <-ch:
+			if !ok {
+				splitter.Finish()
+				return nil
+			}
+			if c.Err != nil {
+				splitter.Finish()
+				return c.Err
+			}
+			splitter.Feed(c)
+			if c.Done {
+				splitter.Finish()
+				return nil
+			}
+		}
+	}
+}

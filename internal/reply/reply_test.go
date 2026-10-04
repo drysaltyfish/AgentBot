@@ -406,3 +406,117 @@ func Test_F63_CacheHitGoesThroughTheSendChain(t *testing.T) {
 		t.Fatal("缓存命中必须经 Sender 发出（出口过滤链是唯一出口）")
 	}
 }
+
+// stubStreamBrain 同时实现 Agent 与 StreamingAgent，用于验证回复链路的分支选择。
+type stubStreamBrain struct {
+	out    *agent.Output
+	chunks []llm.Chunk
+	runs   int
+	stream bool
+}
+
+func (s *stubStreamBrain) Run(context.Context, agent.Input) (*agent.Output, error) {
+	s.runs++
+	return s.out, nil
+}
+
+func (s *stubStreamBrain) RunStream(_ context.Context, _ agent.Input, spl *llm.StreamSplitter) (*agent.Output, error) {
+	s.runs++
+	s.stream = true
+	for _, c := range s.chunks {
+		spl.Feed(c)
+	}
+	spl.Finish()
+	return s.out, nil
+}
+
+func testStreamFactory(sender *outbound.Sender) func(context.Context, outbound.Target) *llm.StreamSplitter {
+	return func(ctx context.Context, target outbound.Target) *llm.StreamSplitter {
+		ss := outbound.NewStreamSender(sender, target, outbound.StreamOptions{})
+		return llm.NewStreamSplitter(llm.StreamConfig{
+			MaxChars: 3, FirstMinChars: 1, Flush: ss.Handler(ctx),
+		})
+	}
+}
+
+// Test_F64_StreamedReplyIsSentIncrementallyWithoutDuplication 是 F-64 的核心验收：
+// 增量按句发出，且**不再整段重发**——否则用户会把同一段话看两遍。
+func Test_F64_StreamedReplyIsSentIncrementallyWithoutDuplication(t *testing.T) {
+	ctx := context.Background()
+	lg := testLogger(t)
+	mgr := testSessions(t)
+	caller := &recordingCaller{}
+	sender := outbound.NewSender(caller, outbound.New())
+	brain := &stubStreamBrain{
+		out:    &agent.Output{Text: "第一句。第二句。", FinishReason: "stop"},
+		chunks: []llm.Chunk{{Content: "第一句。"}, {Content: "第二句。"}, {Done: true, FinishReason: "stop"}},
+	}
+	p := New(Deps{
+		Brain: brain, Sessions: mgr, Sender: sender, Log: lg, Timeout: 5 * time.Second,
+		NewStreamSplitter: testStreamFactory(sender),
+	})
+	key := session.Key{SelfID: 1, GroupID: 2, UserID: 3}
+	p.Handle(ctx, testJob(key))
+
+	if !brain.stream {
+		t.Fatal("实现了 StreamingAgent 的 Brain 应走流式路径")
+	}
+	// 两句各触发一次增量发送；整段文本不得再发一遍。
+	if got := caller.count(); got != 2 {
+		t.Fatalf("发送次数=%d，want 2（两条增量，无整段重发）", got)
+	}
+	sess, ok := mgr.Get(key)
+	if !ok {
+		t.Fatal("会话未建立")
+	}
+	items, err := sess.Hist.Messages(ctx, key.String())
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("历史应只有 用户+助手 两条，实际 %d: %+v", len(items), items)
+	}
+	if items[1].Content != "第一句。第二句。" {
+		t.Fatalf("助手轮内容=%q", items[1].Content)
+	}
+}
+
+// Test_F64_StreamingDisabledSendsOneWholeReply 说明"没启用流式"时的行为完全不变。
+func Test_F64_StreamingDisabledSendsOneWholeReply(t *testing.T) {
+	ctx := context.Background()
+	lg := testLogger(t)
+	mgr := testSessions(t)
+	caller := &recordingCaller{}
+	sender := outbound.NewSender(caller, outbound.New())
+	brain := &stubStreamBrain{out: &agent.Output{Text: "整段回答", FinishReason: "stop"}}
+	p := New(Deps{Brain: brain, Sessions: mgr, Sender: sender, Log: lg, Timeout: 5 * time.Second})
+	p.Handle(ctx, testJob(session.Key{SelfID: 1, GroupID: 2, UserID: 3}))
+	if brain.stream {
+		t.Fatal("未注入切分器时不应走流式")
+	}
+	if got := caller.count(); got != 1 {
+		t.Fatalf("应整段发一条，实际 %d 条", got)
+	}
+}
+
+// Test_F64_NonStreamingBrainFallsBackToWholeReply 钉住 ReAct 的边界：
+// 只实现 Agent 的 Brain（如 ReactAgent）即使配置了流式也必须退回整段发送。
+func Test_F64_NonStreamingBrainFallsBackToWholeReply(t *testing.T) {
+	ctx := context.Background()
+	lg := testLogger(t)
+	mgr := testSessions(t)
+	caller := &recordingCaller{}
+	sender := outbound.NewSender(caller, outbound.New())
+	brain := &stubBrain{out: &agent.Output{Text: "整段回答", FinishReason: "stop"}}
+	p := New(Deps{
+		Brain: brain, Sessions: mgr, Sender: sender, Log: lg, Timeout: 5 * time.Second,
+		NewStreamSplitter: testStreamFactory(sender),
+	})
+	p.Handle(ctx, testJob(session.Key{SelfID: 1, GroupID: 2, UserID: 3}))
+	if brain.calls != 1 {
+		t.Fatalf("Brain 调用次数=%d", brain.calls)
+	}
+	if got := caller.count(); got != 1 {
+		t.Fatalf("不支持流式的 Brain 应整段发一条，实际 %d 条", got)
+	}
+}

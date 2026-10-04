@@ -49,21 +49,18 @@
 范围内的功能全部完成。剩余工作只有 §3.2 的接线；
 F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 
-### 3.2 接线（剩 4 处，按建议顺序）
+### 3.2 接线（剩 3 处，按建议顺序）
 
 ~~#1 admin 命令入口~~、~~#2 cost 会话维度~~、~~#3 agent.paradigm~~、~~#5 semcache~~、
-~~#8 trace~~、~~#10 F-82 剩余~~ 均已完成，不再列出。
+~~#7 stream->outbound~~、~~#8 trace~~、~~#10 F-82 剩余~~ 均已完成，不再列出。
 
 #4 分层记忆：SQLite TierStore 已完成，剩「切换 + MemoryAdmin + 迁移」。
-#7 stream→outbound：`StreamSplitter`/`StreamSender` 已就绪且有互连测试，
-剩的是把它接进回复路径（ReAct 每轮用非流式 Chat，需先定「哪些轮可以边流边发」）。
 
 | # | 项 | 入口 | 前置条件 / 风险 |
 |---|---|---|---|
 | 3 | ~~agent.paradigm（F-36/F-37）~~ **已完成** | — | 已接：LLM Evaluator + wrapParadigm；F-37 目前只有默认单 worker，无 workers 列表配置 |
 | 4 | agent.memory 切分层记忆（F-49/F-51） | buildAgent 里 memory 的构造处 | **SQLite TierStore 已完成**（`memory.NewSQLiteTierStore`，见 §2）；剩下的是切换本身：需要 (a) `TieredMemory` 实现 `MemoryAdmin`（forget/list），(b) 把既有 `memories` 表与 legacy JSONL 迁到 semantic 层。直接换实现会让已存记忆立刻搜不到 |
 | 6 | tree 摘要树（F-52） | 摄入路径 | 需要注入 Summarizer / Embedder |
-| 7 | stream -> outbound（F-64） | 发送路径 | llm.NewStreamSplitter{Flush: outbound.NewStreamSender(...).Handler(ctx)}；不要改动请求侧（前缀缓存） |
 | 9 | reload 其余资产（F-24） | 提示词/开关/限速 | **人格目录已接**（`watchPersonas` + 目录级指纹）。开关本来就"读时查 store"，外部改文件立即生效，无需监听。**提示词正文刻意不热加载**：它在启动时固定正是前缀缓存（F-65）的前提。限速参数仍未热加载（构造时定值） |
 
 ## 4. 已知偏离与诚实标注（不要当成"已完成"）
