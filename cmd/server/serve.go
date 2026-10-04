@@ -36,7 +36,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/transport"
 )
 
-func serve(cfg *config.Config, stderr io.Writer) int {
+func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 	timeout := cfg.Shutdown.EffectiveTimeout()
 
 	lg := observe.New(observe.Options{
@@ -494,20 +494,24 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 
 	// F-18：令牌桶限速（默认关闭）。超限事件会被整条丢弃——这是刻意的：
 	// 限速的目的就是让刷屏不产生任何 LLM 调用，代价远低于额度被打爆。
+	// F-24：规则**始终注册**，内部每次解引用当前参数，因此热加载（含"先关后开"）
+	// 只需一次原子写，不必也无法重建已注册的 mid 钩子。
+	userLimitHook := rateLimitedHook(catalog, auditLog, "user")
+	groupLimitHook := rateLimitedHook(catalog, auditLog, "group")
+	rateState := newRateLimitState(cfg.RateLimit, userLimitHook, groupLimitHook)
+	userRule, groupRule := rateState.Rules()
+	engine.UseMid(userRule)
+	engine.UseMid(groupRule)
 	if cfg.RateLimit.EffectiveEnabled() {
-		userLimit := router.NewLimiterManager[int64](
-			float64(cfg.RateLimit.EffectiveUserPerMinute())/60, float64(cfg.RateLimit.EffectiveUserBurst()))
-		groupLimit := router.NewLimiterManager[int64](
-			float64(cfg.RateLimit.EffectiveGroupPerMinute())/60, float64(cfg.RateLimit.EffectiveGroupBurst()))
-		engine.UseMid(userLimit.Rule(
-			func(c *router.Ctx) int64 { return c.Event.UserID },
-			rateLimitedHook(catalog, auditLog, "user")))
-		engine.UseMid(groupLimit.Rule(
-			func(c *router.Ctx) int64 { return c.Event.GroupID },
-			rateLimitedHook(catalog, auditLog, "group")))
 		lg.Component("ratelimit").Info("token bucket rate limiting is enabled",
 			"user_per_minute", cfg.RateLimit.EffectiveUserPerMinute(), "user_burst", cfg.RateLimit.EffectiveUserBurst(),
 			"group_per_minute", cfg.RateLimit.EffectiveGroupPerMinute(), "group_burst", cfg.RateLimit.EffectiveGroupBurst())
+	}
+
+	// F-24：限速参数热加载。与前面的资产不同，它监听的是**配置文件本身**，
+	// 因此重载要重建整个 Config 并校验；失败保留旧参数。
+	if w := watchRateLimit(listenCtx, configPath, rateState, userLimitHook, groupLimitHook, lg); w != nil {
+		defer w.Stop()
 	}
 
 	// F-17：单飞（反并发）。同一用户连点两次时，第二次在入口被拒。

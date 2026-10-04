@@ -57,5 +57,5 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *exportMem != "" {
 		return runExportMemories(cfg, *exportMem, stdout, stderr)
 	}
-	return serve(cfg, stderr)
+	return serve(cfg, *configPath, stderr)
 }

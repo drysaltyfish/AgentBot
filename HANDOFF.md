@@ -32,6 +32,7 @@
 | F-23 | 定期回收接入 Bot 生命周期（`app.Go`，不再是没人启动的 `StartReclaimer`） | Test_F23_ReclaimerIsOwnedByBotLifecycle（100 会话回收 + Shutdown 后回收器确实停止） |
 | F-49（持久化） | `memory.SQLiteTierStore`：分层记忆落 SQLite（id 走 tier_ids 统一分配器，scope 全程参与） | Test_F49_SQLiteTierStoreSurvivesReopen、Test_F49_TieredMemoryOverSQLiteEndToEnd |
 | F-63 | 语义缓存接在**回复链路**（会话键 + 人格指纹 + 出口过滤 + 历史一次到位）；`vector.TextBinary` 提供二值哈希向量化；命中/未命中/省下 token 进指标 | Test_F63_SecondIdenticalQuestionSkipsTheModel、Test_F63_ToolTurnsAreNotCached、Test_F63_CacheHitGoesThroughTheSendChain、Test_F63_BuildSemcacheFollowsConfig |
+| F-24（限速） | 限速改为「规则持有者 + 原子替换」：mid 规则启动时注册一次、内部解引用当前参数，热加载只需一次原子写；监听**配置文件本身**，校验失败保留旧参数 | Test_F24_RateLimitStateSwapsAtomically、Test_F24_RateLimitHotReloadFromConfigFile |
 | F-52 | 摘要树作为**第三条独立召回源**接入 `history.Hybrid`（摘要层检索，与 BM25/向量并列而非硬融合）；确定性拼接摘要 + 二值哈希聚类；按会话缓存、条目数变化重建 | Test_F52_TreeIsAnIndependentRecallSource、Test_F52_TreeRebuildsWhenHistoryGrows、Test_F52_WrapHistoryEnablesSummaryTree |
 | F-51 | `history.Hybrid`：BM25 + 二值向量 + RRF 融合，包装历史存储即生效；`recall_history` 靠既有 Searcher 断言自动改走检索；只对对话轮次建索引 | Test_F51_HybridSearchFindsKeywordHitWithContext、Test_F51_HybridSkipsNonConversationalEntries、Test_F51_WrapHistoryWithRetrievalFollowsConfig |
 | F-49（切换） | 分层记忆上线：Working/Episodic 落 tier 表，**Semantic 复用 F-87 扁平记忆表**（不另写判定）；`TieredMemory` 实现 `MemoryAdmin`；直连路径也开始注入记忆 | Test_F49_SemanticLayerReusesF87Dedup、Test_F49_TieredMemoryAdminForgetAndList、Test_F49_BuildAgentWiresTieredMemory、Test_F49_DirectAgentInjectsMemory |
@@ -52,17 +53,19 @@
 范围内的功能全部完成。剩余工作只有 §3.2 的接线；
 F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 
-### 3.2 接线（剩 1 处，按建议顺序）
+### 3.2 接线（剩 0 处）
 
+§3.2 列出的接线项全部完成：
 ~~#1 admin 命令入口~~、~~#2 cost 会话维度~~、~~#3 agent.paradigm~~、~~#4 分层记忆~~、
-~~#5 semcache~~、~~#6 tree 摘要树~~、~~#7 stream->outbound~~、~~#8 trace~~、~~#10 F-82 剩余~~
-均已完成。#4 的两半（F-49 分层记忆、F-51 混合检索）与 F-52 都接在检索链路上：
-`history.Hybrid` 包一层历史存储，摘要树是其中独立的一条召回源。
+~~#5 semcache~~、~~#6 tree 摘要树~~、~~#7 stream->outbound~~、~~#8 trace~~、
+~~#9 reload 其余资产~~、~~#10 F-82 剩余~~。
+
+范围（除 F-07/F-27 外）内没有已知的待接线项；§4 的偏离是「已交付但口径受限」，
+不是「没做」。
 
 | # | 项 | 入口 | 前置条件 / 风险 |
 |---|---|---|---|
 | 3 | ~~agent.paradigm（F-36/F-37）~~ **已完成** | — | 已接：LLM Evaluator + wrapParadigm；F-37 目前只有默认单 worker，无 workers 列表配置 |
-| 9 | reload 其余资产（F-24） | 提示词/开关/限速 | **人格目录已接**（`watchPersonas` + 目录级指纹）。开关本来就"读时查 store"，外部改文件立即生效，无需监听。**提示词正文刻意不热加载**：它在启动时固定正是前缀缓存（F-65）的前提。限速参数仍未热加载（构造时定值） |
 
 ## 4. 已知偏离与诚实标注（不要当成"已完成"）
 
