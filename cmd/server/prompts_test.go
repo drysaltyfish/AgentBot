@@ -36,13 +36,16 @@ func Test_F33_RenderedPrefixIsByteStable(t *testing.T) {
 	if first != second {
 		t.Fatalf("两次渲染必须逐字节相同:\n%q\n%q", first, second)
 	}
-	// 顺序即契约：基础 -> 记忆指令 -> 身份 -> 工具提示。
-	idx := func(s string) int { return strings.Index(first, s) }
-	if !(idx("基础提示词") < idx("关于记忆") || idx("关于记忆") == -1) {
-		t.Fatalf("基础提示词应在最前: %q", first)
+	// 顺序即契约：基础提示词 -> 记忆指令 -> 身份 -> 工具提示。
+	if !strings.HasPrefix(first, "基础提示词") {
+		t.Fatalf("基础提示词必须排在最前: %q", first)
 	}
-	if strings.Index(first, "你的 QQ 号是") < idx("基础提示词") {
-		t.Fatalf("身份说明应在基础提示词之后: %q", first)
+	base := strings.Index(first, "基础提示词")
+	memory := strings.Index(first, "关于长期记忆")
+	ident := strings.Index(first, "你的 QQ 号是")
+	toolHint := strings.Index(first, "关于回溯")
+	if memory < base || ident < memory || toolHint < ident {
+		t.Fatalf("段落顺序必须固定（基础/记忆/身份/工具）: %q", first)
 	}
 	if !strings.Contains(first, "关于回溯") {
 		t.Fatalf("工具提示应被渲染: %q", first)
