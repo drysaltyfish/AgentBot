@@ -720,16 +720,31 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 	if provider == "" {
 		provider = "openai"
 	}
+	// F-79：启动日志里的能力清单由**本次装配的事实**推出（见 capabilities.go），
+	// 不是一份手写清单——手写清单会随接线悄悄过期。
 	lifecycle.Info("agentbot started",
 		"transport", cfg.Transport.Mode,
 		"llm_provider", provider,
-		"capabilities", []string{
-			"event-kernel", "transport-wsclient", "transport-auth",
-			"router-snapshot-match", "rule-handler-separation", "engine-hooks",
-			"session-manager", "history-memory", "llm-interface", "llm-retry",
-			"outbound-filter-chain", "graceful-shutdown",
-			"rate-limit", "feature-toggle", "audit-log", "metrics", "health-probes",
-		},
+		"capabilities", assembleCapabilities(cfg, capabilityInputs{
+			TransportMode:   cfg.Transport.Mode,
+			AuthConfigured:  cfg.Transport.AccessToken != nil || cfg.Transport.SignatureSecret != nil,
+			Cost:            costTracker != nil,
+			Budget:          budget,
+			Policy:          policyTables,
+			Personas:        personaReg != nil,
+			Memory:          mem != nil,
+			History:         hist,
+			Semcache:        semCache != nil,
+			Streaming:       streamFactory != nil,
+			Moderation:      modEngine != nil,
+			Admin:           len(cfg.Moderation.SuperUsers) > 0,
+			Toggles:         cfg.Toggle.EffectiveEnabled(),
+			ProactiveMemory: cfg.Agent.ProactiveMemory.EffectiveEnabled(),
+			ToolHint:        cfg.Agent.Enabled && cfg.Agent.ToolHint.EffectiveEnabled(),
+			PromptEngine:    promptEngine != nil,
+			AuditLog:        auditLog != nil,
+			OpsHTTP:         cfg.Ops.EffectiveEnabled(),
+		}),
 	)
 
 	// F-68/F-69：监听放在最后启动——此时探针要读的状态都已赋值，

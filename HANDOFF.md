@@ -11,12 +11,15 @@
 
 ## 2. 当前状态（干净、已推送）
 
-- HEAD = 21059e7，已推送；工作区干净，本轮本地 build/vet/test/gofmt 全绿，CI 走 `gh run watch`。
-- **功能：87/89 完成**；剩下两条（F-07 多账号、F-27 多供应商）在目标范围之外。
-  范围内全部完成：F-65 三段式前缀（21059e7）、F-23 定期回收接线（本轮）。
-- **接线：13/15 完成**（含 F-36/F-37、F-71、F-65、F-82、F-23、F-66 会话维度与持久化，以及 F-72 出站传播）。这是最大的缺口：按仓库自己的 **F-79**，未接线 = 未交付。
+- HEAD 见 `git log -1`；工作区干净，每轮本地 build/vet/test/gofmt 全绿，CI 走 `gh run watch`。
+- **功能实现：87/89**；剩下两条（F-07 多账号、F-27 多供应商）在目标范围之外。
+- **接线：原 §3.2 十项 + 收尾审计新增四项（F-32/F-53/F-54/F-33/F-79 清单）全部完成**。
+  唯一未消费的库是 **F-62**（图片去重），它的消费方需要多模态请求，而没有任何 Feature
+  定义这条上游能力（§4.7）。
+- 收尾审计的方法：扫描"没有任何**非测试**代码 import 的 internal 包"。F-33/F-53/F-62
+  就是这样找出来的——它们从未进过任何待办清单。
 
-### 已完成的接线（7 处）
+### 已完成的接线
 
 | Feature | 接线内容 | 证明它的测试 |
 |---|---|---|
@@ -34,6 +37,7 @@
 | F-63 | 语义缓存接在**回复链路**（会话键 + 人格指纹 + 出口过滤 + 历史一次到位）；`vector.TextBinary` 提供二值哈希向量化；命中/未命中/省下 token 进指标 | Test_F63_SecondIdenticalQuestionSkipsTheModel、Test_F63_ToolTurnsAreNotCached、Test_F63_CacheHitGoesThroughTheSendChain、Test_F63_BuildSemcacheFollowsConfig |
 | F-33 | 静态前缀改由模板引擎渲染（`prompt.dir` 同名模板覆盖内置版本、启动期校验、CRLF 归一）；内置 `system.tmpl` 去掉"当前时间"——F-65 不允许静态段含易变内容，时间已在轮次渲染里出现。**这是资产形状变更**：用旧字段（BotName/Persona/Tools）覆盖 system 模板的部署需同步改 | Test_F33_RenderedPrefixIsByteStable、Test_F33_CRLFAndLFOverrideRenderIdentically、Test_F33_TemplateErrorsFailAtStartup |
 | F-53 / F-54 | 权限表加载 + 提示词半静态段渲染（按角色）+ 平台 API 出口硬拦截（`policyMiddleware`，fail-closed）；角色经 ctx 传递、超管优先；权限表文件存在时热加载 | Test_F53_MiddlewareDeniesUnauthorizedAction、Test_F53_MiddlewareFailsClosedWithoutRole、Test_F53_PromptProviderRendersRoleTable、Test_F53_PolicyStateSwapTakesEffect |
+| F-79（能力清单） | 启动日志的能力清单改为**由装配事实推出**（`assembleCapabilities` + `capabilityInputs`）：此前是一份手写字符串，早已过期（不含 persona/policy/模板/缓存/流式/追踪/成本/记忆/检索）。现在 20+ 项按真实对象判定，重复项去重 | Test_F79_CapabilityListReflectsActualWiring |
 | F-32 | 上下文预算接入 `observedLLM`（调用前 `FitRequest`，工具 schema 计入预算）；`conversation.Assembler` 把 system 标为 `Pinned`，否则裁剪会丢系统提示词 | Test_F32_ObservedLLMTrimsBeforeCallingProvider、Test_F32_StreamingPathIsTrimmedToo、Test_F32_AssemblerMarksSystemPinned |
 | F-24（限速） | 限速改为「规则持有者 + 原子替换」：mid 规则启动时注册一次、内部解引用当前参数，热加载只需一次原子写；监听**配置文件本身**，校验失败保留旧参数 | Test_F24_RateLimitStateSwapsAtomically、Test_F24_RateLimitHotReloadFromConfigFile |
 | F-52 | 摘要树作为**第三条独立召回源**接入 `history.Hybrid`（摘要层检索，与 BM25/向量并列而非硬融合）；确定性拼接摘要 + 二值哈希聚类；按会话缓存、条目数变化重建 | Test_F52_TreeIsAnIndependentRecallSource、Test_F52_TreeRebuildsWhenHistoryGrows、Test_F52_WrapHistoryEnablesSummaryTree |
@@ -100,8 +104,13 @@ F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 - **本地跑不了 golangci-lint 与 -race**（无 cgo/gcc）；两者由 CI 把关。这意味着
   "本地全绿"不等于能过 CI——已多次在 CI 才暴露（-race 下的预算断言、
   粗粒度时间戳导致的指纹漏检、queueWriter 关停竞争）。
-- 每轮收尾流程：go build ./... && go vet ./... && go test -count=1 ./... && gofmt -l cmd internal
+- 每轮收尾流程：go build ./... && go vet ./... && go test -count=1 ./... &&
+  go test -run=XXX -bench="." -benchtime=1x ./internal/... ./cmd/... && gofmt -l cmd internal
+  （Windows 上必须写 -bench="."：PowerShell 会把 `-bench=.` 的 `.` 当成包参数，
+  症状是 "FAIL . [setup failed]" / "no Go files in <repo>"，看起来像仓库坏了。）
   -> 通过才提交 -> git push origin main -> gh run watch <id> --exit-status。
+- **基准必须显式跑**：本地 `go test ./...` 不跑基准，而 CI 的 bench smoke 跑。
+  第 13 轮就因漏了这步，CI 才暴露 `BenchmarkRenderPrompt` 的数据字段过期。
 - 提交信息用中文，说明"为什么"而不只是"改了什么"；偏离规格必须写进提交与代码注释。
 - **每处接线都要带一个能证明"效果"的测试**，而不是"函数被调用了"。
   反例：paradigm: reflexion 在 Evaluator 为 nil 时接了也没效果。
