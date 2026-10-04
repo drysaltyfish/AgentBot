@@ -131,10 +131,19 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 		defer func() { _ = costTracker.Close() }()
 	}
 
+	// F-32：上下文预算（默认关闭——未配置 max_context 时预算为 nil，不改动请求字节）。
+	budget := buildBudget(cfg, lg)
+	if budget != nil {
+		lg.Component("llm").Info("context budget is enabled",
+			"max_context", budget.MaxContext,
+			"reserve_output", budget.ReserveOutput,
+			"reserve_tools", budget.ReserveTools)
+	}
 	model = &observedLLM{
 		next: model, cat: catalog, provider: providerName(cfg), model: cfg.LLM.Model,
-		cost: costTracker,
-		warn: func(msg string) { lg.Component("cost").Warn(msg) },
+		cost:   costTracker,
+		budget: budget,
+		warn:   func(msg string) { lg.Component("cost").Warn(msg) },
 	}
 
 	// 缓存优先（二）：历史裁剪交给存储层，且用高水位批量裁剪。

@@ -11,6 +11,10 @@ const (
 	defaultLLMTimeout = 30 * time.Second
 	// defaultLLMHistoryTurns 是默认回灌的历史条数。
 	defaultLLMHistoryTurns = 20
+	// defaultLLMReserveOutput 是上下文预算里留给输出的 token。
+	defaultLLMReserveOutput = 1024
+	// defaultLLMReserveTools 是上下文预算里留给工具 schema 的 token。
+	defaultLLMReserveTools = 512
 	// defaultAgentMaxIterations 与 agent.DefaultMaxIterations 对齐。
 	defaultAgentMaxIterations = 10
 	// defaultAgentStepTimeout 与 agent.DefaultStepTimeout 对齐。

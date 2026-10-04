@@ -49,6 +49,8 @@ type observedLLM struct {
 	model    string
 	// cost 是 F-66 的成本统计器；nil 表示未启用。
 	cost *cost.Tracker
+	// budget 是 F-32 的上下文预算；nil 表示不做预算裁剪。
+	budget *llm.Budget
 	// warn 是降级路径的告警出口（例如 downgrade 动作未能强制）；nil 时静默。
 	warn func(string)
 }
@@ -60,6 +62,10 @@ func (o *observedLLM) Chat(ctx context.Context, req *llm.ChatRequest) (*llm.Chat
 	if err := o.authorize(ctx); err != nil {
 		return nil, err
 	}
+	// F-32：在真正发出前裁剪，超长历史不会变成一次被服务端拒绝的往返。
+	if o.budget != nil {
+		req = o.budget.FitRequest(ctx, req)
+	}
 	start := time.Now()
 	resp, err := o.next.Chat(ctx, req)
 	o.observe(ctx, start, resp, err)
@@ -70,6 +76,10 @@ func (o *observedLLM) Chat(ctx context.Context, req *llm.ChatRequest) (*llm.Chat
 func (o *observedLLM) ChatStream(ctx context.Context, req *llm.ChatRequest) (<-chan llm.Chunk, error) {
 	if err := o.authorize(ctx); err != nil {
 		return nil, err
+	}
+	// F-32：流式同样先裁剪——两条路径必须看到同一份消息序列。
+	if o.budget != nil {
+		req = o.budget.FitRequest(ctx, req)
 	}
 	start := time.Now()
 	ch, err := o.next.ChatStream(ctx, req)

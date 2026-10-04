@@ -32,6 +32,7 @@
 | F-23 | 定期回收接入 Bot 生命周期（`app.Go`，不再是没人启动的 `StartReclaimer`） | Test_F23_ReclaimerIsOwnedByBotLifecycle（100 会话回收 + Shutdown 后回收器确实停止） |
 | F-49（持久化） | `memory.SQLiteTierStore`：分层记忆落 SQLite（id 走 tier_ids 统一分配器，scope 全程参与） | Test_F49_SQLiteTierStoreSurvivesReopen、Test_F49_TieredMemoryOverSQLiteEndToEnd |
 | F-63 | 语义缓存接在**回复链路**（会话键 + 人格指纹 + 出口过滤 + 历史一次到位）；`vector.TextBinary` 提供二值哈希向量化；命中/未命中/省下 token 进指标 | Test_F63_SecondIdenticalQuestionSkipsTheModel、Test_F63_ToolTurnsAreNotCached、Test_F63_CacheHitGoesThroughTheSendChain、Test_F63_BuildSemcacheFollowsConfig |
+| F-32 | 上下文预算接入 `observedLLM`（调用前 `FitRequest`，工具 schema 计入预算）；`conversation.Assembler` 把 system 标为 `Pinned`，否则裁剪会丢系统提示词 | Test_F32_ObservedLLMTrimsBeforeCallingProvider、Test_F32_StreamingPathIsTrimmedToo、Test_F32_AssemblerMarksSystemPinned |
 | F-24（限速） | 限速改为「规则持有者 + 原子替换」：mid 规则启动时注册一次、内部解引用当前参数，热加载只需一次原子写；监听**配置文件本身**，校验失败保留旧参数 | Test_F24_RateLimitStateSwapsAtomically、Test_F24_RateLimitHotReloadFromConfigFile |
 | F-52 | 摘要树作为**第三条独立召回源**接入 `history.Hybrid`（摘要层检索，与 BM25/向量并列而非硬融合）；确定性拼接摘要 + 二值哈希聚类；按会话缓存、条目数变化重建 | Test_F52_TreeIsAnIndependentRecallSource、Test_F52_TreeRebuildsWhenHistoryGrows、Test_F52_WrapHistoryEnablesSummaryTree |
 | F-51 | `history.Hybrid`：BM25 + 二值向量 + RRF 融合，包装历史存储即生效；`recall_history` 靠既有 Searcher 断言自动改走检索；只对对话轮次建索引 | Test_F51_HybridSearchFindsKeywordHitWithContext、Test_F51_HybridSkipsNonConversationalEntries、Test_F51_WrapHistoryWithRetrievalFollowsConfig |
@@ -53,15 +54,21 @@
 范围内的功能全部完成。剩余工作只有 §3.2 的接线；
 F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 
-### 3.2 接线（剩 0 处）
+### 3.2 接线
 
-§3.2 列出的接线项全部完成：
+第一轮列出的十项全部完成：
 ~~#1 admin 命令入口~~、~~#2 cost 会话维度~~、~~#3 agent.paradigm~~、~~#4 分层记忆~~、
 ~~#5 semcache~~、~~#6 tree 摘要树~~、~~#7 stream->outbound~~、~~#8 trace~~、
 ~~#9 reload 其余资产~~、~~#10 F-82 剩余~~。
 
-范围（除 F-07/F-27 外）内没有已知的待接线项；§4 的偏离是「已交付但口径受限」，
-不是「没做」。
+**收尾审计新增（原先完全没进台账）**：用"`internal/*` 里没有任何非测试代码 import 的包"
+做扫描，又找出三处库就绪但无人消费的能力，按建议顺序：
+
+| # | 项 | 入口 | 前置条件 / 风险 |
+|---|---|---|---|
+| A | F-53 / F-54 权限即提示词 + 判定缓存 | 系统提示词 + 工具执行前的硬拦截 | `config.Policy.File`（默认 actions.yaml）已存在但从未加载。接入要同时做两件事：把 `Render(role)` 注入静态段（**静态段必须逐字节稳定**，F-65），并在执行前用 `Allow(role, action)` 硬拦截 |
+| B | F-33 提示词模板引擎 | 系统提示词/人格正文的渲染 | `internal/prompt` 完整但无人调用。要定"哪些段走模板"，且渲染结果必须逐字节稳定，否则前缀缓存失效 |
+| C | F-62 感知哈希图片去重 | 图片入站链路 | 需要多模态请求（图片 → 视觉模型 → 描述），而 `llm.Message` 只有文本、F-27 又在范围外。属边界受限，见 §4.7 |
 
 | # | 项 | 入口 | 前置条件 / 风险 |
 |---|---|---|---|
@@ -76,7 +83,10 @@ F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
    会话/用户维度的计量与 deny 已生效，快照落 SQLite。
 5. **F-24 只交付敏感词表热加载**（组合根里唯一真正读文件的运行时资产）。
 6. **F-63 自定义 Similarity 时退化为有界线性扫描**（包注释已写明理由与上限）。
-7. **F-65 的静态段报告只覆盖 system 正文**：工具 schema 随请求的 Tools 字段发送，
+7. **F-62 只有库，没有消费方**：感知哈希、去重缓存、分桶都完整且有测试，但消费方需要
+   "图片 → 视觉模型 → 描述"这条链路，而仓库当前不支持多模态请求（`llm.Message` 只有文本），
+   供应商路由 F-27 也在目标范围外。接入需要先扩多模态消息形状——那是新特性，不是接线。
+8. **F-65 的静态段报告只覆盖 system 正文**：工具 schema 随请求的 Tools 字段发送，
    顺序由 F-41 的注册顺序固定，不在 `/prompt-hash` 的 static 段里。
    另：`DefaultPersona` 不注入半静态正文（内置 default.yml 与 `DefaultSystemPrompt`
    逐字相同，再注入一次等于每个请求发两遍同一段话）。

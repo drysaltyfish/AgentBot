@@ -53,6 +53,12 @@ llm:
   system_prompt: "你是一个运行在聊天平台上的助手。回答要简洁、口语化，适合在聊天窗口阅读。"
   # 最多回灌多少条历史（一轮约两条）；存储层用高水位批量裁剪，避免每轮裁剪破坏前缀
   history_turns: 20
+  # F-32 上下文预算：默认关闭（不配置 max_context 时预算为 nil，请求字节不变）。
+  # 开启后每次请求按「窗口 - 输出预留 - 工具预留」裁剪，超长历史不再被服务端拒绝；
+  # system 消息标记为 Pinned，裁剪永远不会把它丢掉。
+  max_context: 0             # 模型上下文窗口（token）；0 = 不启用预算
+  reserve_output: 1024       # 留给输出的 token
+  reserve_tools: 512         # 留给工具 schema 的 token（实际占用更大时按实际预留）
 
 store:
   # 持久层（F-83，见 docs/adr/0003）。SQLite 单文件，启用 WAL、单写者串行化、

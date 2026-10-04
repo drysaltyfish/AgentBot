@@ -163,6 +163,14 @@ type LLM struct {
 	SystemPromptFile *string `yaml:"system_prompt_file"`
 	// HistoryTurns 是最多回灌多少条历史；<=0 或未设置时用默认值。
 	HistoryTurns *int `yaml:"history_turns"`
+	// F-32 上下文预算：MaxContext <= 0（默认）时**不做**预算裁剪，行为与之前一致。
+	// 开启后每次请求按"窗口 - 输出预留 - 工具预留"裁剪，超长历史不再被服务端拒绝。
+	// MaxContext 是模型上下文窗口（token）。
+	MaxContext *int `yaml:"max_context"`
+	// ReserveOutput 是留给输出的 token；<=0 时取 1024。
+	ReserveOutput *int `yaml:"reserve_output"`
+	// ReserveTools 是留给工具 schema 的 token；<=0 时取 512。
+	ReserveTools *int `yaml:"reserve_tools"`
 	// AmbientTokenBudget 是环境消息（群里没被 @ 的）的 token 预算。
 	// 0 用默认值；负数表示不压缩。
 	AmbientTokenBudget *int `yaml:"ambient_token_budget"`

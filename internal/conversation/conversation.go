@@ -114,7 +114,9 @@ func (a *Assembler) Build(hist []history.Item, memoryBlock, user string) []llm.M
 func (a *Assembler) BuildFor(ctx context.Context, key session.Key, hist []history.Item, memoryBlock, user string) []llm.Message {
 	items := a.compress(hist)
 	out := make([]llm.Message, 0, len(items)+3)
-	out = append(out, llm.Message{Role: llm.RoleSystem, Content: a.SystemFor(ctx, key)})
+	// Pinned：F-32 的上下文裁剪必须永远保留系统提示词。不标它的话，
+	// 超长历史裁剪会把静态/半静态段一起丢掉——那等于把人格与规则删了。
+	out = append(out, llm.Message{Role: llm.RoleSystem, Content: a.SystemFor(ctx, key), Pinned: true})
 	// ADR-0002：记忆是独立消息，放在 system 之后、历史之前。
 	// 不进 system 是为了保住 system 段的全局缓存；不放到最后是为了让记忆本身也能被缓存。
 	if memoryBlock != "" {

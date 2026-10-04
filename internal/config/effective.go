@@ -109,6 +109,22 @@ func (t Transport) EffectiveSelfID() int64 {
 	return *t.SelfID
 }
 
+// EffectiveMaxContext 返回模型上下文窗口；未配置或非正时返回 0（不做预算裁剪）。
+func (l LLM) EffectiveMaxContext() int {
+	if l.MaxContext == nil || *l.MaxContext <= 0 {
+		return 0
+	}
+	return *l.MaxContext
+}
+
+// EffectiveReserveOutput 返回输出预留 token；未配置或非正时取 1024。
+func (l LLM) EffectiveReserveOutput() int {
+	return orPositive(l.ReserveOutput, defaultLLMReserveOutput)
+}
+
+// EffectiveReserveTools 返回工具 schema 预留 token；未配置或非正时取 512。
+func (l LLM) EffectiveReserveTools() int { return orPositive(l.ReserveTools, defaultLLMReserveTools) }
+
 // EffectiveTimeout 返回模型请求超时；未配置或非正时取默认 30s。
 func (l LLM) EffectiveTimeout() time.Duration { return l.Timeout.Or(defaultLLMTimeout) }
 

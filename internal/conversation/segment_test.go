@@ -123,3 +123,22 @@ func Test_F65_StaticSegmentFirstWhenMemoryPresent(t *testing.T) {
 		t.Fatalf("当前输入必须在最后: %q", msgs[3].Content)
 	}
 }
+
+// Test_F32_AssemblerMarksSystemPinned 钉住 F-32 的前置条件：
+// 预算裁剪只尊重 Pinned 标记，而装配器是消息序列的唯一生产者——
+// 它不标 Pinned，"system 永不被裁掉"这条边界就无从成立。
+func Test_F32_AssemblerMarksSystemPinned(t *testing.T) {
+	t.Parallel()
+	asm := New(Options{System: "静态段"})
+	msgs := asm.BuildFor(context.Background(), session.Key{}, []history.Item{user("你好")}, "记忆块", "现在")
+	if len(msgs) < 2 {
+		t.Fatalf("消息数=%d", len(msgs))
+	}
+	if !msgs[0].Pinned || msgs[0].Content != "静态段" {
+		t.Fatalf("system 消息必须 Pinned 且内容正确: %+v", msgs[0])
+	}
+	// 记忆块可以不在裁剪中幸存（它是 ADR-0002 之后的位置），但不应被误标。
+	if msgs[1].Pinned {
+		t.Fatalf("记忆块不应被标为 Pinned: %+v", msgs[1])
+	}
+}
