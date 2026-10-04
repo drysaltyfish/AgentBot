@@ -86,7 +86,16 @@ func Test_F24_RateLimitHotReloadFromConfigFile(t *testing.T) {
 
 	user, _ := state.Rules()
 	c := testCtx(42, 7)
-	waitFor(t, "初始为关闭（恒真）", func() bool { return user(c) && user(c) })
+	waitFor(t, "初始为关闭（恒真）", func() bool {
+		// 连续多次调用都必须放行；写成循环而不是 a && a，后者会被静态检查
+		// 判为"同一表达式比较"（SA4000），也说明不了多次调用的语义。
+		for i := 0; i < 3; i++ {
+			if !user(c) {
+				return false
+			}
+		}
+		return true
+	})
 
 	// 改成"开启 + 突发 1"：第二次调用应被拒。
 	writeConfig("ratelimit:\n  enabled: true\n  user_per_minute: 1\n  user_burst: 1\n")
@@ -94,7 +103,7 @@ func Test_F24_RateLimitHotReloadFromConfigFile(t *testing.T) {
 		// 桶会被上一次探测消耗，这里用"连续两次中至少一次被拒"来判定已切换。
 		a := user(c)
 		b := user(c)
-		return !(a && b)
+		return !a || !b
 	})
 
 	// 再放宽到突发 50：连续多次调用都应放行。
