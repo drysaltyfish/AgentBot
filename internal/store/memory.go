@@ -260,10 +260,6 @@ func insertMemory(ctx context.Context, tx *sql.Tx, scope string, m Memory, text 
 	return id, nil
 }
 
-func memoryRows(ctx context.Context, tx *sql.Tx, scope string) ([]Memory, error) {
-	return memoryRowsForSubject(ctx, tx, scope, 0)
-}
-
 // memoryRowsForSubject 取同作用域**同归属人**的既有条目，用于相似度去重。
 //
 // 限定归属人是刻意的：跨归属人合并会把两个人的事混成一条，而那是无法事后拆开的损失。
