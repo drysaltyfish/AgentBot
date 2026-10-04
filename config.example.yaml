@@ -299,3 +299,15 @@ stream:
   first_min_chars: 8         # 首段最小长度，避免先抛半个字
   edit_messages: false       # 平台支持编辑消息时才开；否则改写会中止该流
   typing_hint: ""            # 非空时首段前单发一条提示，如"正在输入…"
+
+# ---- 混合检索（F-51）----
+# 默认关闭。开启后 recall_history 改用"BM25 关键词 + 二值向量 + RRF 融合"召回，
+# 专有名词（关键词路）与改写表达（向量路）都能命中；两路必须对同一份条目排名。
+# 负权重表示关闭该路（单路失败也会自动降级，不整体失败）。
+retrieval:
+  enabled: false
+  keyword_weight: 1.0
+  vector_weight: 1.0
+  top_k: 5                   # 默认返回条数；工具给出的 limit 优先
+  candidate_k: 20            # 每路候选数
+

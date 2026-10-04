@@ -72,4 +72,5 @@ type Config struct {
 	Cost         Cost         `yaml:"cost"`
 	Semcache     Semcache     `yaml:"semcache"`
 	Stream       Stream       `yaml:"stream"`
+	Retrieval    Retrieval    `yaml:"retrieval"`
 }

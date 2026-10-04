@@ -32,6 +32,7 @@
 | F-23 | 定期回收接入 Bot 生命周期（`app.Go`，不再是没人启动的 `StartReclaimer`） | Test_F23_ReclaimerIsOwnedByBotLifecycle（100 会话回收 + Shutdown 后回收器确实停止） |
 | F-49（持久化） | `memory.SQLiteTierStore`：分层记忆落 SQLite（id 走 tier_ids 统一分配器，scope 全程参与） | Test_F49_SQLiteTierStoreSurvivesReopen、Test_F49_TieredMemoryOverSQLiteEndToEnd |
 | F-63 | 语义缓存接在**回复链路**（会话键 + 人格指纹 + 出口过滤 + 历史一次到位）；`vector.TextBinary` 提供二值哈希向量化；命中/未命中/省下 token 进指标 | Test_F63_SecondIdenticalQuestionSkipsTheModel、Test_F63_ToolTurnsAreNotCached、Test_F63_CacheHitGoesThroughTheSendChain、Test_F63_BuildSemcacheFollowsConfig |
+| F-51 | `history.Hybrid`：BM25 + 二值向量 + RRF 融合，包装历史存储即生效；`recall_history` 靠既有 Searcher 断言自动改走检索；只对对话轮次建索引 | Test_F51_HybridSearchFindsKeywordHitWithContext、Test_F51_HybridSkipsNonConversationalEntries、Test_F51_WrapHistoryWithRetrievalFollowsConfig |
 | F-49（切换） | 分层记忆上线：Working/Episodic 落 tier 表，**Semantic 复用 F-87 扁平记忆表**（不另写判定）；`TieredMemory` 实现 `MemoryAdmin`；直连路径也开始注入记忆 | Test_F49_SemanticLayerReusesF87Dedup、Test_F49_TieredMemoryAdminForgetAndList、Test_F49_BuildAgentWiresTieredMemory、Test_F49_DirectAgentInjectsMemory |
 | F-24（人格目录） | `watchPersonas` 监听人格目录热替换定义；`reload` 指纹支持目录（逐子文件，避免"改已存在文件不触发"） | Test_F24_PersonaFileChangeSwapsDefinitions、Test_F24_ReloadsDirectoryContentChange |
 | F-72（传播） | W3C trace 上下文：入站事件建立 span、日志 trace_id 与之一致、httpx 自动带 traceparent | Test_F72_TraceparentIsPropagated、Test_F72_EventTraceContextCarriesW3CIdentity、Test_F72_ExplicitHeaderIsPreserved |
@@ -50,14 +51,12 @@
 范围内的功能全部完成。剩余工作只有 §3.2 的接线；
 F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 
-### 3.2 接线（剩 3 处，按建议顺序）
+### 3.2 接线（剩 2 处，按建议顺序）
 
 ~~#1 admin 命令入口~~、~~#2 cost 会话维度~~、~~#3 agent.paradigm~~、~~#4 分层记忆~~、
 ~~#5 semcache~~、~~#7 stream->outbound~~、~~#8 trace~~、~~#10 F-82 剩余~~ 均已完成。
-
-注意：#4 只完成了**分层记忆 F-49**。同一项里的 **F-51 混合检索仍未接线**——
-`memory.NewHybridRetriever` 目前只在测试里被调用；要接的是召回路径
-（`recall_history` / 记忆召回），需要把 BM25 关键词路与向量路接到同一份数据上。
+#4 的两半（F-49 分层记忆、F-51 混合检索）都已接线：F-51 通过
+`history.Hybrid` 包一层历史存储，`recall_history` 靠既有的 Searcher 类型断言自动改走检索。
 
 | # | 项 | 入口 | 前置条件 / 风险 |
 |---|---|---|---|

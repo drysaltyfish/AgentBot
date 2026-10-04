@@ -250,6 +250,23 @@ type Singleflight struct {
 	Notice *bool `yaml:"notice"`
 }
 
+// Retrieval 描述混合检索（F-51）。默认关闭。
+//
+// 关闭是默认值：它改变 recall_history 的排序口径（关键词 + 向量融合），
+// 而两者各有偏好——要换就明确换，而不是让升级悄悄改变召回结果。
+type Retrieval struct {
+	// Enabled 为 true 时启用；未配置时默认关闭。
+	Enabled *bool `yaml:"enabled"`
+	// KeywordWeight 是关键词一路的权重；<=0 时用 1.0，<0 表示关闭该路。
+	KeywordWeight *float64 `yaml:"keyword_weight"`
+	// VectorWeight 是向量一路的权重；<=0 时用 1.0，<0 表示关闭该路。
+	VectorWeight *float64 `yaml:"vector_weight"`
+	// TopK 是最终返回条数；<=0 时用 5。调用方给出的 limit 优先。
+	TopK *int `yaml:"top_k"`
+	// CandidateK 是每路候选数；<=0 时用 20。
+	CandidateK *int `yaml:"candidate_k"`
+}
+
 // Stream 描述流式增量发送（F-64）。默认关闭。
 //
 // 关闭是默认值：逐条发送会改变用户看到回复的节奏，也可能触发平台限流；

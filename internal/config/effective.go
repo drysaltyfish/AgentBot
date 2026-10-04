@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/drysaltyfish/agentbot/internal/llm"
+	"github.com/drysaltyfish/agentbot/internal/memory"
 	"github.com/drysaltyfish/agentbot/internal/semcache"
 )
 
@@ -236,6 +237,36 @@ func (m Moderation) EffectiveSpamWindow() time.Duration {
 // EffectiveSpamMaxMessages 返回窗口内允许的最大消息数；未配置或非正时取默认 20。
 func (m Moderation) EffectiveSpamMaxMessages() int {
 	return orPositive(m.AntiSpam.MaxMessages, defaultModerationSpamMaxMessages)
+}
+
+// EffectiveEnabled 返回是否启用混合检索；未配置时默认关闭。
+func (r Retrieval) EffectiveEnabled() bool { return orBool(r.Enabled, false) }
+
+// EffectiveKeywordWeight 返回关键词一路的权重；未配置或为 0 时取 1.0。
+// 负值表示关闭该路，原样返回由检索层处理。
+func (r Retrieval) EffectiveKeywordWeight() float64 {
+	if r.KeywordWeight == nil || *r.KeywordWeight == 0 {
+		return 1
+	}
+	return *r.KeywordWeight
+}
+
+// EffectiveVectorWeight 返回向量一路的权重；未配置或为 0 时取 1.0。
+func (r Retrieval) EffectiveVectorWeight() float64 {
+	if r.VectorWeight == nil || *r.VectorWeight == 0 {
+		return 1
+	}
+	return *r.VectorWeight
+}
+
+// EffectiveTopK 返回最终条数；未配置或非正时取 memory 的默认值。
+func (r Retrieval) EffectiveTopK() int {
+	return orPositive(r.TopK, memory.DefaultHybridTopK)
+}
+
+// EffectiveCandidateK 返回每路候选数；未配置或非正时取 memory 的默认值。
+func (r Retrieval) EffectiveCandidateK() int {
+	return orPositive(r.CandidateK, memory.DefaultCandidateK)
 }
 
 // EffectiveEnabled 返回是否启用流式增量发送；未配置时默认关闭。
