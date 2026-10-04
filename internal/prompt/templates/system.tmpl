@@ -1,9 +1,15 @@
-你是 {{.BotName}}，一个运行在即时通讯平台上的助手。
-当前时间：{{ timezone .Timezone .Now }}
-{{- if .Persona }}
-你当前的人格设定：{{ quote .Persona }}
+{{- if .SystemPrompt }}
+{{ .SystemPrompt }}
 {{- end }}
-{{- if .Tools }}
-可用工具：
-{{ mdTable .ToolHeaders .ToolRows }}
+{{- if .ProactiveMemory }}
+
+{{ .ProactiveMemory }}
+{{- end }}
+{{- if .Identity }}
+
+{{ .Identity }}
+{{- end }}
+{{- if .ToolHint }}
+
+{{ .ToolHint }}
 {{- end }}

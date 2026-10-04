@@ -32,6 +32,7 @@
 | F-23 | 定期回收接入 Bot 生命周期（`app.Go`，不再是没人启动的 `StartReclaimer`） | Test_F23_ReclaimerIsOwnedByBotLifecycle（100 会话回收 + Shutdown 后回收器确实停止） |
 | F-49（持久化） | `memory.SQLiteTierStore`：分层记忆落 SQLite（id 走 tier_ids 统一分配器，scope 全程参与） | Test_F49_SQLiteTierStoreSurvivesReopen、Test_F49_TieredMemoryOverSQLiteEndToEnd |
 | F-63 | 语义缓存接在**回复链路**（会话键 + 人格指纹 + 出口过滤 + 历史一次到位）；`vector.TextBinary` 提供二值哈希向量化；命中/未命中/省下 token 进指标 | Test_F63_SecondIdenticalQuestionSkipsTheModel、Test_F63_ToolTurnsAreNotCached、Test_F63_CacheHitGoesThroughTheSendChain、Test_F63_BuildSemcacheFollowsConfig |
+| F-33 | 静态前缀改由模板引擎渲染（`prompt.dir` 同名模板覆盖内置版本、启动期校验、CRLF 归一）；内置 `system.tmpl` 去掉"当前时间"——F-65 不允许静态段含易变内容，时间已在轮次渲染里出现。**这是资产形状变更**：用旧字段（BotName/Persona/Tools）覆盖 system 模板的部署需同步改 | Test_F33_RenderedPrefixIsByteStable、Test_F33_CRLFAndLFOverrideRenderIdentically、Test_F33_TemplateErrorsFailAtStartup |
 | F-53 / F-54 | 权限表加载 + 提示词半静态段渲染（按角色）+ 平台 API 出口硬拦截（`policyMiddleware`，fail-closed）；角色经 ctx 传递、超管优先；权限表文件存在时热加载 | Test_F53_MiddlewareDeniesUnauthorizedAction、Test_F53_MiddlewareFailsClosedWithoutRole、Test_F53_PromptProviderRendersRoleTable、Test_F53_PolicyStateSwapTakesEffect |
 | F-32 | 上下文预算接入 `observedLLM`（调用前 `FitRequest`，工具 schema 计入预算）；`conversation.Assembler` 把 system 标为 `Pinned`，否则裁剪会丢系统提示词 | Test_F32_ObservedLLMTrimsBeforeCallingProvider、Test_F32_StreamingPathIsTrimmedToo、Test_F32_AssemblerMarksSystemPinned |
 | F-24（限速） | 限速改为「规则持有者 + 原子替换」：mid 规则启动时注册一次、内部解引用当前参数，热加载只需一次原子写；监听**配置文件本身**，校验失败保留旧参数 | Test_F24_RateLimitStateSwapsAtomically、Test_F24_RateLimitHotReloadFromConfigFile |
@@ -67,7 +68,6 @@ F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 
 | # | 项 | 入口 | 前置条件 / 风险 |
 |---|---|---|---|
-| B | F-33 提示词模板引擎 | 系统提示词/人格正文的渲染 | `internal/prompt` 完整但无人调用。要定"哪些段走模板"，且渲染结果必须逐字节稳定，否则前缀缓存失效 |
 | C | F-62 感知哈希图片去重 | 图片入站链路 | 需要多模态请求（图片 → 视觉模型 → 描述），而 `llm.Message` 只有文本、F-27 又在范围外。属边界受限，见 §4.7 |
 
 | # | 项 | 入口 | 前置条件 / 风险 |

@@ -220,28 +220,38 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 	// 缓存优先（一）：不可变前缀在启动时固定一次，所有会话共享同一段前缀，
 	// 因此公共前缀检测能让不同会话也命中同一块缓存。
 	// MaxHistory=0：装配层不再二次裁剪，裁剪权只归存储层。
-	sysPrompt, err := systemPrompt(cfg)
+	basePrompt, err := systemPrompt(cfg)
 	if err != nil {
 		lifecycle.Error("cannot load system prompt", "error", err)
 		return 1
 	}
+	// F-33：不可变前缀由模板引擎渲染（prompt.dir 下的同名模板可覆盖内置版本）。
+	// 段落顺序与分隔符从代码挪进模板，运维可以改；但内容仍**只随配置变化**，
+	// 因此 F-65 的前缀缓存前提不变。校验在启动期完成，写错变量名不会等到线上。
+	promptEngine, promptErr := buildPromptEngine(cfg, lg)
+	if promptErr != nil {
+		lifecycle.Error("cannot load prompt templates", "error", promptErr, "dir", cfg.Prompt.Dir)
+		return 1
+	}
+	prefix := prefixData{SystemPrompt: basePrompt}
 	// 呈现窗口交给装配层：窗口按批量滑动（见 conversation.trimHistory），
 	// 因此存储可以留得更多而不打碎前缀缓存。
 	// 让模型自己判断该记什么：把长期记忆指令并入系统提示词末尾。
 	// 追加在末尾且内容固定，因此不可变前缀的完整性不受影响。
 	if cfg.Agent.ProactiveMemory.EffectiveEnabled() {
-		sysPrompt = agent.ComposeSystemPrompt(sysPrompt,
-			agent.ProactiveMemoryInstruction(cfg.Agent.ProactiveMemory.Instruction))
+		prefix.ProactiveMemory = agent.ProactiveMemoryInstruction(cfg.Agent.ProactiveMemory.Instruction)
 	}
 	// 自我介绍：模型必须知道自己是哪个号，否则认不出别人在 @ 它。
-	if ident := agent.SelfIdentity(cfg.Transport.EffectiveSelfID(), ""); ident != "" {
-		sysPrompt = agent.ComposeSystemPrompt(sysPrompt, ident)
-	}
+	prefix.Identity = agent.SelfIdentity(cfg.Transport.EffectiveSelfID(), "")
 	// 工具使用提示：被引用内容只有一句，很久远时缺上下文——
 	// 告诉模型它可以用 recall_history 回溯，否则它不会想到这个手段。
 	if cfg.Agent.Enabled && cfg.Agent.ToolHint.EffectiveEnabled() {
-		sysPrompt = agent.ComposeSystemPrompt(sysPrompt,
-			agent.ToolUsageInstruction(cfg.Agent.ToolHint.Instruction))
+		prefix.ToolHint = agent.ToolUsageInstruction(cfg.Agent.ToolHint.Instruction)
+	}
+	sysPrompt, err := renderSystemPrefix(promptEngine, prefix)
+	if err != nil {
+		lifecycle.Error("cannot render the system prompt", "error", err)
+		return 1
 	}
 	// F-82：人格定义在启动期加载并校验——人格名写错要在启动时失败，
 	// 而不是等第一个用户来聊天才发现。F-65 的半静态段取自这里。

@@ -17,6 +17,12 @@ func sample() map[string]any {
 		"Tools":       true,
 		"ToolHeaders": []string{"功能", "action"},
 		"ToolRows":    [][]string{{"查询天气", "get_weather"}},
+		// 内置 system 模板在 F-33 接线后改为渲染**静态前缀**：
+		// 不再含时间（F-65 禁止静态段有易变内容），改为逐段拼接。
+		"SystemPrompt":    "基础提示词",
+		"ProactiveMemory": "记忆指令",
+		"Identity":        "身份说明",
+		"ToolHint":        "工具提示",
 	}
 }
 
@@ -100,14 +106,16 @@ func Test_F33_BuiltinTemplateIsValidatedAtStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if !strings.Contains(out, "AgentBot") {
-		t.Fatalf("rendered system prompt missing bot name: %q", out)
+	// 内置 system 模板自 F-33 接线起渲染**静态前缀**：逐段拼接、顺序固定。
+	if !strings.Contains(out, "基础提示词") || !strings.Contains(out, "工具提示") {
+		t.Fatalf("rendered system prompt missing static sections: %q", out)
 	}
-	if !strings.Contains(out, "| 功能 | action |") {
-		t.Fatalf("mdTable output missing header: %q", out)
+	if strings.Index(out, "基础提示词") > strings.Index(out, "工具提示") {
+		t.Fatalf("段落顺序不稳定: %q", out)
 	}
-	if !strings.Contains(out, "2026-10-02T20:00:00+08:00") {
-		t.Fatalf("timezone formatting wrong: %q", out)
+	// F-65：静态前缀里不能出现时间——那会让每次渲染都不同，缓存必然失效。
+	if strings.Contains(out, "2026-10-02T20:00:00+08:00") {
+		t.Fatalf("静态前缀不应含时间: %q", out)
 	}
 }
 
@@ -142,7 +150,7 @@ func Test_F33_RenderIsCachedAndHashIsStable(t *testing.T) {
 		t.Fatalf("render is not deterministic/cached: hashes %q vs %q", hash1, hash2)
 	}
 	data := sample()
-	data["BotName"] = "Other"
+	data["SystemPrompt"] = "另一段提示词"
 	_, hash3, err := e.RenderWithHash("system", data)
 	if err != nil {
 		t.Fatalf("RenderWithHash: %v", err)

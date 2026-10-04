@@ -23,6 +23,11 @@ func goldenSample() map[string]any {
 		"Tools":       true,
 		"ToolHeaders": []string{"功能", "action"},
 		"ToolRows":    [][]string{{"查询天气", "get_weather"}},
+		// F-33 接线后 system 模板渲染静态前缀：不含时间（F-65），逐段拼接。
+		"SystemPrompt":    "基础提示词",
+		"ProactiveMemory": "记忆指令",
+		"Identity":        "身份说明",
+		"ToolHint":        "工具提示",
 	}
 }
 
