@@ -164,8 +164,8 @@ func Test_F83_DeclarativeColumnAdd(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.db")
 	base := []string{`CREATE TABLE IF NOT EXISTS thing (id INTEGER PRIMARY KEY)`}
 
-	// 覆盖 schema 时必须一并覆盖 columns：否则会拿默认列集去对账不存在的表。
-	s1 := openTest(t, Options{Path: path, schema: base, columns: []columnSpec{}})
+	// 覆盖 schema 时必须一并覆盖 columns 与 indexes：否则会拿默认列集/索引集去对账不存在的表。
+	s1 := openTest(t, Options{Path: path, schema: base, columns: []columnSpec{}, indexes: []string{}})
 	if _, err := s1.db.Exec("INSERT INTO thing (id) VALUES (1)"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -176,7 +176,7 @@ func Test_F83_DeclarativeColumnAdd(t *testing.T) {
 		{Table: "thing", Name: "note", DDL: "note TEXT NOT NULL DEFAULT ''"},
 		{Table: "thing", Name: "score", DDL: "score INTEGER NOT NULL DEFAULT 0"},
 	}
-	s2 := openTest(t, Options{Path: path, schema: base, columns: extended})
+	s2 := openTest(t, Options{Path: path, schema: base, columns: extended, indexes: []string{}})
 	for _, c := range extended {
 		ok, err := s2.columnExists(context.Background(), "thing", c.Name)
 		if err != nil || !ok {
@@ -190,7 +190,7 @@ func Test_F83_DeclarativeColumnAdd(t *testing.T) {
 
 	// 第三次打开：列已存在，不应报错（幂等）。
 	_ = s2.Close()
-	_ = openTest(t, Options{Path: path, schema: base, columns: extended})
+	_ = openTest(t, Options{Path: path, schema: base, columns: extended, indexes: []string{}})
 }
 
 // Test_F83_ConcurrentReadWrite 覆盖并发读写：不得出现 database is locked。
@@ -200,6 +200,7 @@ func Test_F83_ConcurrentReadWrite(t *testing.T) {
 		Path:    filepath.Join(t.TempDir(), "conc.db"),
 		schema:  []string{`CREATE TABLE IF NOT EXISTS counter (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)`},
 		columns: []columnSpec{},
+		indexes: []string{},
 	})
 	if err := s.Write(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, "INSERT INTO counter (id, n) VALUES (1, 0)")

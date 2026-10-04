@@ -40,6 +40,20 @@ type Memory interface {
 	Recall(ctx context.Context) ([]string, error)
 }
 
+// SubjectScopedMemory 是 Memory 的**可选强化**：能按归属人检索记忆。
+//
+// 为什么单独一个接口：记忆按作用域（群）共享是对的——同群的人需要共同上下文；
+// 但"这是谁的事"是另一个维度。支持它的实现（SQLite 记忆）能在群里回答
+// "张三说过什么"，不支持的原样工作，只是没有按人过滤的能力。
+//
+// subjectID 为 0 表示不限定归属（返回全群记忆）；> 0 时只返回该人的记忆
+// **加上**未指明归属的公共记忆——后者是历史数据与"大家共同的事"，漏掉它们
+// 会让模型突然失忆。
+type SubjectScopedMemory interface {
+	Memory
+	RecallFor(ctx context.Context, subjectID int64) ([]string, error)
+}
+
 // WithMemoryScope 把记忆作用域放进 ctx。
 //
 // 作用域隔离是 F-47 的硬要求："群 A 的记忆不得出现在群 B 的回忆中"。

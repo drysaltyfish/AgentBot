@@ -467,8 +467,11 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 			ShouldReply: shouldReply,
 			SpeakerID:   groupScopedUserID(c.Event.UserID, c.Event.GroupID),
 			SpeakerName: speakerDisplayName(c.Event.Sender, c.Event.GroupID),
-			Message:     c.Event.Message,
-			Caller:      c.Caller(),
+			// 记忆按群共享，因此还要带上"这条记忆关于谁"——群聊里就是发言人 QQ 号。
+			// 私聊的 SpeakerID 为 0（整条会话就是这一个人），归属留空即可。
+			SubjectID: groupScopedUserID(c.Event.UserID, c.Event.GroupID),
+			Message:   c.Event.Message,
+			Caller:    c.Caller(),
 		}:
 		default:
 			inflight.Done()

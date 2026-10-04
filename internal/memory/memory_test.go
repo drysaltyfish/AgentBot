@@ -327,3 +327,80 @@ func Test_F88_ExportAndList(t *testing.T) {
 		t.Fatalf("List 应只返回本作用域: %+v", items)
 	}
 }
+
+// Test_F87_SubjectIsolatedWritesAndScopedRecall 是归属人特性的核心验收：
+// 记忆按作用域（群）共享，但每条事实记录归属人；按人查询只看得到他的，
+// 且**不同人的相似事实不会被去重合并**。
+func Test_F87_SubjectIsolatedWritesAndScopedRecall(t *testing.T) {
+	t.Parallel()
+	s := newStore(t, nil)
+	ctx := ctxScope("group-1")
+
+	if _, err := s.SaveItem(scope.WithSubject(ctx, 1001), "很怕辣"); err != nil {
+		t.Fatalf("save 张三: %v", err)
+	}
+	if _, err := s.SaveItem(scope.WithSubject(ctx, 1002), "很怕辣"); err != nil {
+		t.Fatalf("save 李四: %v", err)
+	}
+
+	// 全量召回：两条都在（记忆按群共享，群里的人有共同上下文）。
+	all := recall(t, s, "group-1")
+	if len(all) != 2 {
+		t.Fatalf("同群应看到两条记忆，实际 %d: %v", len(all), all)
+	}
+
+	// 按人召回：各看各的。
+	zhang, err := s.RecallFor(ctx, 1001)
+	if err != nil {
+		t.Fatalf("RecallFor: %v", err)
+	}
+	if len(zhang) != 1 {
+		t.Fatalf("张三应只看到自己那条，实际 %d: %v", len(zhang), zhang)
+	}
+
+	// 归属必须落库：两条相似事实各自保留，不能因相似度被并成一条。
+	items, err := s.st.ListMemories(ctx, "group-1", 10)
+	if err != nil {
+		t.Fatalf("ListMemories: %v", err)
+	}
+	bySubject := map[int64]int{}
+	for _, m := range items {
+		bySubject[m.SubjectID]++
+	}
+	if bySubject[1001] != 1 || bySubject[1002] != 1 {
+		t.Fatalf("两个人的事实必须分别保留: %v", bySubject)
+	}
+}
+
+// Test_F87_RecallForKeepsSharedMemories 钉住边界：按人查询**不能**藏起没有归属的记忆。
+//
+// 加 subject_id 之前写入的历史数据、以及"大家共同的事"都属于这一类；
+// 过滤掉它们会让模型在被问起时突然失忆——比串台更难解释。
+func Test_F87_RecallForKeepsSharedMemories(t *testing.T) {
+	t.Parallel()
+	s := newStore(t, nil)
+	ctx := ctxScope("group-9")
+
+	if _, err := s.SaveItem(ctx, "本群每周五开黑"); err != nil { // 无归属 = 公共记忆
+		t.Fatalf("save shared: %v", err)
+	}
+	if _, err := s.SaveItem(scope.WithSubject(ctx, 2001), "张三喜欢喝橙汁"); err != nil {
+		t.Fatalf("save 张三: %v", err)
+	}
+	if _, err := s.SaveItem(scope.WithSubject(ctx, 2002), "李四喜欢打游戏"); err != nil {
+		t.Fatalf("save 李四: %v", err)
+	}
+
+	got, err := s.RecallFor(ctx, 2001)
+	if err != nil {
+		t.Fatalf("RecallFor: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("按人召回应含本人 + 公共记忆，实际 %d: %v", len(got), got)
+	}
+	for _, text := range got {
+		if strings.Contains(text, "李四") {
+			t.Fatalf("按人召回不得包含他人的私有记忆: %v", got)
+		}
+	}
+}

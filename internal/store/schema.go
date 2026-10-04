@@ -144,11 +144,19 @@ var tables = []tableDef{
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_scope_fingerprint
 				ON memories(scope_key, fingerprint)`,
 			`CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope_key, id)`,
+			// 按归属人检索（"这个人在本群说过什么"）。
+			`CREATE INDEX IF NOT EXISTS idx_memories_scope_subject
+				ON memories(scope_key, subject_id, id)`,
 		},
 		Columns: []columnSpec{
 			{Table: "memories", Name: "score", DDL: "score REAL NOT NULL DEFAULT 0"},
 			{Table: "memories", Name: "title", DDL: "title TEXT NOT NULL DEFAULT ''"},
 			{Table: "memories", Name: "source_refs", DDL: "source_refs TEXT NOT NULL DEFAULT '[]'"},
+			// subject_id 是这条记忆**关于谁**（群聊里就是发言人的 QQ 号）。
+			// 记忆按作用域（群）共享，但一条事实总有归属人；把它做成结构化字段
+			// 而不是让模型在自然语言里写主语，才能做到"看得到整个群、也查得到某个人"。
+			// 0 表示未指明归属（旧数据与无法判定的场景）。
+			{Table: "memories", Name: "subject_id", DDL: "subject_id INTEGER NOT NULL DEFAULT 0"},
 		},
 	},
 	{
@@ -276,13 +284,28 @@ var tables = []tableDef{
 	},
 }
 
-// schemaStatements 把 tables 展平成建表/建索引语句序列，顺序与注册顺序一致。
+// schemaStatements 把 tables 展平成**建表 + 触发器**语句序列，顺序与注册顺序一致。
+//
+// **索引不在这里**：见 indexStatements。
 func schemaStatements() []string {
 	out := make([]string, 0, 16)
 	for _, t := range tables {
 		out = append(out, t.CreateSQL)
-		out = append(out, t.Indexes...)
 		out = append(out, t.Attached...)
+	}
+	return out
+}
+
+// indexStatements 汇总全部索引语句。
+//
+// 索引**必须**在建表与补列之后执行：CREATE TABLE IF NOT EXISTS 对已存在的表是空操作，
+// 因此给旧库新增一个"带索引的列"时，若索引与建表同批执行，就会在列还没加上的时候
+// 去引用它——报 "no such column"。这是加列这一整类场景的结构性顺序要求，
+// 不是某一条索引的特例。
+func indexStatements() []string {
+	out := make([]string, 0, 16)
+	for _, t := range tables {
+		out = append(out, t.Indexes...)
 	}
 	return out
 }

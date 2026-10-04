@@ -93,7 +93,9 @@ func (s *Store) SaveItem(ctx context.Context, text string) (store.MemoryWriteRes
 		return store.MemoryWriteResult{}, fmt.Errorf("save memory: %w", ErrUnavailable)
 	}
 
-	best, sim, found, err := s.st.FindSimilarMemory(ctx, scopeKey, trimmed)
+	// 只在**同一个归属人**的既有记忆里找相似条目。
+	// 否则「张三很怕辣」会被判为与「李四很怕辣」相似而合并，把两个人的事混成一条。
+	best, sim, found, err := s.st.FindSimilarMemoryFor(ctx, scopeKey, scope.SubjectFrom(ctx), trimmed)
 	if err != nil {
 		return store.MemoryWriteResult{}, err
 	}
@@ -110,7 +112,14 @@ func (s *Store) SaveItem(ctx context.Context, text string) (store.MemoryWriteRes
 		}
 	}
 
-	res, err := s.st.SaveMemoryWith(ctx, store.Memory{ScopeKey: scopeKey, Text: trimmed}, opts)
+	// 归属人经 ctx 传递（与作用域同一手法）：群聊里由组合根放入发言人 QQ 号。
+	// 它让"张三的事"与"李四的事"在同一条作用域里可区分，而不必拆作用域——
+	// 拆了群里的人就互相看不见对方说过的话。
+	res, err := s.st.SaveMemoryWith(ctx, store.Memory{
+		ScopeKey:  scopeKey,
+		Text:      trimmed,
+		SubjectID: scope.SubjectFrom(ctx),
+	}, opts)
 	if err != nil {
 		return store.MemoryWriteResult{}, err
 	}
@@ -170,6 +179,28 @@ func (s *Store) Recall(ctx context.Context) ([]string, error) {
 	}
 	out := make([]string, 0, len(items))
 	for _, m := range items {
+		out = append(out, m.Text)
+	}
+	return out, nil
+}
+
+// RecallFor 按归属人召回：subjectID > 0 时返回该人的记忆 + 未指明归属的公共记忆。
+//
+// 为什么带上公共记忆：历史数据（加 subject_id 之前写入的）与"大家共同的事"都属于
+// 这一类，过滤掉它们会让模型在被问起时突然失忆——那比串台更难解释。
+func (s *Store) RecallFor(ctx context.Context, subjectID int64) ([]string, error) {
+	if s == nil || s.st == nil {
+		return nil, ErrUnavailable
+	}
+	items, err := s.st.RecallMemories(ctx, scope.ScopeFrom(ctx))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(items))
+	for _, m := range items {
+		if subjectID > 0 && m.SubjectID != 0 && m.SubjectID != subjectID {
+			continue
+		}
 		out = append(out, m.Text)
 	}
 	return out, nil

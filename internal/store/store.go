@@ -93,6 +93,7 @@ type Options struct {
 	schema        []string
 	migrations    []migration
 	columns       []columnSpec
+	indexes       []string
 	schemaVersion int
 }
 

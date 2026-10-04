@@ -14,8 +14,8 @@ memory_save
   desc: 把一条值得长期记住的信息写进记忆，必须是单行文本；记忆按会话共享，因此内容里要写清这条事实属于谁（用发言人的昵称或 QQ 号作主语）
   params: {"properties":{"text":{"description":"要记住的内容，必须单行；写清属于谁，例如「张三很怕辣」","type":"string"}},"required":["text"],"type":"object"}
 memory_recall
-  desc: 读取已保存的长期记忆
-  params: {"properties":{},"type":"object"}
+  desc: 读取已保存的长期记忆；默认返回本会话（群）的全部记忆。只想了解某个人时，传 subject_qq 只看他的——回答关于某个人的问题前应先这样做，否则会把别人的事当成他的
+  params: {"properties":{"subject_qq":{"description":"可选：只返回关于这个 QQ 号的记忆（不含未指明归属的公共记忆之外的他人记忆）。不传则返回整个会话的记忆","type":"integer"}},"type":"object"}
 recall_history
   desc: 检索本次会话之前聊过的内容；可给关键词，也可留空取最近几条
   params: {"properties":{"limit":{"description":"最多返回几条，默认 10，上限 50","type":"integer"},"query":{"description":"关键词，留空则返回最近几条","type":"string"}},"type":"object"}

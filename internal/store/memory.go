@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/drysaltyfish/agentbot/internal/textsim"
@@ -30,6 +31,9 @@ type Memory struct {
 	Score      float64
 	// Fingerprint 是作用域 + 正文的指纹，用于幂等写入。
 	Fingerprint string
+	// SubjectID 是这条记忆**关于谁**：群聊里是发言人的 QQ 号，0 表示未指明。
+	// 作用域（群）决定''谁看得到''，SubjectID 决定''这是谁的事''——两者不同维度。
+	SubjectID int64
 }
 
 // MemoryDecision 是写入决策的结论。
@@ -70,12 +74,22 @@ type MemoryWriteOptions struct {
 //
 // 导出它是为了让上层能在**歧义带**里自己做判断，而不是只能接受存储层的阈值。
 func (s *Store) FindSimilarMemory(ctx context.Context, scopeKey, text string) (Memory, float64, bool, error) {
+	return s.FindSimilarMemoryFor(ctx, scopeKey, 0, text)
+}
+
+// FindSimilarMemoryFor 只在**同一个归属人**的既有记忆里找最相似条目。
+//
+// subjectID 为 0 时匹配"未指明归属"的条目，与实际写入时的语义一致。
+// 限定归属人是必要的：不限定的话「张三很怕辣」会与「李四很怕辣」判为相似而合并，
+// 把两个人的事混成一条——那是无法事后拆开的数据损失。
+func (s *Store) FindSimilarMemoryFor(ctx context.Context, scopeKey string, subjectID int64, text string) (Memory, float64, bool, error) {
 	scope := strings.TrimSpace(scopeKey)
 	if scope == "" || strings.TrimSpace(text) == "" {
 		return Memory{}, 0, false, nil
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+memoryCols+` FROM memories WHERE scope_key = ? ORDER BY id ASC`, scope)
+		`SELECT `+memoryCols+` FROM memories WHERE scope_key = ? AND subject_id = ? ORDER BY id ASC`,
+		scope, subjectID)
 	if err != nil {
 		return Memory{}, 0, false, fmt.Errorf("find similar memory: %w", err)
 	}
@@ -128,7 +142,9 @@ func (s *Store) SaveMemoryWith(ctx context.Context, m Memory, opts MemoryWriteOp
 	if m.Kind == "" {
 		m.Kind = "fact"
 	}
-	m.Fingerprint = Fingerprint(scope, text)
+	// 指纹把**归属人**也算进去：否则「张三很怕辣」与「李四很怕辣」文本相同、
+	// 指纹相同，第二条会被幂等判据当成重复丢弃——归属不同却被当成同一条。
+	m.Fingerprint = Fingerprint(scope, strconv.FormatInt(m.SubjectID, 10), text)
 
 	err := s.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		res = MemoryWriteResult{}
@@ -148,7 +164,11 @@ func (s *Store) SaveMemoryWith(ctx context.Context, m Memory, opts MemoryWriteOp
 		}
 
 		// 2) 找最相似的既有条目。
-		candidates, err := memoryRows(ctx, tx, scope)
+		//
+		// **只在同一个归属人内比较**：跨归属人合并会把两个人的事混成一条
+		// （「张三很怕辣」+「李四很怕辣」），而那是无法事后拆开的数据损失。
+		// 无归属（subject_id = 0）的记忆自成一组，同样不与他人混合。
+		candidates, err := memoryRowsForSubject(ctx, tx, scope, m.SubjectID)
 		if err != nil {
 			return err
 		}
@@ -173,8 +193,9 @@ func (s *Store) SaveMemoryWith(ctx context.Context, m Memory, opts MemoryWriteOp
 				scope, opts.ForceMergeID).Scan(&exists); err == nil {
 				bestID = opts.ForceMergeID
 				if _, err := tx.ExecContext(ctx,
-					`UPDATE memories SET text = ?, fingerprint = ?, updated_at = ? WHERE id = ?`,
-					text, m.Fingerprint, now, bestID); err != nil {
+					`UPDATE memories SET text = ?, fingerprint = ?, updated_at = ?,`+
+						` subject_id = CASE WHEN subject_id = 0 THEN ? ELSE subject_id END WHERE id = ?`,
+					text, m.Fingerprint, now, m.SubjectID, bestID); err != nil {
 					return fmt.Errorf("update memory: %w", err)
 				}
 				res = MemoryWriteResult{Decision: MemoryUpdated, ID: bestID, MatchedID: bestID,
@@ -197,8 +218,9 @@ func (s *Store) SaveMemoryWith(ctx context.Context, m Memory, opts MemoryWriteOp
 
 		if bestID != 0 && textsim.IsDuplicate(text, bestText) {
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE memories SET text = ?, fingerprint = ?, updated_at = ? WHERE id = ?`,
-				text, m.Fingerprint, now, bestID); err != nil {
+				`UPDATE memories SET text = ?, fingerprint = ?, updated_at = ?,`+
+					` subject_id = CASE WHEN subject_id = 0 THEN ? ELSE subject_id END WHERE id = ?`,
+				text, m.Fingerprint, now, m.SubjectID, bestID); err != nil {
 				return fmt.Errorf("update memory: %w", err)
 			}
 			res = MemoryWriteResult{Decision: MemoryUpdated, ID: bestID, MatchedID: bestID,
@@ -225,9 +247,9 @@ func insertMemory(ctx context.Context, tx *sql.Tx, scope string, m Memory, text 
 	}
 	r, err := tx.ExecContext(ctx,
 		`INSERT INTO memories
-		 (scope_key, kind, title, text, source_refs, created_at, updated_at, score, fingerprint)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		scope, m.Kind, m.Title, text, m.SourceRefs, created, nowMillis(), m.Score, m.Fingerprint)
+		 (scope_key, kind, title, text, source_refs, created_at, updated_at, score, fingerprint, subject_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		scope, m.Kind, m.Title, text, m.SourceRefs, created, nowMillis(), m.Score, m.Fingerprint, m.SubjectID)
 	if err != nil {
 		return 0, fmt.Errorf("insert memory: %w", err)
 	}
@@ -239,8 +261,16 @@ func insertMemory(ctx context.Context, tx *sql.Tx, scope string, m Memory, text 
 }
 
 func memoryRows(ctx context.Context, tx *sql.Tx, scope string) ([]Memory, error) {
+	return memoryRowsForSubject(ctx, tx, scope, 0)
+}
+
+// memoryRowsForSubject 取同作用域**同归属人**的既有条目，用于相似度去重。
+//
+// 限定归属人是刻意的：跨归属人合并会把两个人的事混成一条，而那是无法事后拆开的损失。
+func memoryRowsForSubject(ctx context.Context, tx *sql.Tx, scope string, subjectID int64) ([]Memory, error) {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT `+memoryCols+` FROM memories WHERE scope_key = ? ORDER BY id ASC`, scope)
+		`SELECT `+memoryCols+` FROM memories WHERE scope_key = ? AND subject_id = ? ORDER BY id ASC`,
+		scope, subjectID)
 	if err != nil {
 		return nil, fmt.Errorf("list memories for dedup: %w", err)
 	}
@@ -256,12 +286,12 @@ func memoryRows(ctx context.Context, tx *sql.Tx, scope string) ([]Memory, error)
 	return out, rows.Err()
 }
 
-const memoryCols = "id, scope_key, kind, title, text, source_refs, created_at, updated_at, score, fingerprint"
+const memoryCols = "id, scope_key, kind, title, text, source_refs, created_at, updated_at, score, fingerprint, subject_id"
 
 func scanMemory(sc interface{ Scan(...any) error }) (Memory, error) {
 	var m Memory
 	err := sc.Scan(&m.ID, &m.ScopeKey, &m.Kind, &m.Title, &m.Text, &m.SourceRefs,
-		&m.CreatedAt, &m.UpdatedAt, &m.Score, &m.Fingerprint)
+		&m.CreatedAt, &m.UpdatedAt, &m.Score, &m.Fingerprint, &m.SubjectID)
 	return m, err
 }
 

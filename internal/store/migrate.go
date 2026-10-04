@@ -88,6 +88,11 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
+	// 索引放在**补列之后**：索引可能引用刚加上来的列（见 schema.go 的 indexStatements）。
+	if err := s.applyIndexes(ctx); err != nil {
+		return err
+	}
+
 	return s.setSchemaVersion(ctx, s.targetVersion())
 }
 
@@ -166,6 +171,30 @@ func (s *Store) applyMigration(ctx context.Context, m migration) error {
 		return fmt.Errorf("%w: version %d (%s): %w", ErrMigrationFailed, m.Version, m.Name, err)
 	}
 	return nil
+}
+
+// applyIndexes 建索引；必须在 reconcileColumns 之后调用（索引可能引用新列）。
+func (s *Store) applyIndexes(ctx context.Context) error {
+	stmts := s.indexes()
+	if len(stmts) == 0 {
+		return nil
+	}
+	return s.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		for _, stmt := range stmts {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("apply index: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+// indexes 返回期望的索引语句；测试可注入。
+func (s *Store) indexes() []string {
+	if s.opts.indexes != nil {
+		return s.opts.indexes
+	}
+	return indexStatements()
 }
 
 // reconcileColumns 补齐缺失的列（幂等）。

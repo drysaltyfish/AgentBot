@@ -28,6 +28,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/policy"
+	"github.com/drysaltyfish/agentbot/internal/scope"
 	"github.com/drysaltyfish/agentbot/internal/semcache"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/store"
@@ -51,6 +52,9 @@ type Job struct {
 	PolicyRole  string
 	SpeakerID   int64
 	SpeakerName string
+	// SubjectID 是记忆归属人（群聊里为发言人 QQ 号，私聊为 0）。
+	// 记忆按作用域共享，归属人让"张三的事"与"李四的事"在同一条作用域里可区分。
+	SubjectID int64
 	// ShouldReply 为 false 时只记录不回复：群里的环境消息也是上下文。
 	ShouldReply bool
 	// Message 是原始消息：引用解析要在 worker 里做，sink 里调 API 会死锁。
@@ -121,6 +125,8 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 	rlog := p.deps.Log.Component("reply")
 	// F-53：把权限角色放回 ctx，工具执行与提示词渲染才判定得出"是谁在调"。
 	ctx = policy.WithRole(ctx, j.PolicyRole)
+	// 记忆归属人：写入时记下"这条事实关于谁"，群聊里因此不会把别人的事答成本人的。
+	ctx = scope.WithSubject(ctx, j.SubjectID)
 	callCtx, cancel := context.WithTimeout(observe.WithTraceID(ctx, j.TraceID), p.deps.Timeout)
 	defer cancel()
 
