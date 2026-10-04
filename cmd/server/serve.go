@@ -337,12 +337,16 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 		}),
 	)
 
-	// F-53：平台 API 的执行侧硬拦截。放在这一层是因为它是所有平台动作的唯一出口
-	// （工具、审查、撤回、禁言都经 Caller），逐个调用点加判定一定会漏。
+	// F-53：平台 API 的执行侧硬拦截，挂在**工具/模型调用**的那条通道上（apiCaller）。
+	// 权限表回答的是"模型能用哪些平台动作"，而 apiCaller 正是工具唯一的平台出口，
+	// 逐个调用点加判定一定会漏。
 	apiCaller.set(transport.Chain(ws, policyMiddleware(policyTables, lg)))
 
-	sender := outbound.NewSender(transport.Chain(ws, policyMiddleware(policyTables, lg)), chain,
-		outbound.WithAudit(outboundAuditHook(catalog, lg)))
+	// 出站发送**不挂**权限表：回复投递是程序自己的行为，不是模型在选择动作。
+	// 曾经把它也挂上，后果是群聊里连 send_group_msg 都被判为越权（内置表里 everyone
+	// 只有私聊的 send_msg），表现为"机器人完全不回话"——一个只会发生在群聊、
+	// 且报错藏在 outbound 日志里的静默故障。
+	sender := outbound.NewSender(ws, chain, outbound.WithAudit(outboundAuditHook(catalog, lg)))
 	// F-86：恢复残留的在途记录（通知原会话；已过期的作废）。
 	{
 		recoverCtx, cancelRecover := context.WithTimeout(context.Background(), 30*time.Second)
@@ -459,6 +463,7 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 			Text:        text,
 			TraceID:     observe.TraceID(c),
 			Role:        agentRoleFor(c.Event, accessCtl, superUsers),
+			PolicyRole:  roleForEvent(c.Event, accessCtl, superUsers),
 			ShouldReply: shouldReply,
 			SpeakerID:   groupScopedUserID(c.Event.UserID, c.Event.GroupID),
 			SpeakerName: speakerDisplayName(c.Event.Sender, c.Event.GroupID),

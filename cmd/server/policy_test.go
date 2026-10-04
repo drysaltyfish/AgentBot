@@ -195,3 +195,62 @@ func Test_F53_PolicyStateSwapTakesEffect(t *testing.T) {
 		t.Fatal("新表没有 send_msg，必须立即拒绝")
 	}
 }
+
+// Test_F53_OutboundReplyIsNotGatedByPolicy 是一个**回归测试**：
+// 机器人自己回复用的 send_group_msg 不能被权限表拦住。
+//
+// 真实故障：曾把 policyMiddleware 同时挂到出站发送上，于是群聊里回复被判为越权
+// （内置表 everyone 只有私聊的 send_msg），表现为"机器人在群里完全不回话"，
+// 而错误只出现在 outbound 日志里。权限表管的是**模型能调用哪些动作** ——
+// 回复投递是程序自己的行为，两者不能共用同一道闸门。
+func Test_F53_OutboundReplyIsNotGatedByPolicy(t *testing.T) {
+	t.Parallel()
+	pol, err := policy.LoadDefault()
+	if err != nil {
+		t.Fatalf("LoadDefault: %v", err)
+	}
+	state := newPolicyState(pol)
+
+	// 反例：把闸门挂在发送通道上，群聊回复会被拒（这正是当初的故障）。
+	gated := policyMiddleware(state, nil)(&policyTestCaller{})
+	_, gerr := gated.Call(context.Background(), transport.Request{Action: "send_group_msg"})
+	if gerr == nil {
+		t.Fatal("everyone 角色下 send_group_msg 本应被权限表拒绝（用于确认这道闸门确实会拦）")
+	}
+
+	// 正例：出站发送通道本身（不带 policyMiddleware）必须放行。
+	plain := &policyTestCaller{}
+	if _, err := plain.Call(context.Background(), transport.Request{Action: "send_group_msg"}); err != nil {
+		t.Fatalf("出站发送不应经过权限表: %v", err)
+	}
+	if plain.calls != 1 {
+		t.Fatalf("出站发送应到达传输层: calls=%d", plain.calls)
+	}
+}
+
+// Test_F53_ToolExecutionSeesThePolicyRole 是回归测试：回复 worker 里执行工具时
+// 必须能取到权限角色。
+//
+// Job 跨了 goroutine，事件入口那个带角色的 ctx 到不了 worker；只带 agent.Role
+// 不够——工具调平台 API 时用的是 policy 的名字空间。漏带的表现是工具按 everyone
+// 被判越权（get_user_info 查群成员失败）。
+func Test_F53_ToolExecutionSeesThePolicyRole(t *testing.T) {
+	t.Parallel()
+	pol, err := policy.LoadDefault()
+	if err != nil {
+		t.Fatalf("LoadDefault: %v", err)
+	}
+	next := &policyTestCaller{}
+	guarded := policyMiddleware(newPolicyState(pol), nil)(next)
+
+	// 站在 worker 的位置：ctx 来自 worker，角色必须由 Job 带进来。
+	workerCtx := context.Background()
+	rebuilt := policy.WithRole(workerCtx, policy.RoleSuperUser)
+	if _, err := guarded.Call(rebuilt, transport.Request{Action: "set_group_ban"}); err != nil {
+		t.Fatalf("带角色后超管应能禁言: %v", err)
+	}
+	// 不带角色（漏传）时会被降级为 everyone 并拒绝 —— 这正是当初的故障形态。
+	if _, err := guarded.Call(workerCtx, transport.Request{Action: "set_group_ban"}); err == nil {
+		t.Fatal("不带角色时应 fail-closed 被拒（用于确认漏传确实会出问题）")
+	}
+}

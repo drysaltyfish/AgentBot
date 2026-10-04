@@ -150,8 +150,38 @@ func (p *Policy) cachedSet(role string) (map[string]struct{}, bool) {
 	return set, true
 }
 
+// ReadOnlyActions 是**任何角色都可调用**的只读动作白名单。
+//
+// 为什么需要它：权限表的语义是"模型能对平台做哪些**改变**"（撤消息、禁言…），
+// 而查询类动作不改变任何状态，把"查一下这个人是谁"也纳入授权，只会让工具
+// 在角色缺失时无声失败（真实故障：get_user_info 因 everyone 不含
+// get_group_member_info 而报错），收益却是零——没有一种威胁模型需要
+// "允许他发消息，但禁止他知道发消息的人叫什么"。
+//
+// 注意它只豁免**读**：写动作一律照旧走角色判定。
+var ReadOnlyActions = map[string]struct{}{
+	"get_group_member_info": {},
+	"get_group_member_list": {},
+	"get_login_info":        {},
+	"get_stranger_info":     {},
+	"get_friend_list":       {},
+	"get_group_list":        {},
+	"get_group_info":        {},
+}
+
+// IsReadOnly 报告某个 action 是否属于只读查询。
+func IsReadOnly(action string) bool {
+	_, ok := ReadOnlyActions[action]
+	return ok
+}
+
 // Allow 判定某角色能否调用某 action；未知角色 fail-closed 返回 false。
+//
+// 只读动作不受角色限制（见 ReadOnlyActions）。
 func (p *Policy) Allow(role, action string) bool {
+	if IsReadOnly(action) {
+		return true
+	}
 	set, ok := p.cachedSet(role)
 	if !ok {
 		return false

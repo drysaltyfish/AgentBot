@@ -27,6 +27,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
+	"github.com/drysaltyfish/agentbot/internal/policy"
 	"github.com/drysaltyfish/agentbot/internal/semcache"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/store"
@@ -35,12 +36,19 @@ import (
 
 // Job 是一次待处理的来信。
 type Job struct {
-	Key         session.Key
-	GroupID     int64
-	UserID      int64
-	Text        string
-	TraceID     string
-	Role        agent.Role
+	Key     session.Key
+	GroupID int64
+	UserID  int64
+	Text    string
+	TraceID string
+	Role    agent.Role
+	// PolicyRole 是 F-53 权限表里的角色名（superuser/owner/admin/member/everyone）。
+	//
+	// 它与上面的 Role（agent 的角色名空间，给 F-45 审批闸门用）是两套名字，
+	// 因此必须分别携带：工具执行时还要用 policy 的角色去判定"这个动作允许吗"，
+	// 而 job 跨了 goroutine，事件入口那个带角色的 ctx 到不了 worker——
+	// 漏带的表现是工具按 everyone 被判越权（get_user_info 查群成员被拒）。
+	PolicyRole  string
 	SpeakerID   int64
 	SpeakerName string
 	// ShouldReply 为 false 时只记录不回复：群里的环境消息也是上下文。
@@ -111,6 +119,8 @@ func New(d Deps) *Pipeline {
 // 让命中率可观测、可回归。
 func (p *Pipeline) Handle(ctx context.Context, j Job) {
 	rlog := p.deps.Log.Component("reply")
+	// F-53：把权限角色放回 ctx，工具执行与提示词渲染才判定得出"是谁在调"。
+	ctx = policy.WithRole(ctx, j.PolicyRole)
 	callCtx, cancel := context.WithTimeout(observe.WithTraceID(ctx, j.TraceID), p.deps.Timeout)
 	defer cancel()
 

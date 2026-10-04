@@ -225,3 +225,31 @@ func Test_F53_ResolvedRoleFeedsAllow(t *testing.T) {
 		t.Fatalf("resolved member role must not be allowed to ban")
 	}
 }
+
+// Test_F53_ReadOnlyActionsAreNotGated 是回归测试：查询类动作不受角色限制。
+//
+// 真实故障：模型调 get_user_info → 内部调 get_group_member_info → 被权限表按
+// everyone 拒绝（内置表里 everyone 只有 send_msg），工具因此报错。
+// 权限表管的是"能对平台做哪些改变"，读查询不该在这里被卡。
+func Test_F53_ReadOnlyActionsAreNotGated(t *testing.T) {
+	t.Parallel()
+	p, err := LoadDefault()
+	if err != nil {
+		t.Fatalf("LoadDefault: %v", err)
+	}
+	for _, action := range []string{"get_group_member_info", "get_login_info", "get_group_list"} {
+		if !IsReadOnly(action) {
+			t.Fatalf("%s 应被识别为只读动作", action)
+		}
+		// 任何角色（含 everyone 与未知角色）都应放行只读查询。
+		for _, role := range []string{RoleEveryone, RoleMember, "who-knows"} {
+			if !p.Allow(role, action) {
+				t.Fatalf("只读动作 %s 不应被角色 %s 拦住", action, role)
+			}
+		}
+	}
+	// 写动作不受豁免影响：everyone 仍然不能禁言。
+	if p.Allow(RoleEveryone, "set_group_ban") {
+		t.Fatal("写动作仍必须按角色判定（everyone 不得禁言）")
+	}
+}
