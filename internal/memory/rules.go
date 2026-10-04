@@ -21,6 +21,10 @@ var (
 	ErrUnavailable = errors.New("memory store is not configured")
 	// ErrJudgeUnparsed 表示判官的回答无法解析成"是/否"。
 	ErrJudgeUnparsed = errors.New("cannot parse judge verdict")
+	// ErrReflectUnparsed 表示反思输出不是可解析的 JSON 事实数组。
+	// 反思写入的是**无人监督**的自动内容，因此格式不合规时宁可整批丢弃，
+	// 也不要把自由文本当成事实塞进记忆。
+	ErrReflectUnparsed = errors.New("reflect output is not a JSON fact array")
 )
 
 // Limit 是单条记忆的长度上限（字符）。

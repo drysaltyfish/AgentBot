@@ -292,6 +292,44 @@ func (r RetrievalTree) EffectiveClusterThreshold() float64 {
 	return *r.ClusterThreshold
 }
 
+// EffectiveEnabled 返回是否启用空闲反思；未配置时默认关闭。
+func (r Reflect) EffectiveEnabled() bool { return orBool(r.Enabled, false) }
+
+// EffectiveEvery 返回扫描间隔；未配置或非正时取 1m。
+func (r Reflect) EffectiveEvery() time.Duration { return r.Every.Or(time.Minute) }
+
+// EffectiveIdleAfter 返回静默阈值；未配置或非正时取 5m。
+func (r Reflect) EffectiveIdleAfter() time.Duration {
+	return positiveDuration(r.IdleAfter, 5*time.Minute)
+}
+
+// EffectiveMinInterval 返回同一会话的最小反思间隔；未配置或非正时取 30m。
+func (r Reflect) EffectiveMinInterval() time.Duration {
+	return positiveDuration(r.MinInterval, 30*time.Minute)
+}
+
+// EffectiveMaxItems 返回单次送进模型的最大条目数；未配置或非正时取 40。
+func (r Reflect) EffectiveMaxItems() int { return orPositive(r.MaxItems, 40) }
+
+// EffectiveMaxFacts 返回单次最多写入的事实数；未配置或非正时取 5。
+func (r Reflect) EffectiveMaxFacts() int { return orPositive(r.MaxFacts, 5) }
+
+// EffectiveDailyBudget 返回每日反思调用上限；未配置或非正时取 50。
+func (r Reflect) EffectiveDailyBudget() int { return orPositive(r.DailyBudget, 50) }
+
+// EffectiveTimeout 返回单次反思的总预算；未配置或非正时取 45s。
+func (r Reflect) EffectiveTimeout() time.Duration {
+	return positiveDuration(r.Timeout, 45*time.Second)
+}
+
+// positiveDuration 返回 *Duration 的正值，否则取 fallback。
+func positiveDuration(d *Duration, fallback time.Duration) time.Duration {
+	if d == nil || d.D <= 0 {
+		return fallback
+	}
+	return d.D
+}
+
 // EffectiveEnabled 返回是否启用名单；未配置时默认关闭。
 func (a Access) EffectiveEnabled() bool { return orBool(a.Enabled, false) }
 

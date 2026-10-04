@@ -20,6 +20,14 @@ func WithSubject(ctx context.Context, id int64) context.Context {
 	return context.WithValue(ctx, subjectKey{}, id)
 }
 
+// WithoutSubject 显式把归属清空：用于**公共记忆**（活动通知、群规、共同决定）。
+//
+// 与"没设置过"的区别是有意的：没设置 = 跟随调用上下文（通常是发言人），
+// 显式清空 = 这条事实不属于任何个人。
+func WithoutSubject(ctx context.Context) context.Context {
+	return context.WithValue(ctx, subjectKey{}, int64(0))
+}
+
 // SubjectFrom 取出 ctx 里的归属人；没有时返回 0（未指明）。
 func SubjectFrom(ctx context.Context) int64 {
 	if ctx == nil {

@@ -6,6 +6,8 @@ package session
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -392,6 +394,37 @@ func (m *Manager) Len() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.sessions)
+}
+
+// Keys 返回当前活跃会话的键（快照，顺序不保证）。
+//
+// 给后台任务用（例如空闲反思需要知道"现在有哪些会话可以处理"）。
+// 返回副本而不是切片本身：调用方遍历时不该因为并发增删而看到半个状态。
+func (m *Manager) Keys() []Key {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Key, 0, len(m.sessions))
+	for k := range m.sessions {
+		out = append(out, k)
+	}
+	return out
+}
+
+// KeyFromString 解析 Key.String() 产出的形式，供按字符串键找回会话。
+func KeyFromString(s string) (Key, bool) {
+	parts := strings.Split(s, ":")
+	if len(parts) != 3 {
+		return Key{}, false
+	}
+	var nums [3]int64
+	for i, p := range parts {
+		n, err := strconv.ParseInt(p, 10, 64)
+		if err != nil {
+			return Key{}, false
+		}
+		nums[i] = n
+	}
+	return Key{SelfID: nums[0], GroupID: nums[1], UserID: nums[2]}, true
 }
 
 // Evicted 返回因超上限而淘汰的会话数。

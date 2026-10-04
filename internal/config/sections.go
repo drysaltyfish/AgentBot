@@ -88,6 +88,33 @@ type Agent struct {
 	MemoryJudge MemoryJudge `yaml:"memory_judge"`
 	// ToolHint 是提示模型如何使用工具（例如用 recall_history 回溯引用内容）。
 	ToolHint ToolHint `yaml:"tool_hint"`
+	// Reflect 是空闲时的记忆反思（F-48 的延伸）。**默认关闭**：它会主动花钱。
+	Reflect Reflect `yaml:"reflect"`
+}
+
+// Reflect 描述空闲反思：当一段对话滑出上下文窗口、且会话安静下来后，
+// 把那段内容交给模型提炼成长期记忆。
+//
+// 它是**后台花钱**的能力，因此四道闸门都可配，默认值一律偏保守：
+// 宁可漏记，也不让空闲任务把额度烧掉。
+type Reflect struct {
+	// Enabled 为 true 时启用；未配置时默认关闭。
+	Enabled *bool `yaml:"enabled"`
+	// Every 是扫描间隔；<=0 时用 1m。
+	Every *Duration `yaml:"every"`
+	// IdleAfter 是"这轮聊完了"的静默阈值；<=0 时用 5m。
+	IdleAfter *Duration `yaml:"idle_after"`
+	// MinInterval 是同一会话两次反思的最小间隔；<=0 时用 30m。
+	MinInterval *Duration `yaml:"min_interval"`
+	// MaxItems 是单次送进模型的最大条目数；<=0 时用 40。
+	MaxItems *int `yaml:"max_items"`
+	// MaxFacts 是单次最多写入的事实数；<=0 时用 5。
+	MaxFacts *int `yaml:"max_facts"`
+	// DailyBudget 是**每日反思调用上限**；<=0 时用 50。
+	// 这是花钱的硬闸门：额度用尽时后台任务完全不调模型。
+	DailyBudget *int `yaml:"daily_budget"`
+	// Timeout 是单次反思的总预算；<=0 时用 45s。
+	Timeout *Duration `yaml:"timeout"`
 }
 
 // ToolHint 描述工具使用提示。

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/drysaltyfish/agentbot/internal/agent"
+	"github.com/drysaltyfish/agentbot/internal/scope"
 	"github.com/drysaltyfish/agentbot/internal/tool"
 )
 
@@ -17,13 +18,20 @@ type memorySave struct{ deps Deps }
 
 func (memorySave) Name() string { return "memory_save" }
 func (memorySave) Description() string {
-	return "把一条值得长期记住的信息写进记忆，必须是单行文本；" +
-		"记忆按会话共享，因此内容里要写清这条事实属于谁（用发言人的昵称或 QQ 号作主语）"
+	return "把一条值得长期记住的信息写进记忆，必须是单行文本。" +
+		"先判断这条事实**关于谁**：关于当前说话的人就照写（如「张三很怕辣」）；" +
+		"属于大家共同的事（活动通知、群规、共同决定）就把 shared 设为 true——" +
+		"那种信息不该记成某一个人的。"
 }
 func (memorySave) Parameters() tool.Schema {
 	return tool.Schema{
 		Properties: map[string]tool.Property{
 			"text": {Type: "string", Description: "要记住的内容，必须单行；写清属于谁，例如「张三很怕辣」"},
+			"shared": {
+				Type: "boolean",
+				Description: "true 表示这是**公共记忆**（活动安排、群规、大家共同的事），" +
+					"不属于任何个人。默认 false = 关于当前发言人",
+			},
 		},
 		Required: []string{"text"},
 	}
@@ -31,6 +39,8 @@ func (memorySave) Parameters() tool.Schema {
 
 type memorySaveArgs struct {
 	Text string `arg:"text,required"`
+	// Shared 为 true 时写成公共记忆（归属留空）。
+	Shared bool `arg:"shared"`
 }
 
 func (t memorySave) Execute(ctx context.Context, args json.RawMessage) (tool.Result, error) {
@@ -53,8 +63,15 @@ func (t memorySave) Execute(ctx context.Context, args json.RawMessage) (tool.Res
 	if t.deps.Memory == nil {
 		return tool.Failure("记忆功能未配置"), nil
 	}
+	if in.Shared {
+		// 公共记忆：显式清空归属，否则会被当成"当前说话人的事"。
+		ctx = scope.WithoutSubject(ctx)
+	}
 	if err := t.deps.Memory.Save(ctx, text); err != nil {
 		return tool.Failure(err.Error()), nil
+	}
+	if in.Shared {
+		return tool.Success("ok（已记为公共记忆）"), nil
 	}
 	return tool.Success("ok"), nil
 }

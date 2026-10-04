@@ -561,6 +561,12 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 			"group_per_minute", cfg.RateLimit.EffectiveGroupPerMinute(), "group_burst", cfg.RateLimit.EffectiveGroupBurst())
 	}
 
+	// F-48 延伸：空闲反思。它会**主动花钱**，因此默认关闭，且受四道闸门约束
+	// （静默 / 有新内容 / 节流 / 每日预算），任一不满足就完全不调模型。
+	if rs := buildReflection(cfg, hist, mem, sessions, lg); rs != nil {
+		app.Go("memory-reflect", func(ctx context.Context) { rs.Run(ctx) })
+	}
+
 	// F-24：限速参数热加载。与前面的资产不同，它监听的是**配置文件本身**，
 	// 因此重载要重建整个 Config 并校验；失败保留旧参数。
 	if w := watchRateLimit(listenCtx, configPath, rateState, userLimitHook, groupLimitHook, lg); w != nil {
