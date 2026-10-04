@@ -45,7 +45,7 @@ func (h *Hybrid) Search(ctx context.Context, key, query string, limit int) ([]Hi
 	if limit <= 0 {
 		limit = memory.DefaultHybridTopK
 	}
-	items, err := h.History.Messages(ctx, key)
+	items, err := h.Messages(ctx, key)
 	if err != nil {
 		return nil, err
 	}

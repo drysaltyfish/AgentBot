@@ -165,7 +165,7 @@ func serve(cfg *config.Config, stderr io.Writer) int {
 		Max: retention,
 		Low: retention * 3 / 4,
 	})
-	var hist history.History = wrapHistoryWithRetrieval(cfg, sqliteHist, lg)
+	hist := wrapHistoryWithRetrieval(cfg, sqliteHist, lg)
 	lg.Component("session").Info("conversation history is stored in the database",
 		"retention", retention, "prompt_window", histItems)
 
