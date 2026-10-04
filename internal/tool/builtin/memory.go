@@ -16,12 +16,13 @@ type memorySave struct{ deps Deps }
 
 func (memorySave) Name() string { return "memory_save" }
 func (memorySave) Description() string {
-	return "把一条值得长期记住的信息写进记忆，必须是单行文本"
+	return "把一条值得长期记住的信息写进记忆，必须是单行文本；" +
+		"记忆按会话共享，因此内容里要写清这条事实属于谁（用发言人的昵称或 QQ 号作主语）"
 }
 func (memorySave) Parameters() tool.Schema {
 	return tool.Schema{
 		Properties: map[string]tool.Property{
-			"text": {Type: "string", Description: "要记住的内容，必须单行"},
+			"text": {Type: "string", Description: "要记住的内容，必须单行；写清属于谁，例如「张三很怕辣」"},
 		},
 		Required: []string{"text"},
 	}

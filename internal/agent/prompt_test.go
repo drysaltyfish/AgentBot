@@ -123,3 +123,22 @@ func Test_F89_AgentReportsPromptAndMemoryDigests(t *testing.T) {
 		t.Fatalf("无记忆时 MemoryDigest 应为空: %q", out3.MemoryDigest)
 	}
 }
+
+// Test_F48_MemoryInstructionRequiresSpeakerAttribution 钉住记忆指令里的**归属要求**。
+//
+// 背景：记忆按会话共享（群聊的 session key 里 UserID 为 0），若存下来的事实不带主语，
+// 「张三很怕辣」会退化成「很怕辣」，李四问起来就会答错人。
+// 因此指令必须同时要求两件事：写清属于谁、以及只转述当前发言人的记忆。
+func Test_F48_MemoryInstructionRequiresSpeakerAttribution(t *testing.T) {
+	t.Parallel()
+	instr := ProactiveMemoryInstruction("")
+	for _, want := range []string{"属于谁", "昵称", "当前发言人"} {
+		if !strings.Contains(instr, want) {
+			t.Fatalf("记忆指令应包含归属要求 %q，实际: %s", want, instr)
+		}
+	}
+	// 自定义指令仍然优先（运维可以覆盖）；这里只确认默认值本身的契约。
+	if got := ProactiveMemoryInstruction("自定义"); got != "自定义" {
+		t.Fatalf("自定义指令应优先生效: %q", got)
+	}
+}
