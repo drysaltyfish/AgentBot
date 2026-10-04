@@ -27,6 +27,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
+	"github.com/drysaltyfish/agentbot/internal/policy"
 	"github.com/drysaltyfish/agentbot/internal/reply"
 	"github.com/drysaltyfish/agentbot/internal/router"
 	"github.com/drysaltyfish/agentbot/internal/scoped"
@@ -244,6 +245,18 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 	}
 	// F-82：人格定义在启动期加载并校验——人格名写错要在启动时失败，
 	// 而不是等第一个用户来聊天才发现。F-65 的半静态段取自这里。
+	// F-53：权限表。它同时供提示词侧（半静态段渲染）与执行侧（API 硬拦截）使用。
+	policyTable, policyErr := loadPolicy(cfg, lg)
+	if policyErr != nil {
+		lifecycle.Error("cannot load the policy table", "error", policyErr, "path", cfg.Policy.File)
+		return 1
+	}
+	policyTables := newPolicyState(policyTable)
+	superUsers := make(map[int64]struct{}, len(cfg.Moderation.SuperUsers))
+	for _, id := range cfg.Moderation.SuperUsers {
+		superUsers[id] = struct{}{}
+	}
+
 	personaReg, personaMgr, personaErr := buildPersonas(cfg, personaStoreAdapter{st: st}, lg)
 	if personaErr != nil {
 		lifecycle.Error("cannot load personas", "error", personaErr, "dir", cfg.Prompt.EffectivePersonasDir())
@@ -256,9 +269,9 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 		AmbientTokenBudget: cfg.LLM.AmbientTokenBudgetOr(conversation.DefaultAmbientTokenBudget),
 		AmbientMaxChars:    cfg.LLM.AmbientMaxCharsOr(conversation.DefaultAmbientMaxChars),
 		// F-65 半静态段：会话人格设定。未配置人格时逐字节等于静态段。
-		HalfStatic: personaHalfStatic(personaReg, personaMgr, func(msg string) {
+		HalfStatic: policyPromptProvider(personaHalfStatic(personaReg, personaMgr, func(msg string) {
 			lg.Component("persona").Warn(msg)
-		}),
+		}), policyTables, lg),
 	})
 	lg.Component("llm").Info("cache-first layout pinned",
 		"prefix_hash", asm.PrefixHash(), "prefix_runes", len([]rune(sysPrompt)),
@@ -310,9 +323,12 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 		}),
 	)
 
-	apiCaller.set(ws)
+	// F-53：平台 API 的执行侧硬拦截。放在这一层是因为它是所有平台动作的唯一出口
+	// （工具、审查、撤回、禁言都经 Caller），逐个调用点加判定一定会漏。
+	apiCaller.set(transport.Chain(ws, policyMiddleware(policyTables, lg)))
 
-	sender := outbound.NewSender(ws, chain, outbound.WithAudit(outboundAuditHook(catalog, lg)))
+	sender := outbound.NewSender(transport.Chain(ws, policyMiddleware(policyTables, lg)), chain,
+		outbound.WithAudit(outboundAuditHook(catalog, lg)))
 	// F-86：恢复残留的在途记录（通知原会话；已过期的作废）。
 	{
 		recoverCtx, cancelRecover := context.WithTimeout(context.Background(), 30*time.Second)
@@ -501,6 +517,11 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 		defer w.Stop()
 	}
 
+	// F-24：权限表热加载（仅当外部文件存在时监听；不存在则用内置基线）。
+	if w := watchPolicyFile(listenCtx, cfg.Policy.File, policyTables, lg); w != nil {
+		defer w.Stop()
+	}
+
 	// F-18：令牌桶限速（默认关闭）。超限事件会被整条丢弃——这是刻意的：
 	// 限速的目的就是让刷屏不产生任何 LLM 调用，代价远低于额度被打爆。
 	// F-24：规则**始终注册**，内部每次解引用当前参数，因此热加载（含"先关后开"）
@@ -641,7 +662,8 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 			return
 		}
 
-		ectx := eventTraceContext(listenCtx, ev)
+		// F-53：把已解析的角色放进 ctx——提示词侧渲染与执行侧拦截都用它。
+		ectx := policy.WithRole(eventTraceContext(listenCtx, ev), policyRole(ev, superUsers))
 		eventQueue.Submit(eventJob{ctx: ectx, event: ev, caller: caller})
 	}
 
