@@ -310,4 +310,14 @@ retrieval:
   vector_weight: 1.0
   top_k: 5                   # 默认返回条数；工具给出的 limit 优先
   candidate_k: 20            # 每路候选数
+  # 摘要树（F-52）：独立于关键词/向量的第三条召回源，在摘要层检索，
+  # 宏观问题因此能命中上层摘要。摘要用确定性拼接（不调模型），聚类用二值哈希向量；
+  # 树按会话缓存，条目数变化时重建。
+  tree:
+    enabled: false
+    max_levels: 3
+    min_cluster: 2           # 小于 2 会退化成单链，配置侧会回填
+    branching: 4
+    max_nodes: 10000
+    cluster_threshold: 0.5
 

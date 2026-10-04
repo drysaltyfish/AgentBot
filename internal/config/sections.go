@@ -250,6 +250,25 @@ type Singleflight struct {
 	Notice *bool `yaml:"notice"`
 }
 
+// RetrievalTree 是摘要树召回（F-52）的配置。
+//
+// 它是混合检索之外**独立的一条召回源**：在摘要层检索，宏观问题因此有机会
+// 命中上层摘要，而不是只能在原文里找关键词。
+type RetrievalTree struct {
+	// Enabled 为 true 时启用；未配置时默认关闭。
+	Enabled *bool `yaml:"enabled"`
+	// MaxLevels 是最多再构建几层；<=0 时用 3。
+	MaxLevels *int `yaml:"max_levels"`
+	// MinCluster 是成簇下限；<=1 时用 2（小于 2 会退化成单链）。
+	MinCluster *int `yaml:"min_cluster"`
+	// Branching 是单簇节点上限；<=1 时用 4。
+	Branching *int `yaml:"branching"`
+	// MaxNodes 是全树节点上限；<=0 时用 10000。
+	MaxNodes *int `yaml:"max_nodes"`
+	// ClusterThreshold 是归入既有簇的最低相似度；<0 时用 0.5。
+	ClusterThreshold *float64 `yaml:"cluster_threshold"`
+}
+
 // Retrieval 描述混合检索（F-51）。默认关闭。
 //
 // 关闭是默认值：它改变 recall_history 的排序口径（关键词 + 向量融合），
@@ -265,6 +284,8 @@ type Retrieval struct {
 	TopK *int `yaml:"top_k"`
 	// CandidateK 是每路候选数；<=0 时用 20。
 	CandidateK *int `yaml:"candidate_k"`
+	// Tree 是摘要树召回（F-52）；仅在 Enabled 且本配置启用时生效。
+	Tree RetrievalTree `yaml:"tree"`
 }
 
 // Stream 描述流式增量发送（F-64）。默认关闭。

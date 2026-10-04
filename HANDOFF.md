@@ -32,6 +32,7 @@
 | F-23 | 定期回收接入 Bot 生命周期（`app.Go`，不再是没人启动的 `StartReclaimer`） | Test_F23_ReclaimerIsOwnedByBotLifecycle（100 会话回收 + Shutdown 后回收器确实停止） |
 | F-49（持久化） | `memory.SQLiteTierStore`：分层记忆落 SQLite（id 走 tier_ids 统一分配器，scope 全程参与） | Test_F49_SQLiteTierStoreSurvivesReopen、Test_F49_TieredMemoryOverSQLiteEndToEnd |
 | F-63 | 语义缓存接在**回复链路**（会话键 + 人格指纹 + 出口过滤 + 历史一次到位）；`vector.TextBinary` 提供二值哈希向量化；命中/未命中/省下 token 进指标 | Test_F63_SecondIdenticalQuestionSkipsTheModel、Test_F63_ToolTurnsAreNotCached、Test_F63_CacheHitGoesThroughTheSendChain、Test_F63_BuildSemcacheFollowsConfig |
+| F-52 | 摘要树作为**第三条独立召回源**接入 `history.Hybrid`（摘要层检索，与 BM25/向量并列而非硬融合）；确定性拼接摘要 + 二值哈希聚类；按会话缓存、条目数变化重建 | Test_F52_TreeIsAnIndependentRecallSource、Test_F52_TreeRebuildsWhenHistoryGrows、Test_F52_WrapHistoryEnablesSummaryTree |
 | F-51 | `history.Hybrid`：BM25 + 二值向量 + RRF 融合，包装历史存储即生效；`recall_history` 靠既有 Searcher 断言自动改走检索；只对对话轮次建索引 | Test_F51_HybridSearchFindsKeywordHitWithContext、Test_F51_HybridSkipsNonConversationalEntries、Test_F51_WrapHistoryWithRetrievalFollowsConfig |
 | F-49（切换） | 分层记忆上线：Working/Episodic 落 tier 表，**Semantic 复用 F-87 扁平记忆表**（不另写判定）；`TieredMemory` 实现 `MemoryAdmin`；直连路径也开始注入记忆 | Test_F49_SemanticLayerReusesF87Dedup、Test_F49_TieredMemoryAdminForgetAndList、Test_F49_BuildAgentWiresTieredMemory、Test_F49_DirectAgentInjectsMemory |
 | F-24（人格目录） | `watchPersonas` 监听人格目录热替换定义；`reload` 指纹支持目录（逐子文件，避免"改已存在文件不触发"） | Test_F24_PersonaFileChangeSwapsDefinitions、Test_F24_ReloadsDirectoryContentChange |
@@ -51,17 +52,16 @@
 范围内的功能全部完成。剩余工作只有 §3.2 的接线；
 F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 
-### 3.2 接线（剩 2 处，按建议顺序）
+### 3.2 接线（剩 1 处，按建议顺序）
 
 ~~#1 admin 命令入口~~、~~#2 cost 会话维度~~、~~#3 agent.paradigm~~、~~#4 分层记忆~~、
-~~#5 semcache~~、~~#7 stream->outbound~~、~~#8 trace~~、~~#10 F-82 剩余~~ 均已完成。
-#4 的两半（F-49 分层记忆、F-51 混合检索）都已接线：F-51 通过
-`history.Hybrid` 包一层历史存储，`recall_history` 靠既有的 Searcher 类型断言自动改走检索。
+~~#5 semcache~~、~~#6 tree 摘要树~~、~~#7 stream->outbound~~、~~#8 trace~~、~~#10 F-82 剩余~~
+均已完成。#4 的两半（F-49 分层记忆、F-51 混合检索）与 F-52 都接在检索链路上：
+`history.Hybrid` 包一层历史存储，摘要树是其中独立的一条召回源。
 
 | # | 项 | 入口 | 前置条件 / 风险 |
 |---|---|---|---|
 | 3 | ~~agent.paradigm（F-36/F-37）~~ **已完成** | — | 已接：LLM Evaluator + wrapParadigm；F-37 目前只有默认单 worker，无 workers 列表配置 |
-| 6 | tree 摘要树（F-52） | 摄入路径 | 需要注入 Summarizer / Embedder |
 | 9 | reload 其余资产（F-24） | 提示词/开关/限速 | **人格目录已接**（`watchPersonas` + 目录级指纹）。开关本来就"读时查 store"，外部改文件立即生效，无需监听。**提示词正文刻意不热加载**：它在启动时固定正是前缀缓存（F-65）的前提。限速参数仍未热加载（构造时定值） |
 
 ## 4. 已知偏离与诚实标注（不要当成"已完成"）

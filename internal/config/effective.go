@@ -239,6 +239,43 @@ func (m Moderation) EffectiveSpamMaxMessages() int {
 	return orPositive(m.AntiSpam.MaxMessages, defaultModerationSpamMaxMessages)
 }
 
+// EffectiveEnabled 返回是否启用摘要树召回；未配置时默认关闭。
+func (r RetrievalTree) EffectiveEnabled() bool { return orBool(r.Enabled, false) }
+
+// EffectiveMaxLevels 返回最多构建层数；未配置或非正时取 memory 默认值。
+func (r RetrievalTree) EffectiveMaxLevels() int {
+	return orPositive(r.MaxLevels, memory.DefaultTreeMaxLevels)
+}
+
+// EffectiveMinCluster 返回成簇下限；未配置或小于 2 时取 memory 默认值。
+func (r RetrievalTree) EffectiveMinCluster() int {
+	if r.MinCluster == nil || *r.MinCluster < memory.DefaultTreeMinCluster {
+		return memory.DefaultTreeMinCluster
+	}
+	return *r.MinCluster
+}
+
+// EffectiveBranching 返回单簇节点上限；未配置或小于 2 时取 memory 默认值。
+func (r RetrievalTree) EffectiveBranching() int {
+	if r.Branching == nil || *r.Branching < 2 {
+		return memory.DefaultTreeBranching
+	}
+	return *r.Branching
+}
+
+// EffectiveMaxNodes 返回全树节点上限；未配置或非正时取 memory 默认值。
+func (r RetrievalTree) EffectiveMaxNodes() int {
+	return orPositive(r.MaxNodes, memory.DefaultTreeMaxNodes)
+}
+
+// EffectiveClusterThreshold 返回聚类阈值；未配置或为负时取 memory 默认值。
+func (r RetrievalTree) EffectiveClusterThreshold() float64 {
+	if r.ClusterThreshold == nil || *r.ClusterThreshold < 0 {
+		return memory.DefaultClusterThreshold
+	}
+	return *r.ClusterThreshold
+}
+
 // EffectiveEnabled 返回是否启用混合检索；未配置时默认关闭。
 func (r Retrieval) EffectiveEnabled() bool { return orBool(r.Enabled, false) }
 

@@ -21,6 +21,26 @@ func wrapHistoryWithRetrieval(cfg *config.Config, base history.History, lg *obse
 		TopK:          cfg.Retrieval.EffectiveTopK(),
 		CandidateK:    cfg.Retrieval.EffectiveCandidateK(),
 	})
+	// F-52：摘要树是独立的一条召回源，与关键词/向量并列而不是替代。
+	if cfg.Retrieval.Tree.EffectiveEnabled() {
+		hybrid.WithTree(&history.TreeConfig{
+			MaxLevels:        cfg.Retrieval.Tree.EffectiveMaxLevels(),
+			MinCluster:       cfg.Retrieval.Tree.EffectiveMinCluster(),
+			Branching:        cfg.Retrieval.Tree.EffectiveBranching(),
+			MaxNodes:         cfg.Retrieval.Tree.EffectiveMaxNodes(),
+			ClusterThreshold: cfg.Retrieval.Tree.EffectiveClusterThreshold(),
+		}, func(msg string) {
+			if lg != nil {
+				lg.Component("memory").Warn(msg)
+			}
+		})
+		if lg != nil {
+			lg.Component("memory").Info("summary-tree recall is enabled",
+				"max_levels", cfg.Retrieval.Tree.EffectiveMaxLevels(),
+				"min_cluster", cfg.Retrieval.Tree.EffectiveMinCluster(),
+				"branching", cfg.Retrieval.Tree.EffectiveBranching())
+		}
+	}
 	if lg != nil {
 		lg.Component("memory").Info("hybrid retrieval is enabled for history recall",
 			"keyword_weight", cfg.Retrieval.EffectiveKeywordWeight(),

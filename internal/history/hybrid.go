@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"strings"
+	"sync"
 
 	"github.com/drysaltyfish/agentbot/internal/memory"
 	"github.com/drysaltyfish/agentbot/internal/vector"
@@ -22,11 +23,29 @@ type Hybrid struct {
 	History
 	// Config 是 F-51 的融合参数（权重、TopK、候选数、RRF k）。
 	Config memory.HybridConfig
+	// Tree 非 nil 时再加一条摘要树召回（F-52）。
+	Tree *TreeConfig
+
+	treeMu sync.Mutex
+	trees  map[string]*treeCache
+	warn   func(string)
 }
 
 // NewHybrid 构造；base 为 nil 时退化为不可用（Search 返回错误）。
 func NewHybrid(base History, cfg memory.HybridConfig) *Hybrid {
 	return &Hybrid{History: base, Config: cfg}
+}
+
+// WithTree 启用摘要树召回（F-52）；cfg 为 nil 或 warn 为 nil 都安全。
+//
+// 返回自身以便链式构造：调用方一眼能看出"这一层检索开了哪些源"。
+func (h *Hybrid) WithTree(cfg *TreeConfig, warn func(string)) *Hybrid {
+	if h == nil {
+		return h
+	}
+	h.Tree = cfg
+	h.warn = warn
+	return h
 }
 
 // hybridEntry 记住条目在原始切片中的位置，用于带出前后文。
@@ -74,18 +93,47 @@ func (h *Hybrid) Search(ctx context.Context, key, query string, limit int) ([]Hi
 	fused, _ := retriever.Search(ctx, query, vector.TextVector(query, vector.TextDim), limit)
 
 	out := make([]Hit, 0, len(fused))
-	for _, f := range fused {
-		if f.ID < 0 || int(f.ID) >= len(entries) {
-			continue
+	seen := make(map[string]bool, len(fused))
+	appendHit := func(e hybridEntry) {
+		key := hitKey(e.item)
+		if seen[key] {
+			return
 		}
-		e := entries[f.ID]
+		seen[key] = true
 		out = append(out, Hit{
 			Item:   e.item,
 			Before: neighbour(items, e.orig-1),
 			After:  neighbour(items, e.orig+1),
 		})
 	}
+	for _, f := range fused {
+		if f.ID < 0 || int(f.ID) >= len(entries) {
+			continue
+		}
+		appendHit(entries[f.ID])
+	}
+
+	// F-52：摘要树是**独立的一条**召回源。放在融合之后补齐，而不是混进 RRF：
+	// 树的分数与 BM25/汉明距离不同量纲，硬融合只会让两个分数互相污染。
+	if h.Tree != nil {
+		for _, hit := range h.summaryHits(ctx, key, items, entries, query, limit) {
+			key := hitKey(hit.Item)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, hit)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
 	return out, nil
+}
+
+// hitKey 用内容与时间去重：同一条目在两路里出现时，这两者必然相同。
+func hitKey(it Item) string {
+	return it.At.String() + "\x00" + it.Content
 }
 
 // conversationalEntries 只保留真正的对话轮次：工具轮次与 marker 不是"聊过的内容"。

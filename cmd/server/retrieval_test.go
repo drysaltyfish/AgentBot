@@ -37,3 +37,25 @@ func Test_F51_WrapHistoryWithRetrievalFollowsConfig(t *testing.T) {
 		t.Fatalf("包装层未透传底层存储: %+v (%v)", items, err)
 	}
 }
+
+// Test_F52_WrapHistoryEnablesSummaryTree 覆盖 F-52 的接线开关：
+// 只有显式开启摘要树时才挂上它——它是额外的一条召回源，不是默认行为。
+func Test_F52_WrapHistoryEnablesSummaryTree(t *testing.T) {
+	t.Parallel()
+	base := history.NewMemory(10)
+	cfg := config.Default()
+	cfg.Retrieval.Enabled = ptr(true)
+
+	if got := wrapHistoryWithRetrieval(cfg, base, nil).(*history.Hybrid); got.Tree != nil {
+		t.Fatal("未开启 tree 时不该挂摘要树")
+	}
+
+	cfg.Retrieval.Tree.Enabled = ptr(true)
+	got := wrapHistoryWithRetrieval(cfg, base, nil).(*history.Hybrid)
+	if got.Tree == nil {
+		t.Fatal("开启 tree 后应挂上摘要树配置")
+	}
+	if got.Tree.MinCluster < 2 || got.Tree.MaxLevels <= 0 {
+		t.Fatalf("树参数应回填默认值: %+v", got.Tree)
+	}
+}
