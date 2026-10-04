@@ -140,25 +140,16 @@ func systemPrompt(cfg *config.Config) (string, error) {
 	return conversation.DefaultSystemPrompt, nil
 }
 
-// buildAgent 按配置装配 Agent（F-35 + F-41 + F-44 + F-45）。
+// buildLongTermMemory 装配长期记忆（F-49 分层 + F-87 语义判定）；未启用时返回 (nil,nil)。
 //
-// 返回的是 agent.Agent 接口：未启用 ReAct 时返回 DirectAgent，
-// 因此调用方对两条路径完全同形，不需要分支。
-func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, hist history.History, st *store.Store, caller builtin.CallerProvider, lg *observe.Logger, auditLog *audit.Logger) (agent.Agent, agent.Memory, error) {
-	if !cfg.Agent.Enabled {
-		return wrapParadigm(cfg, model, &agent.DirectAgent{LLM: model, Assembler: asm}, lg), nil, nil
+// 直连与 ReAct 两条路径共用它：关掉 ReAct 不等于关掉记忆，否则同一个部署换个
+// 模式就会突然"想不起"用户说过的事——而这种差别用户只会理解为"它变笨了"。
+func buildLongTermMemory(cfg *config.Config, st *store.Store, lg *observe.Logger) (agent.Memory, builtin.MemoryAdmin) {
+	if !cfg.Agent.EffectiveMemory() || st == nil {
+		return nil, nil
 	}
-
-	registry := tool.New(tool.WithWarnFunc(func(msg string) {
-		lg.Component("tool").Warn(msg)
-	}))
-
-	// F-87：记忆落在持久层。
-	//
-	// 语义判官用**关闭思考**的模型：只在相似度落在歧义带时才问一次，
-	// 因此绝大多数字记忆写入不付额外调用。判官不可用时退回确定性判据，
-	// 写入照常成功——判官只是把判定做得更准，不是必须依赖。
-	maxPerScope := cfg.Agent.EffectiveMemoryMax()
+	// F-87：语义判官用**关闭思考**的模型，只在相似度落在歧义带时才问一次。
+	// 判官不可用时退回确定性判据，写入照常成功——它让判定更准，不是必须依赖。
 	var judge memory.Judge
 	if cfg.Agent.MemoryJudge.EffectiveEnabled() {
 		jm, jerr := buildJudgeLLM(cfg, lg)
@@ -172,26 +163,51 @@ func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, 
 			lg.Component("memory").Info("semantic memory judge is enabled (thinking off)")
 		}
 	}
+	maxPerScope := cfg.Agent.EffectiveMemoryMax()
+	// F-49 分层记忆：Working/Episodic 落 tier 表，Semantic 复用 F-87 的扁平记忆表。
+	// 语义层不另写一套判定，是因为那会让"工具说合并了、召回里却有两条"成为可能。
+	flat := memory.New(memory.Options{
+		Store: st, Judge: judge, MaxPerScope: maxPerScope,
+		Warn: func(msg string) { lg.Component("memory").Info(msg) },
+	})
+	tiered := memory.NewTiered(memory.TieredOptions{
+		Store: memory.NewCompositeTierStore(
+			memory.NewSQLiteTierStore(st),
+			memory.NewSemanticTierStore(flat),
+		),
+		// 固化产出的事实交给语义层，由 F-87 的判定决定是新增还是并入。
+		Consolidator: memory.RuleConsolidator{MinScore: 0, MaxFacts: maxPerScope},
+		Warn:         func(msg string) { lg.Component("memory").Info(msg) },
+	})
+	// 分层记忆同时承担 F-88 的遗忘/检视能力；编译期钉住，避免"接口变了却没人发现"。
+	var _ builtin.MemoryAdmin = (*memory.TieredMemory)(nil)
+	lg.Component("memory").Info("tiered long-term memory is active",
+		"max_per_scope", maxPerScope, "judge", judge != nil,
+		"working_limit", memory.DefaultWorkingLimit)
+	return tiered, tiered
+}
 
-	var (
-		mem     agent.Memory
-		memImpl *memory.Store
-		// 注意：不能把 nil 的 *memory.Store 直接塞进接口——那样接口不为 nil，
-		// 工具会以为管理能力可用，调用时才炸。
-		memAdmin builtin.MemoryAdmin
-	)
-	if cfg.Agent.EffectiveMemory() {
-		memImpl = memory.New(memory.Options{
-			Store: st, Judge: judge, MaxPerScope: maxPerScope,
-			Warn: func(msg string) { lg.Component("memory").Info(msg) },
-		})
-		mem = memImpl
-		memAdmin = memImpl
-		lg.Component("memory").Info("long-term memory is stored in the database",
-			"max_per_scope", maxPerScope, "judge", judge != nil)
+// buildAgent 按配置装配 Agent（F-35 + F-41 + F-44 + F-45）。
+//
+// 返回的是 agent.Agent 接口：未启用 ReAct 时返回 DirectAgent，
+// 因此调用方对两条路径完全同形，不需要分支。
+func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, hist history.History, st *store.Store, caller builtin.CallerProvider, lg *observe.Logger, auditLog *audit.Logger) (agent.Agent, agent.Memory, error) {
+	mem, memAdmin := buildLongTermMemory(cfg, st, lg)
+	if !cfg.Agent.Enabled {
+		// 直连路径同样注记忆：否则"关掉 ReAct"会连带把长期记忆一起关掉。
+		direct := &agent.DirectAgent{
+			LLM: model, Assembler: asm, Memory: mem,
+			Warn: func(msg string) { lg.Component("agent").Warn(msg) },
+		}
+		return wrapParadigm(cfg, model, direct, lg), mem, nil
 	}
 
-	// 一次性迁移：旧记忆文件导入（幂等）。
+	registry := tool.New(tool.WithWarnFunc(func(msg string) {
+		lg.Component("tool").Warn(msg)
+	}))
+
+	// 一次性迁移：旧记忆文件导入（幂等）。导入的是扁平记忆表，也就是 Semantic 层，
+	// 因此分层与扁平两条路径看到的是同一批事实，不需要额外搬运。
 	if legacy := strings.TrimSpace(cfg.Agent.MemoryFile); legacy != "" && mem != nil {
 		migCtx, cancelMemMig := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancelMemMig()

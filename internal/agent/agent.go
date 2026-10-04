@@ -4,6 +4,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
@@ -123,6 +124,20 @@ type DirectAgent struct {
 	LLM llm.LLM
 	// Assembler 是必填的消息装配器：消息布局由它拥有，agent 不自己拼。
 	Assembler MessageAssembler
+	// Memory 是长期记忆（F-48）；nil 表示未启用。
+	//
+	// 直连路径同样要注入记忆："关掉 ReAct"不意味着"关掉记忆"，
+	// 否则同一个部署换个模式就会突然想不起用户说过的事。
+	Memory Memory
+	// Warn 接收降级告警（记忆召回失败等）；nil 时静默。
+	Warn func(string)
+}
+
+// warnf 调用告警回调（未配置时丢弃）。
+func (a *DirectAgent) warnf(format string, args ...any) {
+	if a.Warn != nil {
+		a.Warn(fmt.Sprintf(format, args...))
+	}
 }
 
 // Run 实现 Agent。
@@ -134,7 +149,7 @@ func (a *DirectAgent) Run(ctx context.Context, in Input) (*Output, error) {
 	if a.Assembler == nil {
 		return out, ErrNoAssembler
 	}
-	messages := a.Assembler.BuildFor(ctx, in.SessionKey, in.History, "", in.Query)
+	messages := a.buildMessages(ctx, in)
 
 	resp, err := a.LLM.Chat(ctx, &llm.ChatRequest{Messages: messages})
 	if err != nil {
@@ -149,6 +164,20 @@ func (a *DirectAgent) Run(ctx context.Context, in Input) (*Output, error) {
 	out.FinishReason = resp.FinishReason
 	out.AddStep(Step{Type: StepThought, Content: resp.Content})
 	return out, nil
+}
+
+// buildMessages 装配本轮消息，并按 ADR-0002 把长期记忆注入 system 之后、历史之前。
+func (a *DirectAgent) buildMessages(ctx context.Context, in Input) []llm.Message {
+	memoryBlock := ""
+	if a.Memory != nil {
+		items, err := a.Memory.Recall(ctx)
+		if err != nil {
+			a.warnf("cannot recall memory: %v", err)
+		} else {
+			memoryBlock = RenderMemory(items)
+		}
+	}
+	return a.Assembler.BuildFor(ctx, in.SessionKey, in.History, memoryBlock, in.Query)
 }
 
 var _ Agent = (*DirectAgent)(nil)
@@ -171,7 +200,7 @@ func (a *DirectAgent) RunStream(ctx context.Context, in Input, splitter *llm.Str
 		return a.Run(ctx, in)
 	}
 
-	messages := a.Assembler.BuildFor(ctx, in.SessionKey, in.History, "", in.Query)
+	messages := a.buildMessages(ctx, in)
 	ch, err := a.LLM.ChatStream(ctx, &llm.ChatRequest{Messages: messages})
 	if err != nil {
 		out.AddStep(Step{Type: StepObservation, Error: err.Error()})

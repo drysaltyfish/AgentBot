@@ -663,6 +663,119 @@ func (m *TieredMemory) RecallLayered(ctx context.Context, query string) ([]TierI
 	return rankAndDedupe(picked, query), nil
 }
 
+// Forget 删除一条记忆（F-88 的 forget_memory）。
+//
+// 顺序是刻意的：先在长期事实里找（那正是用户通过 list_memories 看到的东西），
+// 找不到再退到 Working / Episodic。反过来的话会出现"列表里有、删不掉"——
+// 那是最让人困惑的一类不一致。
+func (m *TieredMemory) Forget(ctx context.Context, id int64) (bool, error) {
+	if m == nil || m.st == nil {
+		return false, ErrUnavailable
+	}
+	sc, err := m.scopeOf(ctx)
+	if err != nil {
+		return false, err
+	}
+	if src, ok := m.st.(MemoryAdminSource); ok {
+		deleted, ferr := src.ForgetMemory(ctx, sc, id)
+		if ferr != nil {
+			return false, ferr
+		}
+		if deleted {
+			return true, nil
+		}
+	}
+	if ok, werr := m.st.DeleteWorking(ctx, sc, id); werr != nil {
+		return false, werr
+	} else if ok {
+		return true, nil
+	}
+	return m.st.DeleteEpisodeItem(ctx, sc, id)
+}
+
+// ForgetScope 清空当前作用域的三层（F-88）。
+//
+// TierStore 保持最小：它没有"清空作用域"接口，因此过程层按条删除。
+// 删除失败不静默：能删多少返回多少，但第一个错误会带出去。
+func (m *TieredMemory) ForgetScope(ctx context.Context) (int, error) {
+	if m == nil || m.st == nil {
+		return 0, ErrUnavailable
+	}
+	sc, err := m.scopeOf(ctx)
+	if err != nil {
+		return 0, err
+	}
+	total := 0
+	if src, ok := m.st.(MemoryAdminSource); ok {
+		n, ferr := src.ForgetScope(ctx, sc)
+		if ferr != nil {
+			return total, ferr
+		}
+		total += n
+	}
+	working, werr := m.st.Working(ctx, sc)
+	if werr != nil {
+		return total, werr
+	}
+	for _, it := range working {
+		if ok, derr := m.st.DeleteWorking(ctx, sc, it.ID); derr != nil {
+			return total, derr
+		} else if ok {
+			total++
+		}
+	}
+	eps, eerr := m.st.Episodes(ctx, sc, 0)
+	if eerr != nil {
+		return total, eerr
+	}
+	for _, ep := range eps {
+		if ok, derr := m.st.DeleteEpisode(ctx, sc, ep.ID); derr != nil {
+			return total, derr
+		} else if ok {
+			total += len(ep.Items)
+		}
+	}
+	return total, nil
+}
+
+// List 列出当前作用域的长期事实（F-88 的 list_memories）。
+//
+// 只列长期事实，不列 Working/Episodic：用户说"列出我的记忆"指的是被固化下来的
+// 东西；把会话缓冲也列出来会让列表在每次对话后剧烈变化，等于没有列表。
+func (m *TieredMemory) List(ctx context.Context, limit int) ([]store.Memory, error) {
+	if m == nil || m.st == nil {
+		return nil, ErrUnavailable
+	}
+	sc, err := m.scopeOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if src, ok := m.st.(MemoryAdminSource); ok {
+		return src.ListMemories(ctx, sc, limit)
+	}
+	// 语义层给不出完整视图时，退化为从 TierItem 拼一个最小视图（字段会缺，
+	// 但绝不返回伪造的作用域或时间戳）。
+	items, serr := m.st.Semantics(ctx, sc)
+	if serr != nil {
+		return nil, serr
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	out := make([]store.Memory, 0, len(items))
+	for _, it := range items {
+		out = append(out, store.Memory{
+			ID:        it.ID,
+			ScopeKey:  sc,
+			Title:     it.Title,
+			Text:      it.Text,
+			Score:     it.Score,
+			CreatedAt: it.CreatedAt.UnixMilli(),
+		})
+	}
+	return out, nil
+}
+
 // quotas 返回三层的条数配额与 token 配额（下标 0/1/2 对应 Working/Episodic/Semantic）。
 func (p RecallPolicy) quotas() ([3]int, [3]int) {
 	var counts, tokens [3]int

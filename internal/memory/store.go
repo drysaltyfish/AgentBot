@@ -70,22 +70,32 @@ func New(opts Options) *Store {
 // 作用域经 ctx 传递（键由 internal/scope 拥有，agent.WithMemoryScope 是它的别名），
 // 因此这里不接收 scope 参数。
 func (s *Store) Save(ctx context.Context, text string) error {
+	_, err := s.SaveItem(ctx, text)
+	return err
+}
+
+// SaveItem 与 Save 相同，但返回写入决策。
+//
+// 存在的理由：分层记忆（F-49）把本实现当作它的 Semantic 层，需要知道这次写入
+// 是"新增"还是"并入"——那正是 F-87 判定的结论。把结论传出去，比让上层
+// 再猜一次要可靠。
+func (s *Store) SaveItem(ctx context.Context, text string) (store.MemoryWriteResult, error) {
 	if s == nil || s.st == nil {
-		return ErrUnavailable
+		return store.MemoryWriteResult{}, ErrUnavailable
 	}
 	trimmed, err := Validate(text)
 	if err != nil {
-		return err
+		return store.MemoryWriteResult{}, err
 	}
 	scopeKey := scope.ScopeFrom(ctx)
 	if scopeKey == "" {
 		// 空作用域会把所有会话的记忆混在一起——宁可写入失败，也不能串。
-		return fmt.Errorf("save memory: %w", ErrUnavailable)
+		return store.MemoryWriteResult{}, fmt.Errorf("save memory: %w", ErrUnavailable)
 	}
 
 	best, sim, found, err := s.st.FindSimilarMemory(ctx, scopeKey, trimmed)
 	if err != nil {
-		return err
+		return store.MemoryWriteResult{}, err
 	}
 
 	var opts store.MemoryWriteOptions
@@ -102,7 +112,7 @@ func (s *Store) Save(ctx context.Context, text string) error {
 
 	res, err := s.st.SaveMemoryWith(ctx, store.Memory{ScopeKey: scopeKey, Text: trimmed}, opts)
 	if err != nil {
-		return err
+		return store.MemoryWriteResult{}, err
 	}
 	if s.warn != nil && res.Decision != store.MemoryIgnored {
 		s.warn(fmt.Sprintf("memory %s: %s", res.Decision, res.Reason))
@@ -118,7 +128,7 @@ func (s *Store) Save(ctx context.Context, text string) error {
 			s.warn(fmt.Sprintf("memory retention evicted %d entr(ies) in scope %s", n, scopeKey))
 		}
 	}
-	return nil
+	return res, nil
 }
 
 // decideAmbiguous 处理歧义带：优先问判官，失败则退回确定性阈值（用户选定的语义）。
