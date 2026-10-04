@@ -15,14 +15,15 @@ func BenchmarkRenderPrompt(b *testing.B) {
 		b.Skip("没有内置模板")
 	}
 	name := names[0]
+	// 内置 system 模板在 F-33 接线后渲染静态前缀：这里给相同的字段形状，
+	// 让基准测的是渲染开销，而不是"缺 key 的报错路径"。
 	data := map[string]any{
-		"BotName":     "AgentBot",
-		"Timezone":    "Asia/Shanghai",
-		"Now":         time.Unix(0, 0),
-		"Persona":     "默认人格",
-		"Tools":       []string{"calculator", "current_time"},
-		"ToolHeaders": []string{"名称", "说明"},
-		"ToolRows":    [][]string{{"calculator", "四则运算"}, {"current_time", "当前时间"}},
+		"SystemPrompt":    "基础提示词",
+		"ProactiveMemory": "记忆指令",
+		"Identity":        "身份说明",
+		"ToolHint":        "工具提示",
+		"Timezone":        "Asia/Shanghai",
+		"Now":             time.Unix(0, 0),
 	}
 	if _, err := e.Render(name, data); err != nil {
 		b.Fatalf("Render 预热失败: %v", err)
