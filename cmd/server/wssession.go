@@ -74,7 +74,10 @@ func runWSSession(ctx context.Context, d wsSessionDeps) {
 			d.OnLogin(ctx)
 		}
 
-		err := d.Client.Listen(d.ListenCtx, d.Sink)
+		// 这里刻意用 ListenCtx 而不是函数参数 ctx：读循环要在**停入口**（关闭第 1 步）
+		// 就停下来，而函数参数 ctx 对应的是 baseCtx，要到第 3 步才取消。
+		// 两个 ctx 的分工是刻意的，不是漏传（同上文"三个容易写错的点"）。
+		err := d.Client.Listen(d.ListenCtx, d.Sink) //nolint:contextcheck // 两个 ctx 分工刻意的，见上
 		// 读循环结束：无论正常还是出错，这条连接都不能再用了。
 		d.OnDown()
 		d.Client.Disconnect()

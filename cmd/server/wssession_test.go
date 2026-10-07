@@ -134,7 +134,7 @@ func Test_RunWSSessionStopsAtBotIntakeStop(t *testing.T) {
 			OnDown:    func() {},
 			Backoff:   func(int) time.Duration { return time.Hour },
 			Sleep:     sleepCtx,
-			Log:       sessionLogger(t),
+			Log:       sessionLogger(t), //nolint:contextcheck // 清理必须用新 ctx：测试自己的 ctx 那时已取消
 		})
 	})
 
@@ -194,7 +194,7 @@ func Test_RunWSSessionReconnectsAfterFailedConnect(t *testing.T) {
 			OnDown:    rec.down,
 			Backoff:   func(int) time.Duration { return time.Millisecond },
 			Sleep:     noSleep(nil),
-			Log:       sessionLogger(t),
+			Log:       sessionLogger(t), //nolint:contextcheck // 清理必须用新 ctx：测试自己的 ctx 那时已取消
 		})
 		close(done)
 	}()
@@ -246,7 +246,7 @@ func Test_RunWSSessionDisconnectsBeforeReconnecting(t *testing.T) {
 			OnDown:    rec.down,
 			Backoff:   func(int) time.Duration { return time.Millisecond },
 			Sleep:     noSleep(nil),
-			Log:       sessionLogger(t),
+			Log:       sessionLogger(t), //nolint:contextcheck // 清理必须用新 ctx：测试自己的 ctx 那时已取消
 		})
 		close(done)
 	}()
@@ -296,7 +296,7 @@ func Test_RunWSSessionMarksNotReadyOnDisconnect(t *testing.T) {
 			OnDown:    rec.down,
 			Backoff:   func(int) time.Duration { return time.Millisecond },
 			Sleep:     noSleep(nil),
-			Log:       sessionLogger(t),
+			Log:       sessionLogger(t), //nolint:contextcheck // 清理必须用新 ctx：测试自己的 ctx 那时已取消
 		})
 		close(done)
 	}()
@@ -331,7 +331,7 @@ func Test_RunWSSessionStopsOnContextCancel(t *testing.T) {
 			OnDown:    func() {},
 			Backoff:   func(int) time.Duration { return time.Hour },
 			Sleep:     sleepCtx,
-			Log:       sessionLogger(t),
+			Log:       sessionLogger(t), //nolint:contextcheck // 清理必须用新 ctx：测试自己的 ctx 那时已取消
 		})
 		close(done)
 	}()

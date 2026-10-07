@@ -49,7 +49,7 @@ func Test_ReplyWorkerLoopDrainsAndAccountsEveryJob(t *testing.T) {
 
 	loopDone := make(chan struct{})
 	go func() {
-		replyWorkerLoop(ctx, jobs, handle, wg, testLogger(t))
+		replyWorkerLoop(ctx, jobs, handle, wg, testLogger(t)) //nolint:contextcheck // 清理必须用新 ctx：测试自己的 ctx 那时已取消
 		close(loopDone)
 	}()
 
@@ -95,7 +95,7 @@ func Test_ReplyWorkerLoopSurvivesPanicAndKeepsDraining(t *testing.T) {
 
 	loopDone := make(chan struct{})
 	go func() {
-		replyWorkerLoop(ctx, jobs, handle, wg, testLogger(t))
+		replyWorkerLoop(ctx, jobs, handle, wg, testLogger(t)) //nolint:contextcheck // 清理必须用新 ctx：测试自己的 ctx 那时已取消
 		close(loopDone)
 	}()
 
