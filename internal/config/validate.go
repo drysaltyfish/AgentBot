@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/drysaltyfish/agentbot/internal/access"
 )
 
 // Problem 是一条配置问题。
@@ -55,9 +57,18 @@ func (c *Config) Validate() error {
 			add("transport.url", "必须是 ws:// 或 wss:// 开头")
 		}
 	case "wsserver", "http":
-		if c.Transport.AccessToken == nil || *c.Transport.AccessToken == "" {
-			add("transport.access_token", "mode="+c.Transport.Mode+" 是入站入口，必须配置 access_token（fail-closed，见 F-80）")
-		}
+		// 这两种入站模式**尚未实现**：全仓库只有 WSClient（正向 WS）一个 Driver 实现，
+		// 组合根也无条件按 wsclient 建连接。
+		//
+		// 这里过去只校验 access_token，后果是一个很难查的陷阱：
+		// mode=wsserver 能通过校验、`--check-config` 返回 0，进程随后打印
+		// "agentbot started"（transport=wsserver），再拿着**空 URL** 无限重连——
+		// 日志与真正的网络故障完全无法区分。
+		//
+		// 宁可启动失败也不带病启动（README「局限与已知偏离」）。
+		// 等真正实现入站驱动时，F-25/F-80 的"入站必须配 access_token"检查要一并恢复。
+		add("transport.mode", "mode="+c.Transport.Mode+" 尚未实现：当前只支持 wsclient（正向 WS）；"+
+			"入站驱动（反向 WS / HTTP 上报）没有实现，配置它不会启动任何入站监听")
 	default:
 		add("transport.mode", "必须是 wsclient / wsserver / http 之一，实际为 "+strconv.Quote(c.Transport.Mode))
 	}
@@ -85,8 +96,11 @@ func (c *Config) Validate() error {
 	default:
 		add("llm.reasoning_effort", "必须是 low / high / max 之一，实际为 "+strconv.Quote(c.LLM.ReasoningEffort))
 	}
-	if c.LLM.HistoryTurns != nil && *c.LLM.HistoryTurns < 0 {
-		add("llm.history_turns", "不能为负")
+	// 0 与负值都不可表示：EffectiveHistoryTurns 用 orPositive，会把 <=0 当成"未设置"。
+	// 只拒绝负值的话，history_turns: 0 会通过校验、运行时被静默换成 20——
+	// 运维在 --check-config 里看到的是 0，实际跑的却是 20。
+	if c.LLM.HistoryTurns != nil && *c.LLM.HistoryTurns <= 0 {
+		add("llm.history_turns", "必须为正（0 不表示“不回灌历史”，而是会被当作未设置）")
 	}
 	if c.LLM.APIKeyFile != nil && strings.TrimSpace(*c.LLM.APIKeyFile) != "" {
 		b, ferr := os.ReadFile(*c.LLM.APIKeyFile)
@@ -182,17 +196,19 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.RateLimit.UserPerMinute != nil && *c.RateLimit.UserPerMinute < 0 {
-		add("ratelimit.user_per_minute", "不能为负")
+	// 四个限速字段都用 orPositive 解析：<=0 会被当作"未设置"换成默认值，
+	// 所以 0 不能只靠"不能为负"放行（否则配了 0 的人拿到的是 20/5/120/20）。
+	if c.RateLimit.UserPerMinute != nil && *c.RateLimit.UserPerMinute <= 0 {
+		add("ratelimit.user_per_minute", "必须为正（0 会被当作未设置）")
 	}
-	if c.RateLimit.UserBurst != nil && *c.RateLimit.UserBurst < 0 {
-		add("ratelimit.user_burst", "不能为负")
+	if c.RateLimit.UserBurst != nil && *c.RateLimit.UserBurst <= 0 {
+		add("ratelimit.user_burst", "必须为正（0 会被当作未设置）")
 	}
-	if c.RateLimit.GroupPerMinute != nil && *c.RateLimit.GroupPerMinute < 0 {
-		add("ratelimit.group_per_minute", "不能为负")
+	if c.RateLimit.GroupPerMinute != nil && *c.RateLimit.GroupPerMinute <= 0 {
+		add("ratelimit.group_per_minute", "必须为正（0 会被当作未设置）")
 	}
-	if c.RateLimit.GroupBurst != nil && *c.RateLimit.GroupBurst < 0 {
-		add("ratelimit.group_burst", "不能为负")
+	if c.RateLimit.GroupBurst != nil && *c.RateLimit.GroupBurst <= 0 {
+		add("ratelimit.group_burst", "必须为正（0 会被当作未设置）")
 	}
 	if c.Audit.QueueSize != nil && *c.Audit.QueueSize <= 0 {
 		add("audit.queue_size", "必须为正")
@@ -229,7 +245,9 @@ func (c *Config) Validate() error {
 
 	if c.Semcache.Threshold != nil {
 		v := *c.Semcache.Threshold
-		if v < 0 || v > 1 {
+		// 区间是 (0,1]：0 会被 EffectiveThreshold 换成 0.95，
+		// 放行 0 等于让"我配了 0"变成"跑的是 0.95"。
+		if v <= 0 || v > 1 {
 			add("semcache.threshold", "必须在 (0,1] 区间内，实际为 "+strconv.FormatFloat(v, 'g', -1, 64))
 		}
 	}
@@ -268,13 +286,10 @@ func (c *Config) Validate() error {
 				strconv.FormatInt(c.Moderation.LegacySuperUsers[0], 10)+"]}}）")
 	}
 	if c.Access.BypassSuperUsers != nil && !*c.Access.BypassSuperUsers && c.Access.EffectiveEnabled() {
-		hasSuper := false
-		for role, ids := range c.Access.Roles {
-			if strings.EqualFold(strings.TrimSpace(role), "superuser") && len(ids) > 0 {
-				hasSuper = true
-			}
-		}
-		if !hasSuper {
+		// 复用 internal/access 的解析，而不是在这里再扫一遍 map：
+		// 那边会丢弃 id 0，这里只数个数，于是 superuser: [0] 能绕过这条 fail-closed 守卫
+		// （校验通过，运行时却一个超管都没有——正是这条守卫要防的情形）。
+		if len(access.NewRoles(c.Access.Roles).SuperUsers()) == 0 {
 			add("access.bypass_super_users", "关闭超管绕过，却又没有配置任何超管：一旦名单配错将无人能管理")
 		}
 	}

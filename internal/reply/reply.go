@@ -231,10 +231,7 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 	}
 
 	// 发送目标在生成前就要定下来：流式切分器需要它绑定增量发送器。
-	target := outbound.PrivateTarget(j.UserID)
-	if j.GroupID != 0 {
-		target = outbound.GroupTarget(j.GroupID)
-	}
+	target := deliveryTarget(j)
 
 	// 两条路径（ReAct / 直连）在调用方看完全同形。
 	// 记忆的注入位置与呈现窗口由装配器按 ADR-0002 处理（system 之后、历史之前）。
@@ -360,10 +357,7 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 		if qerr := quotaDenied(runErr); qerr != nil {
 			rlog.Warn("model call denied by cost quota",
 				"scope", qerr.Scope, "period", qerr.Period, "limit", qerr.Limit, "used", qerr.Used)
-			target := outbound.PrivateTarget(j.UserID)
-			if j.GroupID != 0 {
-				target = outbound.GroupTarget(j.GroupID)
-			}
+			target := deliveryTarget(j)
 			if _, serr := p.deps.Sender.SendMany(callCtx, target, []string{"本会话的模型额度已用完，请稍后再试或联系管理员。"}, 0); serr != nil {
 				rlog.Warn("cannot send quota notice", "error", serr)
 			}
@@ -421,29 +415,56 @@ func (p *Pipeline) Handle(ctx context.Context, j Job) {
 	}
 
 	// 真人是一条一条发的：按空行拆成多条分别发送，而不是一整块砸过去。
+	segments, delivered := p.deliver(callCtx, target, text, rlog)
+	if !delivered {
+		return
+	}
+
+	// 每条讯息都带上它自己的缓存命中率：这是"缓存优先"是否生效的唯一客观指标。
+	rlog.Info("replied", "group_id", j.GroupID, "user_id", j.UserID,
+		"runes", len([]rune(text)), "segments", segments,
+		"cache_hit_ratio", fmt.Sprintf("%.1f%%", out.Usage.CacheHitRatio()*100),
+		"cache_hit_tokens", out.Usage.PromptCacheHitTokens,
+		"cache_miss_tokens", out.Usage.PromptCacheMissTokens)
+}
+
+// deliveryTarget 计算一次回复的投递目标：群消息投群、私聊投人。
+//
+// 这段判断此前在三个地方各写了一遍（正常回复、配额提示、缓存命中回复）。
+// 写错一处就会把回复投到错误的会话，而且只在群聊或只在私聊里出现。
+func deliveryTarget(j Job) outbound.Target {
+	if j.GroupID != 0 {
+		return outbound.GroupTarget(j.GroupID)
+	}
+	return outbound.PrivateTarget(j.UserID)
+}
+
+// deliver 是回复投递的**唯一实现**：按空行分段 → 逐条发送 → 记指标。
+//
+// 两处调用（正常回复与语义缓存命中）此前各写一遍，差别只有日志措辞。
+// 投递有两份实现本身就与"所有出站消息经同一出口"的约定相矛盾——
+// 改了分段方式或记账，很容易只改到其中一处。
+//
+// 返回段数与是否真的发出；未发出时调用方不应再记"已回复"。
+func (p *Pipeline) deliver(ctx context.Context, target outbound.Target, text string, rlog *slog.Logger) (int, bool) {
+	// 真人是一条一条发的：按空行拆成多条分别发送，而不是一整块砸过去。
 	parts := []string{text}
 	if p.deps.Shape.SplitOnBlank {
 		parts = outbound.SplitParagraphs(text, p.deps.Shape.MaxSegments)
 	}
 	if len(parts) == 0 {
 		rlog.Warn("reply became empty after splitting")
-		return
+		return 0, false
 	}
-	sent, err := p.deps.Sender.SendMany(callCtx, target, parts, p.deps.Shape.Delay)
+	sent, err := p.deps.Sender.SendMany(ctx, target, parts, p.deps.Shape.Delay)
 	if err != nil {
 		rlog.Error("send failed", "error", err, "sent", sent, "segments", len(parts))
-		return
+		return 0, false
 	}
 	if p.deps.Catalog != nil {
 		p.deps.Catalog.ActionsSent.With(metrics.Labels{"action": "send_msg", "status": "ok"}).Add(float64(len(parts)))
 	}
-
-	// 每条讯息都带上它自己的缓存命中率：这是"缓存优先"是否生效的唯一客观指标。
-	rlog.Info("replied", "group_id", j.GroupID, "user_id", j.UserID,
-		"runes", len([]rune(text)), "segments", len(parts),
-		"cache_hit_ratio", fmt.Sprintf("%.1f%%", out.Usage.CacheHitRatio()*100),
-		"cache_hit_tokens", out.Usage.PromptCacheHitTokens,
-		"cache_miss_tokens", out.Usage.PromptCacheMissTokens)
+	return len(parts), true
 }
 
 // streamSplitter 为一次回复构造流式切分器；未启用时返回 nil。
@@ -525,27 +546,12 @@ func (p *Pipeline) finishCachedTurn(ctx context.Context, j Job, sess *session.Se
 	if err := sess.Hist.Append(ctx, histKey, history.Item{Kind: history.KindAssistant, Content: answer}); err != nil {
 		rlog.Warn("cannot append cached assistant turn", "error", err)
 	}
-	target := outbound.PrivateTarget(j.UserID)
-	if j.GroupID != 0 {
-		target = outbound.GroupTarget(j.GroupID)
-	}
-	parts := []string{answer}
-	if p.deps.Shape.SplitOnBlank {
-		parts = outbound.SplitParagraphs(answer, p.deps.Shape.MaxSegments)
-	}
-	if len(parts) == 0 {
-		rlog.Warn("cached reply became empty after splitting")
+	segments, delivered := p.deliver(ctx, deliveryTarget(j), answer, rlog)
+	if !delivered {
 		return
-	}
-	if _, err := p.deps.Sender.SendMany(ctx, target, parts, p.deps.Shape.Delay); err != nil {
-		rlog.Error("send cached reply failed", "error", err, "segments", len(parts))
-		return
-	}
-	if p.deps.Catalog != nil {
-		p.deps.Catalog.ActionsSent.With(metrics.Labels{"action": "send_msg", "status": "ok"}).Add(float64(len(parts)))
 	}
 	rlog.Info("semantic cache hit; model call skipped",
-		"question_runes", len([]rune(question)), "answer_runes", len([]rune(answer)), "segments", len(parts))
+		"question_runes", len([]rune(question)), "answer_runes", len([]rune(answer)), "segments", segments)
 }
 
 // quotaDenied 从错误链里取出配额拒绝，非配额错误返回 nil。

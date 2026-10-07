@@ -1,4 +1,4 @@
-package memory
+package retrieval
 
 import (
 	"context"
@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/drysaltyfish/agentbot/internal/textsim"
 )
 
 // F-52 摘要树（RAPTOR 式）的默认参数。
@@ -470,7 +472,7 @@ func (t *SummaryTree) Search(query string, k int) []TreeHit {
 		if n == nil {
 			continue
 		}
-		score := lexicalScore(q, n.IndexText())
+		score := textsim.LexicalScore(q, n.IndexText())
 		if score <= 0 {
 			continue
 		}

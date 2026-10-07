@@ -122,33 +122,82 @@ func tierItemFromMemory(m store.Memory) TierItem {
 	}
 }
 
-// SemanticLayer 是长期事实层需要实现的方法集，正好是 TierStore 的四个语义方法。
-//
-// 单独抽出来是为了让 CompositeTierStore 接受一个"只做语义"的实现：
-// SemanticTierStore 故意不实现 Working/Episodic，它没有那张表。
-type SemanticLayer interface {
-	UpsertSemantic(ctx context.Context, scopeKey string, item TierItem) (bool, error)
-	Semantics(ctx context.Context, scopeKey string) ([]TierItem, error)
-	TrimSemantics(ctx context.Context, scopeKey string, keep int) (int, error)
-	DeleteSemantic(ctx context.Context, scopeKey string, id int64) (bool, error)
-}
-
 // CompositeTierStore 把两层拼成一个 TierStore：过程层（Working/Episodic）用
 // tier 表，长期事实层用 F-87 的扁平记忆表。
 //
-// 嵌入 TierStore 提供全部过程层方法；下面正好覆盖四个语义方法。覆盖集合必须
-// 恰好是这四个——多一个会让某层被悄悄绕过，少一个会让写入进错表。
+// 三个字段各自持有**窄接口**，所有方法都显式转发。这里曾经是"嵌入 TierStore
+// 再覆盖恰好四个语义方法"，并且靠注释保证覆盖集合不多不少——多一个会让某层被
+// 悄悄绕过，少一个会让写入进错表，两者都不会编译失败。现在任何一层新增方法，
+// 这个类型都会因为缺方法而编译不过。
 type CompositeTierStore struct {
-	TierStore
-	semantic SemanticLayer
+	working  WorkingStore
+	episodes EpisodeStore
+	semantic SemanticStore
 }
 
-// NewCompositeTierStore 构造；semantic 为 nil 时语义方法会明确报错。
-func NewCompositeTierStore(items TierStore, semantic SemanticLayer) *CompositeTierStore {
-	return &CompositeTierStore{TierStore: items, semantic: semantic}
+// NewCompositeTierStore 构造；items 提供过程层（Working + Episodic），
+// semantic 提供长期事实层（为 nil 时语义方法会明确报错，不静默丢数据）。
+func NewCompositeTierStore(items TierStore, semantic SemanticStore) *CompositeTierStore {
+	return &CompositeTierStore{working: items, episodes: items, semantic: semantic}
 }
 
-func (c *CompositeTierStore) semanticStore() (SemanticLayer, error) {
+// ---- 过程层：Working ----
+
+// AppendWorking 实现 TierStore。
+func (c *CompositeTierStore) AppendWorking(ctx context.Context, scope string, item TierItem) (TierItem, error) {
+	return c.working.AppendWorking(ctx, scope, item)
+}
+
+// Working 实现 TierStore。
+func (c *CompositeTierStore) Working(ctx context.Context, scope string) ([]TierItem, error) {
+	return c.working.Working(ctx, scope)
+}
+
+// TrimWorking 实现 TierStore。
+func (c *CompositeTierStore) TrimWorking(ctx context.Context, scope string, keep int) ([]TierItem, error) {
+	return c.working.TrimWorking(ctx, scope, keep)
+}
+
+// DeleteWorking 实现 TierStore。
+func (c *CompositeTierStore) DeleteWorking(ctx context.Context, scope string, id int64) (bool, error) {
+	return c.working.DeleteWorking(ctx, scope, id)
+}
+
+// UpdateWorking 实现 TierStore。
+func (c *CompositeTierStore) UpdateWorking(ctx context.Context, scope string, id int64, item TierItem) (bool, error) {
+	return c.working.UpdateWorking(ctx, scope, id, item)
+}
+
+// ---- 过程层：Episodic ----
+
+// AppendEpisode 实现 TierStore。
+func (c *CompositeTierStore) AppendEpisode(ctx context.Context, scope string, ep Episode) (Episode, error) {
+	return c.episodes.AppendEpisode(ctx, scope, ep)
+}
+
+// Episodes 实现 TierStore。
+func (c *CompositeTierStore) Episodes(ctx context.Context, scope string, limit int) ([]Episode, error) {
+	return c.episodes.Episodes(ctx, scope, limit)
+}
+
+// TrimEpisodes 实现 TierStore。
+func (c *CompositeTierStore) TrimEpisodes(ctx context.Context, scope string, keep int) (int, error) {
+	return c.episodes.TrimEpisodes(ctx, scope, keep)
+}
+
+// DeleteEpisode 实现 TierStore。
+func (c *CompositeTierStore) DeleteEpisode(ctx context.Context, scope string, id int64) (bool, error) {
+	return c.episodes.DeleteEpisode(ctx, scope, id)
+}
+
+// DeleteEpisodeItem 实现 TierStore。
+func (c *CompositeTierStore) DeleteEpisodeItem(ctx context.Context, scope string, itemID int64) (bool, error) {
+	return c.episodes.DeleteEpisodeItem(ctx, scope, itemID)
+}
+
+// ---- 长期事实层：全部转发给 semantic，未配置时明确报错 ----
+
+func (c *CompositeTierStore) semanticStore() (SemanticStore, error) {
 	if c == nil || c.semantic == nil {
 		return nil, fmt.Errorf("tiered memory: semantic layer is not configured")
 	}
@@ -227,6 +276,17 @@ func (c *CompositeTierStore) adminSource() (MemoryAdminSource, bool) {
 }
 
 var _ TierStore = (*CompositeTierStore)(nil)
-var _ SemanticLayer = (*SemanticTierStore)(nil)
+var _ SemanticStore = (*SemanticTierStore)(nil)
 var _ MemoryAdminSource = (*SemanticTierStore)(nil)
 var _ MemoryAdminSource = (*CompositeTierStore)(nil)
+
+// 三个窄接口各自的实现断言：任何一层漏了方法都会在第一处编译失败，
+// 而不是等到组合时才发现。
+var (
+	_ WorkingStore  = (*MemTierStore)(nil)
+	_ EpisodeStore  = (*MemTierStore)(nil)
+	_ SemanticStore = (*MemTierStore)(nil)
+	_ WorkingStore  = (*SQLiteTierStore)(nil)
+	_ EpisodeStore  = (*SQLiteTierStore)(nil)
+	_ SemanticStore = (*SQLiteTierStore)(nil)
+)

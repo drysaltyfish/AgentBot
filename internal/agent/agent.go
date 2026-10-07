@@ -149,7 +149,7 @@ func (a *DirectAgent) Run(ctx context.Context, in Input) (*Output, error) {
 	if a.Assembler == nil {
 		return out, ErrNoAssembler
 	}
-	messages := a.buildMessages(ctx, in)
+	messages, memoryBlock := a.buildMessages(ctx, in)
 
 	resp, err := a.LLM.Chat(ctx, &llm.ChatRequest{Messages: messages})
 	if err != nil {
@@ -160,6 +160,7 @@ func (a *DirectAgent) Run(ctx context.Context, in Input) (*Output, error) {
 	out.Usage = resp.Usage
 	out.LLMCalls = 1
 	out.PromptDigest = llm.Digest(messages)
+	out.MemoryDigest = MemoryDigestOf(memoryBlock)
 	out.ToolCalls = resp.ToolCalls
 	out.FinishReason = resp.FinishReason
 	out.AddStep(Step{Type: StepThought, Content: resp.Content})
@@ -167,7 +168,17 @@ func (a *DirectAgent) Run(ctx context.Context, in Input) (*Output, error) {
 }
 
 // buildMessages 装配本轮消息，并按 ADR-0002 把长期记忆注入 system 之后、历史之前。
-func (a *DirectAgent) buildMessages(ctx context.Context, in Input) []llm.Message {
+//
+// 记忆作用域在这里放进 ctx（与 ReactAgent.Run 同一处理）：调用方（reply.Pipeline）
+// 传入的 ctx 不带作用域，只做自动写入那一处才临时加上。少了这一行，
+// 直连路径的 Recall 永远拿不到作用域、永远返回空——表现就是"关掉 ReAct 之后
+// 机器人突然想不起用户说过的事"，与"关掉 ReAct 不等于关掉记忆"正好相反。
+//
+// 第二个返回值是记忆块正文（无记忆时为空）：调用方要用它算记忆指纹，
+// 否则上层无法把"记忆变更"与"意外前缀分歧"区分开（见 store/prompt.go 的 compareDigest）。
+func (a *DirectAgent) buildMessages(ctx context.Context, in Input) ([]llm.Message, string) {
+	ctx = WithMemoryScope(ctx, in.SessionKey.String())
+
 	memoryBlock := ""
 	if a.Memory != nil {
 		items, err := a.Memory.Recall(ctx)
@@ -177,7 +188,7 @@ func (a *DirectAgent) buildMessages(ctx context.Context, in Input) []llm.Message
 			memoryBlock = RenderMemory(items)
 		}
 	}
-	return a.Assembler.BuildFor(ctx, in.SessionKey, in.History, memoryBlock, in.Query)
+	return a.Assembler.BuildFor(ctx, in.SessionKey, in.History, memoryBlock, in.Query), memoryBlock
 }
 
 var _ Agent = (*DirectAgent)(nil)
@@ -200,7 +211,7 @@ func (a *DirectAgent) RunStream(ctx context.Context, in Input, splitter *llm.Str
 		return a.Run(ctx, in)
 	}
 
-	messages := a.buildMessages(ctx, in)
+	messages, memoryBlock := a.buildMessages(ctx, in)
 	ch, err := a.LLM.ChatStream(ctx, &llm.ChatRequest{Messages: messages})
 	if err != nil {
 		out.AddStep(Step{Type: StepObservation, Error: err.Error()})
@@ -208,6 +219,7 @@ func (a *DirectAgent) RunStream(ctx context.Context, in Input, splitter *llm.Str
 	}
 	out.LLMCalls = 1
 	out.PromptDigest = llm.Digest(messages)
+	out.MemoryDigest = MemoryDigestOf(memoryBlock)
 
 	streamErr := consumeStream(ctx, ch, splitter)
 	out.Text = splitter.Full()

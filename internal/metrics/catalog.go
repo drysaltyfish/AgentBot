@@ -31,6 +31,15 @@ type Catalog struct {
 	SemcacheMisses      *Counter
 	SemcacheSavedTokens *Counter
 
+	// MemoryJudgeVerdicts 统计 LLM 判官的判定结果，outcome ∈
+	// {same, different, unparsed, error}。
+	//
+	// 为什么需要它：判官要求模型"只回答一个字：是 或 否"，而解析靠前缀匹配
+	// （见 memory.ParseVerdict）。解析失败的后果是**静默退化**成启发式相似度，
+	// 所以"解析失败率到底是多少"此前无法回答——而它正是决定
+	// "要不要改用 provider 原生结构化输出（F-31）"的唯一依据。
+	MemoryJudgeVerdicts *Counter
+
 	HandlerDuration *Histogram
 	LLMLatency      *Histogram
 	ToolDuration    *Histogram
@@ -78,6 +87,7 @@ func NewCatalog(opts CatalogOptions) *Catalog {
 	c.SemcacheHits = r.Counter("semcache_hits_total", "Total number of semantic cache hits.")
 	c.SemcacheMisses = r.Counter("semcache_misses_total", "Total number of semantic cache misses.")
 	c.SemcacheSavedTokens = r.Counter("semcache_saved_tokens_total", "Total number of tokens saved by the semantic cache.")
+	c.MemoryJudgeVerdicts = r.Counter("memory_judge_verdicts_total", "Total number of LLM judge verdicts.", "outcome")
 
 	c.names = []string{
 		"events_received_total",
@@ -98,6 +108,7 @@ func NewCatalog(opts CatalogOptions) *Catalog {
 		"semcache_hits_total",
 		"semcache_misses_total",
 		"semcache_saved_tokens_total",
+		"memory_judge_verdicts_total",
 	}
 	sort.Strings(c.names)
 	return c

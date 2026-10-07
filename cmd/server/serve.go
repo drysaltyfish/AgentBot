@@ -20,20 +20,17 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/bot"
 	"github.com/drysaltyfish/agentbot/internal/config"
 	"github.com/drysaltyfish/agentbot/internal/conversation"
-	"github.com/drysaltyfish/agentbot/internal/cost"
 	"github.com/drysaltyfish/agentbot/internal/event"
-	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
-	"github.com/drysaltyfish/agentbot/internal/policy"
 	"github.com/drysaltyfish/agentbot/internal/reply"
+	"github.com/drysaltyfish/agentbot/internal/retry"
 	"github.com/drysaltyfish/agentbot/internal/router"
 	"github.com/drysaltyfish/agentbot/internal/scoped"
 	"github.com/drysaltyfish/agentbot/internal/secrets"
 	"github.com/drysaltyfish/agentbot/internal/session"
-	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/transport"
 )
 
@@ -94,118 +91,20 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 		},
 	})
 
-	model, err := buildLLM(cfg, lg)
-	if err != nil {
-		lifecycle.Error("cannot build llm", "error", err)
+	// ---- 阶段：模型 + 持久层 + 历史 ----
+	// 打不开持久层、LLM 建不出来都会写进日志并返回错误，这里只负责 fail-fast。
+	found, ferr := buildFoundation(cfg, lg, catalog)
+	if ferr != nil {
 		return 1
 	}
-	// F-83：持久层。打不开就启动失败——不得静默降级为内存（那会悄悄丢数据）。
-	// 打开与迁移给一个独立预算：卡住时要在启动阶段暴露，而不是拖到第一条消息。
-	openCtx, cancelOpen := context.WithTimeout(context.Background(), 30*time.Second)
-	st, err := store.Open(openCtx, store.Options{
-		Path:        cfg.Store.Path,
-		BusyTimeout: cfg.Store.BusyTimeoutOr(store.DefaultBusyTimeout),
-	})
-	cancelOpen()
-	if err != nil {
-		lifecycle.Error("cannot open the persistence store", "error", err, "path", cfg.Store.Path)
-		return 1
-	}
-	defer func() {
-		if cerr := st.Close(); cerr != nil {
-			lifecycle.Warn("cannot close the persistence store", "error", cerr)
-		}
-	}()
-	lg.Component("store").Info("persistence store is ready",
-		"path", st.Path(), "schema_version", store.SchemaVersion)
-	// F-68：用装饰器收集模型调用的状态、延迟与 token，不改 internal/llm。
-	// F-66：成本统计（默认关闭）。计量挂在 LLM 装饰器上，按 provider 真实 usage 记账；
-	// 配额需要重启后仍然有效，所以成本快照也落 SQLite——因此持久层必须先打开。
-	var costTracker *cost.Tracker
-	if cfg.Cost.EffectiveEnabled() {
-		t, cerr := buildCostTracker(cfg, lg, catalog, costStoreAdapter{st: st})
-		if cerr != nil {
-			lifecycle.Error("cannot build cost tracker", "error", cerr)
-			return 1
-		}
-		costTracker = t
-		defer func() { _ = costTracker.Close() }()
-	}
+	defer found.Close() // 逆序释放：成本台账 → 持久层
+	model, st, hist := found.Model, found.Store, found.History
+	costTracker, budget, histItems := found.Cost, found.Budget, found.PromptWindow
 
-	// F-32：上下文预算（默认关闭——未配置 max_context 时预算为 nil，不改动请求字节）。
-	budget := buildBudget(cfg, lg)
-	if budget != nil {
-		lg.Component("llm").Info("context budget is enabled",
-			"max_context", budget.MaxContext,
-			"reserve_output", budget.ReserveOutput,
-			"reserve_tools", budget.ReserveTools)
-	}
-	model = &observedLLM{
-		next: model, cat: catalog, provider: providerName(cfg), model: cfg.LLM.Model,
-		cost:   costTracker,
-		budget: budget,
-		warn:   func(msg string) { lg.Component("cost").Warn(msg) },
-	}
-
-	// 缓存优先（二）：历史裁剪交给存储层，且用高水位批量裁剪。
-	// 若由装配层每轮裁剪，前缀会逐轮变化，前缀缓存永远无法命中。
-	shape := sendShapeOf(cfg)
+	// 缓存优先（二）：历史裁剪交给存储层，且用高水位批量裁剪（见 buildFoundation）。
 	// 呈现窗口：每轮真正回灌给模型的条数（一轮 ≈ user + assistant 两条）。
+	shape := sendShapeOf(cfg)
 
-	// F-89：提示词快照是**环形保留**的，启动时裁一次即可保证有界。
-	{
-		pruneCtx, cancelPrune := context.WithTimeout(context.Background(), 15*time.Second)
-		if n, perr := st.PrunePromptSnapshots(pruneCtx, promptSnapshotKeep); perr != nil {
-			lg.Component("store").Warn("cannot prune prompt snapshots", "error", perr)
-		} else if n > 0 {
-			lg.Component("store").Info("pruned old prompt snapshots", "count", n, "keep_per_session", promptSnapshotKeep)
-		}
-		cancelPrune()
-	}
-
-	histItems := cfg.LLM.EffectiveHistoryTurns() * 2
-	// **存储**保留量远大于呈现窗口：否则 recall_history 只能返回已经出现在
-	// 提示词里的内容，等于摆设。两者分开是让那个工具真正有用的前提。
-	retention := cfg.History.EffectiveRetention()
-	if retention < histItems {
-		retention = histItems
-	}
-	// F-84：历史落在持久层。JSONL 实现保留下来只用于导入与故障排查。
-	sqliteHist := history.NewSQLite(st, retention).WithTrimmer(history.HighWater{
-		Max: retention,
-		Low: retention * 3 / 4,
-	})
-	hist := wrapHistoryWithRetrieval(cfg, sqliteHist, lg)
-	lg.Component("session").Info("conversation history is stored in the database",
-		"retention", retention, "prompt_window", histItems)
-
-	// 一次性迁移：库为空且存在旧 JSONL 时导入。导入本身幂等，因此这里只在空库时触发，
-	// 避免每次启动都白读一遍文件。
-	if legacy := strings.TrimSpace(cfg.History.File); legacy != "" {
-		// 迁移是一次性的启动动作，给它独立预算，不占用请求 ctx。
-		migCtx, cancelMig := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancelMig()
-		total, err := st.TotalMessageCount(migCtx)
-		switch {
-		case err != nil:
-			lifecycle.Warn("cannot check message count; skipping legacy import", "error", err)
-		case total > 0:
-			lg.Component("session").Info("database already has messages; skipping legacy JSONL import",
-				"messages", total, "legacy_path", legacy)
-		default:
-			imported, skipped, ierr := sqliteHist.ImportJSONL(migCtx, legacy)
-			switch {
-			case errors.Is(ierr, history.ErrImportSourceMissing):
-				lg.Component("session").Info("no legacy history file to import", "path", legacy)
-			case ierr != nil:
-				lifecycle.Warn("legacy history import failed; starting with an empty history",
-					"error", ierr, "path", legacy)
-			default:
-				lg.Component("session").Info("legacy JSONL history imported",
-					"path", legacy, "imported", imported, "skipped", skipped)
-			}
-		}
-	}
 	sessions := session.New(
 		session.WithHistory(hist),
 		session.WithTTL(session.DefaultTTL),
@@ -290,7 +189,7 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 	// Agent：启用时走 ReAct（带工具），否则是直连 LLM。调用方对两条路径同形。
 	// 平台 API 通道：ws 稍后才创建，因此用迟到绑定的盒子。
 	apiCaller := &callerBox{}
-	brain, mem, err := buildAgent(cfg, model, asm, hist, st, apiCaller, lg, auditLog)
+	brain, mem, err := buildAgent(cfg, model, asm, hist, st, apiCaller, lg, auditLog, catalog)
 	if err != nil {
 		lifecycle.Error("cannot build agent", "error", err)
 		return 1
@@ -313,15 +212,11 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 	)
 
 	// 名单判定挂在**最前面**：命中即丢弃，后面的审查、连接、会话都不会发生。
-	// 先注册先执行，因此它必须在这行之前没有任何 pre 钩子时注册。
-	engine.UsePre(accessRule(accessCtl, superUsers, catalog, auditLog, lg))
+	// 先注册先执行——但它与其它 pre 钩子一起在下面集中注册（见"入站 pre 钩子"一段），
+	// 因为"谁先谁后"是行为而不是实现细节，散在 180 行之外没人看得出顺序。
 
-	auth := transport.NewAuth(
-		stringOr(cfg.Transport.AccessToken, ""),
-		stringOr(cfg.Transport.SignatureSecret, ""),
-		cfg.Transport.IPAllowlist,
-	)
-	if err := auth.Validate(); err != nil {
+	auth, err := buildTransportAuth(cfg)
+	if err != nil {
 		lifecycle.Error("invalid transport auth config", "error", err)
 		return 1
 	}
@@ -447,55 +342,44 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 	// 回复策略是**规则**，不是 handler 里的分支：路由层就能回答"什么时候回复"。
 	// 命中即回复（Block 阻止下面的只记录路由重复入队）；
 	// 群里的环境消息不回复，但仍然入队记录——它们是模型理解"刚才在聊什么"的依据。
-	enqueue := func(c *router.Ctx, shouldReply bool) {
-		// 用 Summary 而不是 PlainText：纯表情/纯图片消息也要能被回复，
-		// 否则它们会被静默丢弃（既没回复也没日志）。
-		text := strings.TrimSpace(c.Event.Message.Summary())
-		if text == "" {
-			return
-		}
-		inflight.Add(1)
-		select {
-		case jobs <- reply.Job{
-			Key:         sessions.KeyFor(c.Event.SelfID, c.Event.GroupID, c.Event.UserID),
-			GroupID:     c.Event.GroupID,
-			UserID:      c.Event.UserID,
-			Text:        text,
-			TraceID:     observe.TraceID(c),
-			Role:        agentRoleFor(c.Event, accessCtl, superUsers),
-			PolicyRole:  roleForEvent(c.Event, accessCtl, superUsers),
-			ShouldReply: shouldReply,
-			SpeakerID:   groupScopedUserID(c.Event.UserID, c.Event.GroupID),
-			SpeakerName: speakerDisplayName(c.Event.Sender, c.Event.GroupID),
-			// 记忆按群共享，因此还要带上"这条记忆关于谁"——群聊里就是发言人 QQ 号。
-			// 私聊的 SpeakerID 为 0（整条会话就是这一个人），归属留空即可。
-			SubjectID: groupScopedUserID(c.Event.UserID, c.Event.GroupID),
-			Message:   c.Event.Message,
-			Caller:    c.Caller(),
-		}:
-		default:
-			inflight.Done()
-			catalog.EventsDropped.With(metrics.Labels{"reason": "queue_full"}).Inc()
-			lifecycle.Warn("reply queue is full; dropping message", "user_id", c.Event.UserID)
-		}
-	}
+	// 构造与队满回滚的细节见 enqueue.go 与 enqueue_test.go。
+	enqueue := jobEnqueuer{
+		jobs:       jobs,
+		sessions:   sessions,
+		inflight:   &inflight,
+		catalog:    catalog,
+		accessCtl:  accessCtl,
+		superUsers: superUsers,
+		log:        lg,
+	}.Enqueue
 
-	// F-57 / F-58：入站审查 + 黑名单 + 防刷，作为 pre 钩子。
-	// 拦截的事件不进入任何路由（连"只记录"的兜底路由也不执行）——被拉黑的人不该留下上下文。
-	modEngine, modErr := buildModeration(cfg, lg)
+	// ---- 入站 pre 钩子：顺序即行为，按执行顺序集中注册 ----
+	//
+	// 引擎按**注册顺序**执行 pre 钩子，所以顺序本身就是行为的一部分：
+	//   1) access     —— 名单命中即整条丢弃，必须最先。排到审查之后就会先建会话、
+	//                    先留上下文，被丢弃的人反而留下了痕迹。
+	//   2) moderation —— 入站审查 / 黑名单 / 防刷。拦截的事件不进入任何路由
+	//                    （连"只记录"的兜底路由也不执行）——被拉黑的人不该留下上下文。
+	//   3) admin      —— 管理命令。未知命令必须能落回普通路由（别把聊天里的斜杠吃掉）。
+	//
+	// 这三段的相对顺序由 inboundPreHookOrder + checkPreHookOrder 在启动时断言，
+	// 不再只写在注释里（见该函数）。
+	engine.UsePreNamed(preHookAccess, accessRule(accessCtl, superUsers, catalog, auditLog, lg))
+
+	modEngine, modErr := buildModeration(cfg, accessCtl.Roles, lg)
 	if modErr != nil {
 		lifecycle.Error("cannot build inbound moderation", "error", modErr)
 		return 1
 	}
 	if modEngine != nil {
-		engine.UsePre(moderationPreHook(modEngine, catalog, auditLog, lg,
+		engine.UsePreNamed(preHookModeration, moderationPreHook(modEngine, catalog, auditLog, lg,
 			func(ev *event.Event) agent.Role { return agentRoleFor(ev, accessCtl, superUsers) }))
 	}
 	// F-71：管理命令（/help、/ban、/unban、/banlist）。
 	// 注意：/switch 已由既有路由处理，这里不重复注册——两条授权路径比没有更难维护。
 	// 只在配置了超管时才启用：没有授权者就没有"管理"可言。
-	if adminMod := buildAdminModule(cfg, auditLog, lg, modEngine, costTracker, personaMgr, promptHash); len(superUsers) > 0 {
-		engine.UsePre(func(c *router.Ctx) bool {
+	if adminMod := buildAdminModule(cfg, accessCtl.Roles, auditLog, lg, modEngine, costTracker, personaMgr, promptHash); len(superUsers) > 0 {
+		engine.UsePreNamed(preHookAdmin, func(c *router.Ctx) bool {
 			if c == nil || c.Event == nil {
 				return true
 			}
@@ -555,7 +439,9 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 	userRule, groupRule := rateState.Rules()
 	engine.UseMid(userRule)
 	engine.UseMid(groupRule)
-	if cfg.RateLimit.EffectiveEnabled() {
+	// 限速规则**始终注册**（热加载要能"先关后开"），因此这里的"能力"指它是否在拦截。
+	rateLimitOn := cfg.RateLimit.EffectiveEnabled()
+	if rateLimitOn {
 		lg.Component("ratelimit").Info("token bucket rate limiting is enabled",
 			"user_per_minute", cfg.RateLimit.EffectiveUserPerMinute(), "user_burst", cfg.RateLimit.EffectiveUserBurst(),
 			"group_per_minute", cfg.RateLimit.EffectiveGroupPerMinute(), "group_burst", cfg.RateLimit.EffectiveGroupBurst())
@@ -575,7 +461,8 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 
 	// F-17：单飞（反并发）。同一用户连点两次时，第二次在入口被拒。
 	// 占位在 post 释放——引擎在 Handler panic 后仍会执行 post，因此不会永久卡住。
-	if cfg.Singleflight.EffectiveEnabled() {
+	singleflightOn := cfg.Singleflight.EffectiveEnabled()
+	if singleflightOn {
 		keyFn := func(c *router.Ctx) string { return fmt.Sprintf("%d:%d", c.Event.GroupID, c.Event.UserID) }
 		if cfg.Singleflight.EffectiveKey() == "user" {
 			keyFn = func(c *router.Ctx) string { return fmt.Sprintf("%d", c.Event.UserID) }
@@ -592,8 +479,8 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 				}
 			})
 		}
-		engine.UseMid(sf.Rule())
-		engine.UsePost(sf.Release())
+		// 两半一起注册，见 runtime.go 的 useSingleflight。
+		useSingleflight(engine, sf)
 		lg.Component("singleflight").Info("single-flight middleware is enabled", "key", cfg.Singleflight.EffectiveKey())
 	}
 
@@ -621,106 +508,68 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 		Priority(router.PriorityLate).
 		Handle(func(c *router.Ctx) { enqueue(c, false) })
 
-	for i := 0; i < replyWorkers; i++ {
-		app.Go("reply-worker", func(ctx context.Context) {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case j := <-jobs:
-					func() {
-						defer inflight.Done()
-						defer func() {
-							if rec := recover(); rec != nil {
-								lg.Component("reply").Error("worker panic", "panic", fmt.Sprint(rec))
-							}
-						}()
-						pipeline.Handle(ctx, j)
-					}()
-				}
-			}
-		})
+	// 路由顺序是**行为**：兜底路由（record）一旦排到 reply 前面就会吃掉所有消息，
+	// 机器人表现为完全不回复，而进程健康、探针正常、日志无异常。
+	// 契约与检查见 route_contract.go，由 route_contract_test.go 钉住。
+	if err := checkRouteTable(routes, inboundRouteContract); err != nil {
+		lifecycle.Error("route table violates the assembly contract", "error", err)
+		return 1
 	}
 
-	// F-20：事件处理走有界背压队列——洪峰时丢弃并计数，绝不在读循环里阻塞。
-	// 队列本身不带 worker 数的硬编码：默认 max(4, GOMAXPROCS)。
-	eventQueue = backpressure.New(func(j eventJob) {
-		engine.Dispatch(j.ctx, j.event, j.caller)
-	}, backpressure.Options{
-		OnDrop: func(reason string) {
-			catalog.EventsDropped.With(metrics.Labels{"reason": reason}).Inc()
-		},
-		OnPanic: func(recovered any) {
-			lg.Component("transport").Error("event handler panic", "panic", fmt.Sprint(recovered))
-		},
+	// 回复 worker 池：把一轮回复从读循环里挪出去，并保证 panic 不带走流水线。
+	// 循环本体见 replyworkers.go 与 replyworkers_test.go。
+	startReplyWorkers(app, replyWorkers, jobs, pipeline.Handle, &inflight, lg)
+
+	// ---- 阶段：事件入口 ----
+	// 有界背压队列 + 读循环回调；两条不能违反的约束（读循环里不调平台 API、
+	// 临时路由优先）都收在 eventIngress 里，见 ingress.go 与 ingress_test.go。
+	ingress := newEventIngress(ingressDeps{
+		Engine:     engine,
+		Sessions:   sessions,
+		Catalog:    catalog,
+		Log:        lg,
+		ListenCtx:  listenCtx,
+		AccessCtl:  accessCtl,
+		SuperUsers: superUsers,
 	})
-	eventQueue.Start()
+	eventQueue = ingress.Queue()
+	ingress.Start()
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		_ = eventQueue.Close(ctx)
+		_ = ingress.Close(ctx)
 	}()
 
-	sink := func(raw []byte, caller transport.Caller) {
-		ev := event.NewEvent(raw)
-		tlog := lg.Component("transport")
-		if ev.Kind == "" {
-			tlog.Debug("ignored frame without post_type", "bytes", len(raw))
-			return
-		}
-		if ev.DecodeWarning != "" {
-			// 解析降级必须可见：它是"看起来没反应"的第一手线索。
-			tlog.Warn("event decoded with warnings",
-				"warning", ev.DecodeWarning, "segments", segmentTypes(ev.Message))
-		}
-		catalog.EventsReceived.With(metrics.Labels{"kind": string(ev.Kind)}).Inc()
-		tlog.Debug("event received",
-			"kind", string(ev.Kind), "sub", ev.Sub, "self_id", ev.SelfID,
-			"user_id", ev.UserID, "group_id", ev.GroupID, "message_id", ev.MessageID.String(),
-			"segments", segmentTypes(ev.Message), "summary", ev.Message.Summary())
-		if detail := segmentDetail(ev.Message); detail != "" {
-			tlog.Debug("non-text segment fields", "detail", detail)
-		}
-		// 注意：**不能在 sink 里调用平台 API**。Listen 读完帧后是同步调用 sink 的，
-		// 而 API 的响应也只能由同一个读循环读回来——在这里 Call 必然死锁。
-		// 引用解析因此放在回复 worker 里做（见 internal/reply）。
-		// F-15：会话级临时路由优先于常规路由。命中即消费，不再进入常规路由——
-		// 否则 Await 等待的那条消息会同时被常规路由处理一遍。
-		//nolint:contextcheck // Offer 只在过期清理时做后台收尾，事件循环本身没有请求 ctx
-		if sessions.Temp().Offer(sessions.KeyFor(ev.SelfID, ev.GroupID, ev.UserID), ev) {
-			tlog.Debug("event consumed by a temporary route",
-				"self_id", ev.SelfID, "user_id", ev.UserID, "group_id", ev.GroupID)
-			return
-		}
-
-		// F-53：把已解析的角色放进 ctx——提示词侧渲染与执行侧拦截都用它。
-		ectx := policy.WithRole(eventTraceContext(listenCtx, ev), roleForEvent(ev, accessCtl, superUsers))
-		eventQueue.Submit(eventJob{ctx: ectx, event: ev, caller: caller})
-	}
-
+	// ws-session：连接 + 读循环，断线后按退避重连（见 wssession.go）。
+	// 重连不是可选项：这个 goroutine 一旦退出就再也没人把连接建起来。
 	app.Go("ws-session", func(ctx context.Context) {
-		if err := ws.Connect(ctx); err != nil {
-			lg.Component("transport").Error("connect failed", "url", cfg.Transport.URL, "error", err)
-			return
-		}
-		wsUp.Store(true)
-		go func() {
-			resp, err := ws.Call(ctx, transport.Request{Action: "get_login_info"})
-			if err != nil {
-				lg.Component("transport").Warn("get_login_info failed", "error", err)
-				return
-			}
-			var info struct {
-				UserID   int64  `json:"user_id"`
-				Nickname string `json:"nickname"`
-			}
-			_ = json.Unmarshal(resp.Data, &info)
-			lg.Component("transport").Info("logged in",
-				"self_id", info.UserID, "nickname", info.Nickname, "configured_self_id", cfg.Transport.EffectiveSelfID())
-		}()
-		if err := ws.Listen(listenCtx, sink); err != nil && listenCtx.Err() == nil {
-			lg.Component("transport").Error("read loop stopped", "error", err)
-		}
+		runWSSession(ctx, wsSessionDeps{
+			Client:    ws,
+			Sink:      ingress.Sink,
+			ListenCtx: listenCtx,
+			OnUp:      func() { wsUp.Store(true) },
+			// 断开必须反映到探针上：否则 /readyz 会在机器人已经收不到消息时继续报 ready。
+			OnDown: func() { wsUp.Store(false) },
+			OnLogin: func(loginCtx context.Context) {
+				go func() {
+					resp, err := ws.Call(loginCtx, transport.Request{Action: "get_login_info"})
+					if err != nil {
+						lg.Component("transport").Warn("get_login_info failed", "error", err)
+						return
+					}
+					var info struct {
+						UserID   int64  `json:"user_id"`
+						Nickname string `json:"nickname"`
+					}
+					_ = json.Unmarshal(resp.Data, &info)
+					lg.Component("transport").Info("logged in",
+						"self_id", info.UserID, "nickname", info.Nickname, "configured_self_id", cfg.Transport.EffectiveSelfID())
+				}()
+			},
+			Backoff: retry.Default().Delay,
+			Sleep:   sleepCtx,
+			Log:     lg,
+		})
 	})
 
 	if err := app.Register(bot.PhaseSession, sessions); err != nil {
@@ -736,6 +585,14 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 		return 1
 	}
 
+	// 装配到此结束：断言入站 pre 钩子的执行顺序符合契约。
+	// 顺序错了不会编译失败、也不会让任何测试变红——只会在生产里表现成
+	// "被拉黑的人先被建了会话"或"命令被吞掉"，所以在这里 fail-fast。
+	if err := checkPreHookOrder(engine.PreHookNames()); err != nil {
+		lifecycle.Error("inbound pre-hook order violates the contract", "error", err)
+		return 1
+	}
+
 	app.MarkRunning()
 	provider := strings.ToLower(strings.TrimSpace(cfg.LLM.Provider))
 	if provider == "" {
@@ -746,7 +603,7 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 	lifecycle.Info("agentbot started",
 		"transport", cfg.Transport.Mode,
 		"llm_provider", provider,
-		"capabilities", assembleCapabilities(cfg, capabilityInputs{
+		"capabilities", assembleCapabilities(capabilityInputs{
 			TransportMode:   cfg.Transport.Mode,
 			AuthConfigured:  cfg.Transport.AccessToken != nil || cfg.Transport.SignatureSecret != nil,
 			Cost:            costTracker != nil,
@@ -765,6 +622,8 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 			PromptEngine:    promptEngine != nil,
 			AuditLog:        auditLog != nil,
 			OpsHTTP:         cfg.Ops.EffectiveEnabled(),
+			RateLimit:       rateLimitOn,
+			Singleflight:    singleflightOn,
 		}),
 	)
 
@@ -784,31 +643,18 @@ func serve(cfg *config.Config, configPath string, stderr io.Writer) int {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sig)
 
-	<-sig
-	lifecycle.Info("shutdown signal received", "timeout", timeout.String())
-	if opsSrv != nil {
-		opsSrv.SetReady(false)
-	}
-	if eventQueue != nil {
-		drainCtx, cancelDrain := context.WithTimeout(context.Background(), 3*time.Second)
-		if err := eventQueue.Close(drainCtx); err != nil {
-			lifecycle.Warn("event queue did not drain in time", "error", err)
-		}
-		cancelDrain()
-	}
-
-	go func() {
-		<-sig
-		_, _ = fmt.Fprintln(stderr, "second signal received: forcing exit")
-		os.Exit(1)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	if err := app.Shutdown(ctx); err != nil {
-		lifecycle.Error("shutdown incomplete", "error", err)
-		return 1
-	}
-	lifecycle.Info("shutdown complete")
-	return 0
+	// 关闭顺序（ops 先置未就绪 → 排空事件队列 → Shutdown 组件）见 shutdown.go，
+	// 并由 shutdown_test.go 钉住。
+	// Ops 必须走 opsReadiness：ops 关闭时它是 nil，直接塞进接口会得到
+	// "非 nil 的接口持有 nil 指针"，判空失效后在关闭路径上 panic。
+	return awaitShutdown(shutdownDeps{
+		App:        app,
+		Ops:        opsReadiness(opsSrv),
+		EventQueue: eventQueue,
+		Log:        lg,
+		Stderr:     stderr,
+		Timeout:    timeout,
+		Signals:    sig,
+		Exit:       os.Exit,
+	})
 }

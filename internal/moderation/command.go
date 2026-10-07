@@ -48,6 +48,11 @@ type CommanderOptions struct {
 //
 // 命令在执行前必须通过 Authorizer 权限校验；被封禁对象若是机器人自身或超管，
 // Blacklist 会以 ErrProtected 拒绝（白名单优先）。
+//
+// **当前没有生产调用方**（见 HANDOFF「已知偏离」）：线上的管理命令走
+// admin.Module（cmd/server/observability.go 注册 /ban、/unban、/banlist），
+// 它直接调用 Blacklist，并复用命令行本就需要的审计与鉴权。
+// 改这里不会影响线上行为；要接线得先回答"两套命令实现留哪一套"。
 type Commander struct {
 	bans    *Blacklist
 	auth    Authorizer

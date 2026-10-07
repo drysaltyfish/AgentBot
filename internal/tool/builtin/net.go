@@ -26,6 +26,22 @@ func (httpFetch) Parameters() tool.Schema {
 func (httpFetch) ReadOnly() bool        { return true }
 func (httpFetch) ConcurrencySafe() bool { return true }
 
+// SandboxRequest 声明 http_fetch 需要联网（F-46）。
+//
+// 沙箱的联网闸门完全依赖这个声明：Policy.Check 只在 req.Network 为真时才看
+// network_tools / allow_network。没有它，这两个配置项永远是空转的——
+// "默认不放开联网"也就只是文档里的一句话。
+//
+// 声明之后语义才真正成立：启用沙箱且没有把 http_fetch 列进 network_tools
+// （也没开 allow_network）时，调用会被结构化拒绝而不是静默放行。
+// 非联网参数（url）不需要声明，它由 httpx 自己的 SSRF 防护负责。
+func (httpFetch) SandboxRequest(json.RawMessage) tool.SandboxRequest {
+	return tool.SandboxRequest{Network: true}
+}
+
+// 编译期断言：联网声明必须始终满足沙箱的接口，否则上面那段契约会静默失效。
+var _ tool.SandboxDeclarer = httpFetch{}
+
 type httpFetchArgs struct {
 	URL string `arg:"url,required"`
 }

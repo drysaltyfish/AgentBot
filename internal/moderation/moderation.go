@@ -72,7 +72,7 @@ type Message struct {
 	Text string
 }
 
-// Meta 描述消息的环境信息，用于区分正式对话与背景消息、定位黑名单主体。
+// Meta 描述这条消息的上下文，用于区分正式对话与环境消息、定位黑名单主体。
 type Meta struct {
 	// UserID 是发送者 ID；0 表示未知（此时跳过用户维度）。
 	UserID int64
@@ -83,7 +83,7 @@ type Meta struct {
 	// IP 是来源 IP；仅在与 IP 黑名单相关时填写。
 	IP string
 	// Addressed 为 true 表示面向机器人的正式对话（被 @、私聊或命令触发）；
-	// false 表示背景消息，可套用 AmbientPolicy 的不同策略。
+	// false 表示环境消息，可套用 AmbientPolicy 的不同策略。
 	Addressed bool
 	// Role 是调用者角色名，仅作审计留档；权限判定由 Authorizer 负责。
 	Role string
@@ -112,13 +112,13 @@ func (p SensitivePolicy) String() string {
 	}
 }
 
-// AmbientPolicy 是背景消息（未被 @ 的正式对话）的差异化策略。
+// AmbientPolicy 是环境消息（未被 @ 的正式对话）的差异化策略。
 type AmbientPolicy struct {
-	// SkipGuards 为 true 时背景消息不跑 InboundGuard 链。
+	// SkipGuards 为 true 时环境消息不跑 InboundGuard 链。
 	SkipGuards bool
-	// SkipAntiSpam 为 true 时背景消息不计入防刷统计。
+	// SkipAntiSpam 为 true 时环境消息不计入防刷统计。
 	SkipAntiSpam bool
-	// Sensitive 是背景消息采用的敏感词策略。
+	// Sensitive 是环境消息采用的敏感词策略。
 	Sensitive SensitivePolicy
 }
 
@@ -169,13 +169,23 @@ type Options struct {
 	Matcher *textguard.Engine
 	// Sensitive 是敏感词策略，零值 SensitiveMask。
 	Sensitive SensitivePolicy
-	// Ambient 是背景消息策略，nil 表示沿用默认策略。
+	// Ambient 是环境消息策略，nil 表示沿用默认策略。
+	//
+	// **当前组合根不填这个字段**（见 HANDOFF「已知偏离」），所以环境消息
+	// 与正式对话走完全相同的审查。这不改变安全性（更严格），
+	// 但意味着 AmbientPolicy 的差异化能力目前没有被使用。
 	Ambient *AmbientPolicy
 	// Blacklist 是黑名单，nil 表示不检查。
 	Blacklist *Blacklist
 	// AntiSpam 是防刷器，nil 表示不限流。
 	AntiSpam *AntiSpam
 	// Guards 是审查链的 guard 列表。
+	//
+	// **当前组合根不填这个字段**（见 HANDOFF「已知偏离」）：传空即 e.chain 为 nil，
+	// 于是一个 guard 都不会跑。线上真正生效的入站审查是：
+	// 黑名单 → 防刷 → 敏感词自动机（F-56）。RuleGuard / LLMGuard / VectorGuard
+	// 都是完整实现但没有消费方——它们需要配置面（规则表 / 分类器 / 语料索引），
+	// 而那些尚不存在。
 	Guards []InboundGuard
 	// Guard 控制 guard 链的超时与失败策略。
 	Guard GuardOptions

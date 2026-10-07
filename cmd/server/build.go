@@ -16,6 +16,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/httpx"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/memory"
+	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/retry"
 	"github.com/drysaltyfish/agentbot/internal/store"
@@ -144,7 +145,7 @@ func systemPrompt(cfg *config.Config) (string, error) {
 //
 // 直连与 ReAct 两条路径共用它：关掉 ReAct 不等于关掉记忆，否则同一个部署换个
 // 模式就会突然"想不起"用户说过的事——而这种差别用户只会理解为"它变笨了"。
-func buildLongTermMemory(cfg *config.Config, st *store.Store, lg *observe.Logger) (agent.Memory, builtin.MemoryAdmin) {
+func buildLongTermMemory(cfg *config.Config, st *store.Store, lg *observe.Logger, cat *metrics.Catalog) (agent.Memory, builtin.MemoryAdmin) {
 	if !cfg.Agent.EffectiveMemory() || st == nil {
 		return nil, nil
 	}
@@ -159,7 +160,10 @@ func buildLongTermMemory(cfg *config.Config, st *store.Store, lg *observe.Logger
 		case jm == nil:
 			// echo provider：判不了语义，保持 judge 为 nil。
 		default:
-			judge = memory.NewLLMJudge(jm, func(msg string) { lg.Component("memory").Debug(msg) })
+			judge = countingJudge{
+				next: memory.NewLLMJudge(jm, func(msg string) { lg.Component("memory").Debug(msg) }),
+				cat:  cat,
+			}
 			lg.Component("memory").Info("semantic memory judge is enabled (thinking off)")
 		}
 	}
@@ -193,8 +197,48 @@ func buildLongTermMemory(cfg *config.Config, st *store.Store, lg *observe.Logger
 //
 // 返回的是 agent.Agent 接口：未启用 ReAct 时返回 DirectAgent，
 // 因此调用方对两条路径完全同形，不需要分支。
-func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, hist history.History, st *store.Store, caller builtin.CallerProvider, lg *observe.Logger, auditLog *audit.Logger) (agent.Agent, agent.Memory, error) {
-	mem, memAdmin := buildLongTermMemory(cfg, st, lg)
+// countingJudge 给判官加一层结果计数。
+//
+// 为什么必须数：判官要求模型"只允许回答一个字：是 或 否"，而解析是
+// **前缀匹配**（memory.ParseVerdict）。解析不出来时 `SameFact` 返回
+// ErrJudgeUnparsed，调用方退回确定性相似度——**静默退化**，没有任何地方记录。
+// 于是"要不要改用 provider 原生结构化输出（F-31）"这个决定一直没有依据。
+//
+// 计数口径：包含缓存命中的判定（`same`/`different` 是"判定结果"而非"模型调用数"）。
+// 但 `unparsed` / `error` **必然是真实调用**——它们不会写入缓存，所以这两个值
+// 可以直接当作解析失败率来读。
+type countingJudge struct {
+	next memory.Judge
+	cat  *metrics.Catalog
+}
+
+// SameFact 实现 memory.Judge。
+func (c countingJudge) SameFact(ctx context.Context, a, b string) (bool, error) {
+	ok, err := c.next.SameFact(ctx, a, b)
+	switch {
+	case errors.Is(err, memory.ErrJudgeUnparsed):
+		c.inc("unparsed")
+	case err != nil:
+		c.inc("error")
+	case ok:
+		c.inc("same")
+	default:
+		c.inc("different")
+	}
+	return ok, err
+}
+
+func (c countingJudge) inc(outcome string) {
+	if c.cat == nil || c.cat.MemoryJudgeVerdicts == nil {
+		return
+	}
+	c.cat.MemoryJudgeVerdicts.With(metrics.Labels{"outcome": outcome}).Inc()
+}
+
+var _ memory.Judge = countingJudge{}
+
+func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, hist history.History, st *store.Store, caller builtin.CallerProvider, lg *observe.Logger, auditLog *audit.Logger, cat *metrics.Catalog) (agent.Agent, agent.Memory, error) {
+	mem, memAdmin := buildLongTermMemory(cfg, st, lg, cat)
 	if !cfg.Agent.Enabled {
 		// 直连路径同样注记忆：否则"关掉 ReAct"会连带把长期记忆一起关掉。
 		direct := &agent.DirectAgent{
@@ -262,6 +306,22 @@ func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, 
 			"max_output_bytes", policy.MaxOutputBytes,
 			"allow_network", policy.AllowNetwork,
 			"require_read_only", policy.RequireReadOnly)
+		// 配了却不生效的键必须说出来：否则运维会以为安全边界已经收紧，
+		// 而实际上 Policy.Check 收到的永远是零值（见 inertSandboxKeys 的说明）。
+		if inert := inertSandboxKeys(cfg); len(inert) > 0 {
+			lg.Component("tool").Warn(
+				"sandbox keys are configured but currently have no effect: no built-in tool declares those resource requirements",
+				"keys", strings.Join(inert, ","),
+				"hint", "these need a tool implementing tool.SandboxDeclarer; only forbidden_tools / max_output_bytes / require_read_only and the networking keys are enforced today")
+		}
+		// http_fetch 声明了"需要联网"，所以默认（沙箱开启 + 没列进 network_tools）
+		// 它会被结构性拒绝。这是刻意的 fail-closed，但必须在启动时说清楚，
+		// 否则表现成"模型忽然抓不了网页"，而原因藏在运行时的工具结果里。
+		if _, ok := registry.Get("http_fetch"); ok && !policy.AllowsNetwork("http_fetch") {
+			lg.Component("tool").Warn(
+				"http_fetch is registered but networking is not allowed for it; it will be denied at call time",
+				"hint", "set sandbox.network_tools: [http_fetch] (or sandbox.allow_network: true) to permit it")
+		}
 	}
 
 	react := &agent.ReactAgent{
@@ -304,6 +364,32 @@ func buildAgent(cfg *config.Config, model llm.LLM, asm *conversation.Assembler, 
 		"history_file", strings.TrimSpace(cfg.History.File),
 		"approval", cfg.Agent.ApprovalEnabled)
 	return wrapParadigm(cfg, model, react, lg), mem, nil
+}
+
+// inertSandboxKeys 返回"已经配置、但当前不会产生任何拒绝"的沙箱键。
+//
+// 这些键要求工具实现 tool.SandboxDeclarer 来声明自己的资源需求，而现有的内置工具
+// 里只有 http_fetch 做了声明（它只要联网）。路径 / 环境变量 / 操作名这三类仍然
+// 没有任何内置工具会用——它们要等出现真正接收这些参数的工具才开始生效。
+// 静默失效比没有更危险：运维会以为安全边界已经收紧。启动时把这份清单打出来。
+//
+// 真正生效的是：forbidden_tools / max_output_bytes / require_read_only，
+// 以及 networking 相关的 network_tools / allow_network（由 http_fetch 的声明驱动）。
+func inertSandboxKeys(cfg *config.Config) []string {
+	var out []string
+	if len(cfg.Sandbox.ReadRoots) > 0 {
+		out = append(out, "read_roots")
+	}
+	if len(cfg.Sandbox.WriteRoots) > 0 {
+		out = append(out, "write_roots")
+	}
+	if len(cfg.Sandbox.EnvAllowlist) > 0 {
+		out = append(out, "env_allowlist")
+	}
+	if len(cfg.Sandbox.ForbiddenOps) > 0 {
+		out = append(out, "forbidden_ops")
+	}
+	return out
 }
 
 // sandboxPolicyFromConfig 把配置映射成工具沙箱策略（F-46）。

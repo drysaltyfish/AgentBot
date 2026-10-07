@@ -124,6 +124,87 @@ func Test_F89_AgentReportsPromptAndMemoryDigests(t *testing.T) {
 	}
 }
 
+// streamOnceLLM 只用于流式路径：吐一个分片后正常结束。
+type streamOnceLLM struct{}
+
+func (streamOnceLLM) Chat(context.Context, *llm.ChatRequest) (*llm.ChatResponse, error) {
+	return &llm.ChatResponse{Content: "ok", FinishReason: "stop"}, nil
+}
+
+func (streamOnceLLM) ChatStream(context.Context, *llm.ChatRequest) (<-chan llm.Chunk, error) {
+	ch := make(chan llm.Chunk, 1)
+	ch <- llm.Chunk{Content: "ok", Done: true}
+	close(ch)
+	return ch, nil
+}
+
+// Test_F89_DirectAgentAlsoReportsMemoryDigest 钉住**直连路径**的同一处接线。
+//
+// 上面那条测试只覆盖了 ReactAgent，于是同一个字段在 DirectAgent（agent.enabled=false）
+// 里漏填了很久也没被发现：直连路径下 MemoryDigest 恒为空串，
+// store/prompt.go 的 compareDigest 因此永远判不出"记忆变更"，
+// 每一次写入记忆都会触发一次"前缀意外分歧"告警——告警常响等于没有告警。
+//
+// 两个范式都必须填，所以两个范式都要测。
+func Test_F89_DirectAgentAlsoReportsMemoryDigest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	key := session.Key{SelfID: 1, UserID: 100}
+	mem := NewMemoryStore(0)
+	if err := mem.Save(WithMemoryScope(ctx, key.String()), "喜欢喝橙汁"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	a := &DirectAgent{LLM: &scriptedLLM{replies: []*llm.ChatResponse{{Content: "ok", FinishReason: "stop"}}}, Assembler: testAssembler("系统提示词"), Memory: mem}
+	out, err := a.Run(ctx, Input{Query: "你好", SessionKey: key})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(out.PromptDigest) == 0 {
+		t.Fatalf("PromptDigest 必须被填充")
+	}
+	if out.MemoryDigest == "" {
+		t.Fatalf("DirectAgent 的 MemoryDigest 必须被填充——为空会让记忆变更被误报成意外分歧")
+	}
+	first := out.MemoryDigest
+
+	// 记忆变化后指纹必须随之变化。
+	if err := mem.Save(WithMemoryScope(ctx, key.String()), "喜欢看动漫"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	a.LLM = &scriptedLLM{replies: []*llm.ChatResponse{{Content: "ok", FinishReason: "stop"}}}
+	out2, err := a.Run(ctx, Input{Query: "再说一次", SessionKey: key})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out2.MemoryDigest == first {
+		t.Fatalf("记忆变化后指纹必须变化")
+	}
+
+	// 流式路径与整段路径共用同一个装配点，指纹也必须一致。
+	as := &DirectAgent{LLM: streamOnceLLM{}, Assembler: testAssembler("系统提示词"), Memory: mem}
+	sout, err := as.RunStream(ctx, Input{Query: "再再说一次", SessionKey: key}, llm.NewStreamSplitter(llm.StreamConfig{}))
+	if err != nil {
+		t.Fatalf("RunStream: %v", err)
+	}
+	if sout.MemoryDigest == "" {
+		t.Fatalf("流式路径同样必须填 MemoryDigest")
+	}
+	if sout.MemoryDigest != out2.MemoryDigest {
+		t.Fatalf("同一份记忆在流式与整段路径下指纹必须相同")
+	}
+
+	// 没有记忆时不应误报有记忆块。
+	noMem := &DirectAgent{LLM: &scriptedLLM{}, Assembler: testAssembler("S")}
+	out4, err := noMem.Run(ctx, Input{Query: "hi", SessionKey: key})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out4.MemoryDigest != "" {
+		t.Fatalf("无记忆时 MemoryDigest 应为空: %q", out4.MemoryDigest)
+	}
+}
+
 // Test_F48_MemoryInstructionRequiresSpeakerAttribution 钉住记忆指令里的**归属要求**。
 //
 // 背景：记忆按会话共享（群聊的 session key 里 UserID 为 0），若存下来的事实不带主语，

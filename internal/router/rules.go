@@ -10,6 +10,12 @@ import (
 )
 
 // MemberLookup 提供群成员角色查询；实现方必须尊重 ctx 超时。
+//
+// **注意：当前没有生产调用方。** 它只服务于下面的 GroupAdmin / GroupOwner /
+// HigherThan 三条规则，而组合根一条都没注册：管理命令的鉴权走
+// admin.Module 自己的 Checker（角色来自 access.roleForEvent，见 cmd/server/access.go）。
+// 与 policy.MemberLookup 是同一份签名的第二份声明，但两者**分别**服务于
+// 两个各自未接线的库，所以合并它们没有意义（见 HANDOFF「已知偏离」）。
 type MemberLookup interface {
 	MemberRole(ctx context.Context, groupID, userID int64) (string, error)
 }
@@ -249,6 +255,12 @@ func lookupRole(c *Ctx, lookup MemberLookup) (string, bool) {
 	}
 	return role, true
 }
+
+// ---- 下面三条角色规则当前都没有生产调用方 ----
+//
+// 它们要求宿主提供一个 MemberLookup（按 QQ 查群成员角色）。组合根没有注册任何一条：
+// 管理命令的授权在 admin.Module 里完成，角色由 access.roleForEvent 从事件里解析。
+// 保留它们是为了可复用内核的完整性；改动不会影响线上行为。
 
 // GroupAdmin 要求群管理员或群主；查询失败时返回 false（fail-closed）。
 func GroupAdmin(lookup MemberLookup) Rule {

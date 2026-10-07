@@ -1,7 +1,6 @@
 package main
 
 import (
-	"github.com/drysaltyfish/agentbot/internal/config"
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 )
@@ -10,6 +9,9 @@ import (
 //
 // 刻意用**对象**而不是配置开关：配置说"想要"，装配的结果才决定"真的有"。
 // 两者不一致时（例如构建失败后退回降级），这里必须反映真实的那一个。
+//
+// 全部字段都由组合根在**装配发生的那个位置**填写——assembleCapabilities 因此
+// 不接受 *config.Config：签名本身就挡住了"顺手再读一眼配置"这条路。
 type capabilityInputs struct {
 	TransportMode   string
 	AuthConfigured  bool
@@ -29,6 +31,11 @@ type capabilityInputs struct {
 	PromptEngine    bool
 	AuditLog        bool
 	OpsHTTP         bool
+	// RateLimit / Singleflight 是"限速真的在生效" / "单飞真的装了"这两个事实。
+	// 单飞只在开启时才注册中间件，所以它就是装配事实；
+	// 限速的规则**始终注册**、由内部参数决定是否拦截，因此这里取的是生效开关。
+	RateLimit    bool
+	Singleflight bool
 }
 
 // assembleCapabilities 汇总本次装配真实可达的能力清单（F-79）。
@@ -36,7 +43,11 @@ type capabilityInputs struct {
 // F-79 的验收是"启动日志中能看到已启用能力清单"。清单**必须由装配事实推出**：
 // 写死的字符串列表会随每次接线而悄悄过期，最后变成一份描述过去的文档——
 // 那正是 F-79 要防的"文档描述了不存在的功能"的镜像版本。
-func assembleCapabilities(cfg *config.Config, in capabilityInputs) []string {
+//
+// 因此这里不读配置：一旦允许"顺手读一眼 cfg"，就会出现
+// "retrieval 关着、tree 单独开着 ⇒ 声称有摘要树"这类假能力
+// （摘要树只在 retrieval 开启时才被 WithTree 装上）。
+func assembleCapabilities(in capabilityInputs) []string {
 	caps := &capabilityList{}
 	caps.add("event-kernel", "router-snapshot-match", "rule-handler-separation", "engine-hooks",
 		"session-manager", "history-memory", "llm-interface", "llm-retry",
@@ -96,14 +107,11 @@ func assembleCapabilities(cfg *config.Config, in capabilityInputs) []string {
 	if in.ToolHint {
 		caps.add("tool-hint")
 	}
-	if cfg != nil && cfg.RateLimit.EffectiveEnabled() {
+	if in.RateLimit {
 		caps.add("rate-limit", "rate-limit-hot-reload")
 	}
-	if cfg != nil && cfg.Singleflight.EffectiveEnabled() {
+	if in.Singleflight {
 		caps.add("singleflight")
-	}
-	if cfg != nil && cfg.Retrieval.Tree.EffectiveEnabled() {
-		caps.add("summary-tree")
 	}
 	if in.OpsHTTP {
 		caps.add("ops-http")

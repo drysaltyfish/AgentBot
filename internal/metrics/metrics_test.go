@@ -19,6 +19,7 @@ func Test_F68_CatalogExposesEveryMetric(t *testing.T) {
 		"llm_latency_seconds",
 		"llm_requests_total",
 		"llm_tokens_total",
+		"memory_judge_verdicts_total",
 		"queue_depth",
 		"rate_limited_total",
 		"route_errors_total",

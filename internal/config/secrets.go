@@ -81,9 +81,12 @@ func (c *Config) Redacted() *Config {
 	return &cp
 }
 
-// RedactedYAML 把脱敏后的配置序列化成 YAML，供 --check-config 打印。
+// RedactedYAML 把脱敏后的**生效配置**序列化成 YAML，供 --check-config 打印。
+//
+// 先走 Effective()：否则靠 accessor 兜底的字段会打印成 null，
+// 运维看到的数字与实际运行的不是同一个（--check-config 的意义就在这里）。
 func (c *Config) RedactedYAML() (string, error) {
-	out, err := yaml.Marshal(c.Redacted())
+	out, err := yaml.Marshal(c.Effective().Redacted())
 	if err != nil {
 		return "", fmt.Errorf("marshal redacted config: %w", err)
 	}

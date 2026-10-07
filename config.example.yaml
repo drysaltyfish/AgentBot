@@ -70,8 +70,8 @@ store:
   busy_timeout: 1s
 
 history:
-  # 对话历史落盘的 JSONL 路径（复用 F-38 的存储实现）。
-  # 留空则仅进程内，重启即丢——启动时会有 WARN 提醒。
+  # 旧版 JSONL 历史的**导入源**：新数据一律落 SQLite（见 store.path）。
+  # 导入由启动时执行，幂等且只在库为空时触发；留空或文件不存在都不影响运行。
   file: ./data/history.jsonl
   # **存储**保留的条数上限（默认 400），远大于呈现窗口（llm.history_turns）。
   # 两者分开是 recall_history 真正有用的前提：窗口外的历史仍在存储里，才召得回来。
@@ -88,16 +88,17 @@ agent:
   protocol: auto
   # 注册 end_action / save_memory / noop 三个虚拟动作（F-40）。
   virtual_actions: true
-  # 长期记忆。落盘用 JSONL（复用 F-38 的历史存储）；F-48 的完整实现（书签、
-  # 向量召回、Forget/List）在 M3。
+  # 长期记忆（F-87 / F-49），落 SQLite（见 store.path）。
+  # 分层记忆：Working / Episodic 落 tier 表，Semantic 复用扁平记忆表。
   memory: true
   # 每个作用域的条数上限（作用域即会话键，记忆严格按作用域隔离）。
   memory_max: 64
-  # 落盘路径。留空则仅进程内，重启即丢——启动时会有一条 WARN 提醒。
+  # 旧版记忆 JSONL 的**导入源**（一次性、幂等，导入进扁平记忆表）。
+  # 记忆本身一直落 SQLite；留空或文件不存在就不做导入。
   memory_file: ./data/memory.jsonl
-  # 要注册的内置工具（F-44）；留空表示全部注册。
-  # 可选：calculator / current_time / json_query / http_fetch /
-  #       memory_save / memory_recall / recall_history
+  # 要注册的内置工具（F-44）；留空表示全部注册。顺序恒定，以保住前缀缓存。
+  # 可选：calculator / current_time / json_query / http_fetch / get_user_info /
+  #       memory_save / memory_recall / recall_history / forget_memory / list_memories
   tools: []
   # F-45 权限闸门。**默认关闭**：权限表是 fail-closed 的，
   # 没配好审批通道就打开会让所有未放行工具都被拒绝。
@@ -351,19 +352,36 @@ access:
 #     personas_dir: prompts/personas
 
 # ---- 工具执行沙箱（F-46）----
-# 默认关闭。开启后按白名单限制工具的读写路径、环境变量与联网能力，
-# 并限制单次输出大小；越权调用返回结构化拒绝而不是执行。
+# 默认关闭。开启后按策略做准入判定，越权调用返回结构化拒绝而不是执行。
+#
+# 生效的键：
+#   forbidden_tools   —— 按工具名禁止
+#   max_output_bytes  —— 截断单次工具输出
+#   require_read_only —— 只允许实现 ReadOnly() 的工具
+#   network_tools / allow_network —— 联网闸门
+#
+# 注意联网闸门：http_fetch 已经声明自己需要联网，所以**开启沙箱后它默认被拒绝**。
+# 要么把它写进 network_tools，要么开 allow_network。启动日志会明确告警这件事。
+#
+# 仍然**没有消费方**的键（配了不生效，启动时会告警）：
+#   read_roots / write_roots / env_allowlist / forbidden_ops
+# 它们要求工具声明"我要读/写某个路径、用某个环境变量、执行某个操作"，而现有的
+# 10 个内置工具都不接收这类参数。别把它们当成正在生效的安全边界。
 sandbox:
   enabled: false
   max_output_bytes: 65536
+  # 按工具名禁止，例如 ["http_fetch"]。
+  forbidden_tools: []
+  # 需要联网的工具必须在这里显式列出（例如 http_fetch），否则会被拒绝。
+  network_tools: []
+  # 或者一刀放开所有工具的联网能力。
+  allow_network: false
+  require_read_only: false
+  # 以下四项当前不生效（没有工具声明对应需求）。
   read_roots: []
   write_roots: []
   env_allowlist: []
   forbidden_ops: []
-  forbidden_tools: []
-  network_tools: []
-  allow_network: false
-  require_read_only: false
 
 # ---- 成本统计与配额（F-66）----
 # 默认关闭。开启后按模型单价统计 token 与费用，并按配额给出软限告警/硬限决策。

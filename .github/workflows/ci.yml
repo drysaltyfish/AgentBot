@@ -34,6 +34,23 @@ jobs:
           fi
       - run: go build ./...
       - run: go vet ./...
+      - name: --check-config 能跑通示例配置，且输出已脱敏
+        run: |
+          set -euo pipefail
+          # 这一步走的是**完整**的装载链路：解码（KnownFields）→ 校验 → 解析生效值 → 脱敏打印。
+          # 单元测试只能覆盖其中的片段，配置一旦漂移，问题往往要到部署那一刻才暴露。
+          #
+          # 示例配置里写的是 ${DEEPSEEK_API_KEY}，未设置会让装载失败（刻意的 fail-closed），
+          # 所以给一个哑值——这里验证的是配置本身合法，不是密钥有效。
+          dummy="sk-ci-dummy-key-that-must-never-appear-in-output"
+          DEEPSEEK_API_KEY="$dummy" go run ./cmd/server --config config.example.yaml --check-config > /tmp/effective.yaml
+          # 必须真的打印出了生效配置。
+          grep -q '^transport:' /tmp/effective.yaml
+          # 且必须是脱敏后的：明文密钥一个字符都不许出现。
+          if grep -qF "$dummy" /tmp/effective.yaml; then
+            echo "check-config 的输出里出现了未脱敏的密钥" >&2
+            exit 1
+          fi
       - name: golangci-lint
         run: |
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \

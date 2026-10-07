@@ -3,8 +3,8 @@ package main
 import (
 	"github.com/drysaltyfish/agentbot/internal/config"
 	"github.com/drysaltyfish/agentbot/internal/history"
-	"github.com/drysaltyfish/agentbot/internal/memory"
 	"github.com/drysaltyfish/agentbot/internal/observe"
+	"github.com/drysaltyfish/agentbot/internal/retrieval"
 )
 
 // wrapHistoryWithRetrieval 按配置决定是否给历史存储套上混合检索（F-51）。
@@ -15,7 +15,7 @@ func wrapHistoryWithRetrieval(cfg *config.Config, base history.History, lg *obse
 	if cfg == nil || base == nil || !cfg.Retrieval.EffectiveEnabled() {
 		return base
 	}
-	hybrid := history.NewHybrid(base, memory.HybridConfig{
+	hybrid := history.NewHybrid(base, retrieval.HybridConfig{
 		KeywordWeight: cfg.Retrieval.EffectiveKeywordWeight(),
 		VectorWeight:  cfg.Retrieval.EffectiveVectorWeight(),
 		TopK:          cfg.Retrieval.EffectiveTopK(),

@@ -139,6 +139,22 @@ func (d *FakeDriver) Stopped() bool {
 }
 
 // RetryDriver 给任意 Driver 套上可中断的指数退避重试。
+//
+// **不要接线它——它是两处陷阱，不是可用的重连实现**（第 40 轮查清）：
+//
+//  1. **`Listen` 不会重新连接**。它只是重试 `next.Listen`，而连接断开后
+//     在同一条死连接上再读一次不会有不同结果；它只能把同一个错误重复
+//     MaxAttempts 次然后放弃。F-04 要的是"连接失败的重试策略"，
+//     那必须把连接**重新建起来**（见下）。
+//  2. **尝试次数有上限**。配合 `retry.Default()` 时只有 3 次尝试，
+//     之后**永久放弃**——平台晚几分钟回来，进程就再也连不上。
+//     F-04 说的"1s 起、最长 30s、带 jitter"描述的是**退避上限**，
+//     隐含"一直重试、退避封顶"，而不是"试三次就算了"。
+//
+// 线上真正在用的是组合根的 `runWSSession`（cmd/server/wssession.go）：
+// 它做 `Connect → Listen → Disconnect → 再 Connect`，并且**不设尝试上限**、
+// 只复用 `retry.Policy.Delay` 的退避与封顶。这两处陷阱都有测试钉住
+// （driver_retry_trap_test.go）：其中一条断言 `Listen` 重试期间 `Connect` 一次都没被调用过。
 type RetryDriver struct {
 	next   Driver
 	policy retry.Policy

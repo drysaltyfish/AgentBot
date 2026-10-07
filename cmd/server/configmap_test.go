@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drysaltyfish/agentbot/internal/access"
 	"github.com/drysaltyfish/agentbot/internal/admin"
 	"github.com/drysaltyfish/agentbot/internal/agent"
 	"github.com/drysaltyfish/agentbot/internal/audit"
@@ -17,6 +18,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/metrics"
+	"github.com/drysaltyfish/agentbot/internal/moderation"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/router"
@@ -300,6 +302,54 @@ func Test_F46_SandboxPolicyFromConfig(t *testing.T) {
 	}
 }
 
+// Test_F46_InertSandboxKeysAreReported 钉住"配了却不生效"必须可见。
+//
+// 六个沙箱键要求工具实现 tool.SandboxDeclarer 声明资源需求，而现有内置工具
+// 一个都没实现，Policy.Check 收到的永远是零值。静默失效比没有更危险——
+// 运维会以为安全边界已经收紧。启动时必须把这份清单打出来，
+// 所以这里钉住"哪些键算空转"。
+func Test_F46_InertSandboxKeysAreReported(t *testing.T) {
+	t.Parallel()
+
+	// 都没配时不报（别在正常配置上刷告警）。
+	if got := inertSandboxKeys(config.Default()); len(got) != 0 {
+		t.Fatalf("未配置任何空转键时不应报告: %v", got)
+	}
+
+	cfg := config.Default()
+	cfg.Sandbox.Enabled = ptr(true)
+	cfg.Sandbox.ReadRoots = []string{t.TempDir()}
+	cfg.Sandbox.WriteRoots = []string{t.TempDir()}
+	cfg.Sandbox.EnvAllowlist = []string{"PATH"}
+	cfg.Sandbox.ForbiddenOps = []string{"exec"}
+	// 联网相关的两键**不**算空转：http_fetch 已经声明了它需要联网，
+	// 所以 network_tools / allow_network 真的会参与判定。
+	cfg.Sandbox.NetworkTools = []string{"http_fetch"}
+	cfg.Sandbox.AllowNetwork = ptr(true)
+	// 这三项也是真正生效的。
+	cfg.Sandbox.MaxOutputBytes = ptr(1024)
+	cfg.Sandbox.ForbiddenTools = []string{"exec"}
+	cfg.Sandbox.RequireReadOnly = ptr(true)
+
+	got := inertSandboxKeys(cfg)
+	want := map[string]bool{
+		"read_roots": true, "write_roots": true,
+		"env_allowlist": true, "forbidden_ops": true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("空转键清单不符: actual=%v", got)
+	}
+	for _, k := range got {
+		if !want[k] {
+			t.Fatalf("%q 不该被列为空转键（它当前是生效的）: %v", k, got)
+		}
+		delete(want, k)
+	}
+	if len(want) != 0 {
+		t.Fatalf("漏报的空转键: %v", want)
+	}
+}
+
 // Test_F66_ObservedLLMRecordsCost 覆盖 F-66 的接线：LLM 装饰器把真实 usage 记进成本器。
 // 注意 cat 传 nil——这同时验证"记账不依赖指标目录"，避免 cat 为空时静默丢账。
 func Test_F66_ObservedLLMRecordsCost(t *testing.T) {
@@ -346,6 +396,49 @@ func (s stubLLM) ChatStream(context.Context, *llm.ChatRequest) (<-chan llm.Chunk
 
 // Test_F71_AdminModuleAuthorizesAndAudits 覆盖 F-71 的接线：
 // 超管能执行、非超管被拒、两种情形都留下审计。
+// Test_F58_SuperUserSetHasOneSourceInTheCompositionRoot 钉住"超管只推导一次"。
+//
+// 曾经有三处各自用 cfg 推导超管：组合根、黑名单的 never-ban、管理命令鉴权。
+// 只要有一处后来改了规则（或漏改），三处就会彼此漂移——access.roles.superuser: [0]
+// 绕过 fail-closed 守卫就是这么来的。
+//
+// 现在角色表由 buildAccessControls 解析一次，随参数传给下游。这条测试用一份
+// 与 cfg **故意不同**的角色表来证明确实是"用传进来的那份"，
+// 而不是某个下游偷偷回头再读 cfg。
+func Test_F58_SuperUserSetHasOneSourceInTheCompositionRoot(t *testing.T) {
+	t.Parallel()
+
+	// cfg 说超管是 42；真正生效的角色表说超管是 99。
+	cfg := config.Default()
+	cfg.Transport.Mode = "wsclient"
+	cfg.Transport.URL = "ws://127.0.0.1:1"
+	cfg.Access.Roles = map[string][]int64{"superuser": {42}}
+	roles := access.NewRoles(map[string][]int64{"superuser": {99}})
+
+	// 黑名单的 never-ban 必须跟着传入的角色表走。
+	bl, err := buildBlacklist(cfg, roles, func(string) {})
+	if err != nil {
+		t.Fatalf("buildBlacklist: %v", err)
+	}
+	if err := bl.Ban(moderation.BanUser, "99", "应当受保护", 0); !errors.Is(err, moderation.ErrProtected) {
+		t.Fatalf("传入的角色表里 99 是超管，应拒绝封禁: %v", err)
+	}
+	if err := bl.Ban(moderation.BanUser, "42", "不在传入的角色表里", 0); err != nil {
+		t.Fatalf("42 不在传入的角色表里，应可封禁: %v", err)
+	}
+
+	// 管理命令鉴权同样只看传入的角色表。
+	m := buildAdminModule(cfg, roles, nil, testLogger(t), nil, nil, nil, nil)
+	if _, err := m.Dispatch(context.Background(), admin.Request{Text: "/help", UserID: 99, Source: admin.SourceMessage}); err != nil {
+		t.Fatalf("传进来的超管 99 应被授权: %v", err)
+	}
+	if reply, err := m.Dispatch(context.Background(), admin.Request{Text: "/help", UserID: 42, Source: admin.SourceMessage}); err != nil {
+		t.Fatalf("未授权不应返回错误: %v", err)
+	} else if reply == "" {
+		t.Fatalf("cfg 里的 42 没有被授权——说明下游又回头读了 cfg，而不是用传入的角色表")
+	}
+}
+
 func Test_F71_AdminModuleAuthorizesAndAudits(t *testing.T) {
 	t.Parallel()
 
@@ -354,7 +447,7 @@ func Test_F71_AdminModuleAuthorizesAndAudits(t *testing.T) {
 
 	var buf bytes.Buffer
 	alog := audit.New(audit.Options{Writer: &buf, QueueSize: 16, Now: time.Now})
-	m := buildAdminModule(cfg, alog, testLogger(t), nil, nil, nil, nil)
+	m := buildAdminModule(cfg, buildAccessControls(cfg, nil).Roles, alog, testLogger(t), nil, nil, nil, nil)
 
 	if _, err := m.Dispatch(context.Background(), admin.Request{Text: "/help", UserID: 42, Source: admin.SourceMessage}); err != nil {
 		t.Fatalf("超管执行 /help 不应报错: %v", err)
@@ -418,7 +511,7 @@ func Test_F66_AdminCostCommandReportsUsage(t *testing.T) {
 		t.Fatalf("会话维度应记到 1 次调用，实际 %+v", got)
 	}
 
-	m := buildAdminModule(cfg, nil, testLogger(t), nil, tracker, nil, nil)
+	m := buildAdminModule(cfg, buildAccessControls(cfg, nil).Roles, nil, testLogger(t), nil, tracker, nil, nil)
 	reply, err := m.Dispatch(context.Background(), admin.Request{Text: "/cost", UserID: 42, GroupID: 7, Source: admin.SourceMessage})
 	if err != nil {
 		t.Fatalf("Dispatch /cost: %v", err)

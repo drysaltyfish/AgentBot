@@ -54,7 +54,7 @@ func Test_F82_PersonaSwitchChangesPromptHash(t *testing.T) {
 		System:     "静态段",
 		HalfStatic: personaHalfStatic(reg, mgr, func(msg string) { t.Log(msg) }),
 	})
-	m := buildAdminModule(cfg, nil, lg, nil, nil, mgr, personaPromptHash(asm, mgr, nil, 100, lg))
+	m := buildAdminModule(cfg, buildAccessControls(cfg, nil).Roles, nil, lg, nil, nil, mgr, personaPromptHash(asm, mgr, nil, 100, lg))
 	if m == nil {
 		t.Fatal("buildAdminModule returned nil")
 	}
@@ -170,7 +170,7 @@ func Test_F65_PromptHashWithoutPersonaStillReportsStatic(t *testing.T) {
 		System:     "静态段",
 		HalfStatic: personaHalfStatic(reg, mgr, nil),
 	})
-	m := buildAdminModule(cfg, nil, lg, nil, nil, mgr, personaPromptHash(asm, mgr, nil, 100, lg))
+	m := buildAdminModule(cfg, buildAccessControls(cfg, nil).Roles, nil, lg, nil, nil, mgr, personaPromptHash(asm, mgr, nil, 100, lg))
 	reply, derr := m.Dispatch(ctx, admin.Request{Text: "/prompt-hash", UserID: 42, Source: admin.SourceMessage})
 	if derr != nil {
 		t.Fatalf("Dispatch: %v", derr)

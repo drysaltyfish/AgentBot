@@ -45,6 +45,11 @@ func buildAccessControls(cfg *config.Config, lg *observe.Logger) *accessControls
 //
 // 管理命令授权、权限判定、名单绕过、never-ban 都读这一份。配置里只有这一个位置
 // （旧的 moderation.super_users 已移除，出现即启动失败并给出迁移指引）。
+//
+// 超管的角色解析由 buildAccessControls 做**一次**，结果随 accessControls.Roles
+// 往下传；需要名单的下游（黑名单的 never-ban、管理命令鉴权）都从那里取，
+// 而不是各自用 cfg 再推导一遍——三处各推一次正是"两处判定彼此漂移"的温床
+// （曾经就是它让 access.roles.superuser: [0] 绕过了 fail-closed 守卫）。
 func superUsersFrom(roles *access.Roles) map[int64]struct{} {
 	ids := roles.SuperUsers()
 	out := make(map[int64]struct{}, len(ids))

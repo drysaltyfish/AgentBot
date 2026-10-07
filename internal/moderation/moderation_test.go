@@ -151,7 +151,7 @@ func Test_F57_AmbientPolicyDiffers(t *testing.T) {
 	}
 	ambient, _ := eng.Review(ctx, Message{Text: "x"}, Meta{UserID: 1, Addressed: false})
 	if !ambient.Allowed() {
-		t.Fatalf("背景消息应跳过 guard: %+v", ambient)
+		t.Fatalf("环境消息应跳过 guard: %+v", ambient)
 	}
 }
 

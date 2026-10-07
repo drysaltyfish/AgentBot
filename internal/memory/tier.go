@@ -597,7 +597,7 @@ func (m *TieredMemory) SearchEpisodes(ctx context.Context, query string, from, t
 		if query != "" {
 			matched := false
 			for _, it := range ep.Items {
-				if lexicalScore(query, it.Text) > 0 {
+				if textsim.LexicalScore(query, it.Text) > 0 {
 					matched = true
 					break
 				}
@@ -940,7 +940,7 @@ func selectItems(items []TierItem, query string, count, tokenBudget int, tokens 
 	candidates := cloneTierItems(items)
 	sort.SliceStable(candidates, func(a, b int) bool {
 		if query != "" {
-			sa, sb := lexicalScore(query, candidates[a].Text), lexicalScore(query, candidates[b].Text)
+			sa, sb := textsim.LexicalScore(query, candidates[a].Text), textsim.LexicalScore(query, candidates[b].Text)
 			if sa != sb {
 				return sa > sb
 			}
@@ -1048,26 +1048,11 @@ func tierPriority(t Tier) int {
 func relevance(it TierItem, query string) float64 {
 	base := 0.0
 	if strings.TrimSpace(query) != "" {
-		base = lexicalScore(query, it.Text)
+		base = textsim.LexicalScore(query, it.Text)
 	}
 	return base + float64(tierPriority(it.Tier))*0.1
 }
 
-// lexicalScore 返回 query 的 token 在 text 中命中的比例（0~1）。
-func lexicalScore(query, text string) float64 {
-	qt := uniqueTokens(tokenize(query))
-	if len(qt) == 0 {
-		return 0
-	}
-	set := make(map[string]struct{})
-	for _, t := range tokenize(text) {
-		set[t] = struct{}{}
-	}
-	hit := 0
-	for _, t := range qt {
-		if _, ok := set[t]; ok {
-			hit++
-		}
-	}
-	return float64(hit) / float64(len(qt))
-}
+// lexicalScore 已上移到 internal/textsim：混合检索的 BM25 一路与这里的
+// 召回排序必须用同一套切词口径，否则同一句话在两条路径上得分不同。
+// 见 textsim.Tokenize / textsim.LexicalScore。

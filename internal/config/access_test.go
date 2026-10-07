@@ -143,3 +143,43 @@ func Test_F58_SuperUsersLiveInAccessRoles(t *testing.T) {
 		t.Fatal("新配置不应触发旧键")
 	}
 }
+
+// Test_F58_SuperUserZeroDoesNotSatisfyTheFailClosedGuard 钉住一处守卫绕过。
+//
+// `access.bypass_super_users: false` 的守卫是"关掉绕过就必须真的有人能管理"。
+// 判定曾经在这里自己扫一遍 map、只数个数（len(ids) > 0），而真正的解析
+// （internal/access.NewRoles）会丢弃 QQ 0——两边不一致，于是 superuser: [0]
+// 让校验通过、运行时却一个超管都没有：名单一旦配错就再也无人能管。
+//
+// 判定必须复用 internal/access 的解析，两处规则不能再各写一遍。
+func Test_F58_SuperUserZeroDoesNotSatisfyTheFailClosedGuard(t *testing.T) {
+	t.Parallel()
+
+	build := func(ids []int64) *Config {
+		cfg := Default()
+		cfg.LLM.Model = "m"
+		cfg.Transport.Mode = "wsclient"
+		cfg.Transport.URL = "ws://127.0.0.1:1"
+		bypass := false
+		cfg.Access.BypassSuperUsers = &bypass
+		cfg.Access.Enabled = bptr(true)
+		cfg.Access.Mode = "allow"
+		cfg.Access.Users = []int64{10001}
+		cfg.Access.Roles = map[string][]int64{"superuser": ids}
+		return cfg
+	}
+
+	// 只有 QQ 0 不是"有超管"：它会被解析层丢弃。
+	verr := build([]int64{0}).Validate()
+	if verr == nil {
+		t.Fatal("superuser: [0] 必须让校验失败——解析层会丢弃 0，实际没有任何超管")
+	}
+	if !strings.Contains(verr.Error(), "access.bypass_super_users") {
+		t.Fatalf("错误应指向 access.bypass_super_users，实际: %v", verr)
+	}
+
+	// 混着写一个真实 QQ 号则应当通过。
+	if err := build([]int64{0, 10001}).Validate(); err != nil {
+		t.Fatalf("有真实超管时应校验通过: %v", err)
+	}
+}

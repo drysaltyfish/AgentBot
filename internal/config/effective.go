@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/drysaltyfish/agentbot/internal/llm"
-	"github.com/drysaltyfish/agentbot/internal/memory"
+	"github.com/drysaltyfish/agentbot/internal/retrieval"
 	"github.com/drysaltyfish/agentbot/internal/semcache"
 )
 
@@ -260,13 +260,13 @@ func (r RetrievalTree) EffectiveEnabled() bool { return orBool(r.Enabled, false)
 
 // EffectiveMaxLevels 返回最多构建层数；未配置或非正时取 memory 默认值。
 func (r RetrievalTree) EffectiveMaxLevels() int {
-	return orPositive(r.MaxLevels, memory.DefaultTreeMaxLevels)
+	return orPositive(r.MaxLevels, retrieval.DefaultTreeMaxLevels)
 }
 
 // EffectiveMinCluster 返回成簇下限；未配置或小于 2 时取 memory 默认值。
 func (r RetrievalTree) EffectiveMinCluster() int {
-	if r.MinCluster == nil || *r.MinCluster < memory.DefaultTreeMinCluster {
-		return memory.DefaultTreeMinCluster
+	if r.MinCluster == nil || *r.MinCluster < retrieval.DefaultTreeMinCluster {
+		return retrieval.DefaultTreeMinCluster
 	}
 	return *r.MinCluster
 }
@@ -274,20 +274,20 @@ func (r RetrievalTree) EffectiveMinCluster() int {
 // EffectiveBranching 返回单簇节点上限；未配置或小于 2 时取 memory 默认值。
 func (r RetrievalTree) EffectiveBranching() int {
 	if r.Branching == nil || *r.Branching < 2 {
-		return memory.DefaultTreeBranching
+		return retrieval.DefaultTreeBranching
 	}
 	return *r.Branching
 }
 
 // EffectiveMaxNodes 返回全树节点上限；未配置或非正时取 memory 默认值。
 func (r RetrievalTree) EffectiveMaxNodes() int {
-	return orPositive(r.MaxNodes, memory.DefaultTreeMaxNodes)
+	return orPositive(r.MaxNodes, retrieval.DefaultTreeMaxNodes)
 }
 
 // EffectiveClusterThreshold 返回聚类阈值；未配置或为负时取 memory 默认值。
 func (r RetrievalTree) EffectiveClusterThreshold() float64 {
 	if r.ClusterThreshold == nil || *r.ClusterThreshold < 0 {
-		return memory.DefaultClusterThreshold
+		return retrieval.DefaultClusterThreshold
 	}
 	return *r.ClusterThreshold
 }
@@ -379,12 +379,12 @@ func (r Retrieval) EffectiveVectorWeight() float64 {
 
 // EffectiveTopK 返回最终条数；未配置或非正时取 memory 的默认值。
 func (r Retrieval) EffectiveTopK() int {
-	return orPositive(r.TopK, memory.DefaultHybridTopK)
+	return orPositive(r.TopK, retrieval.DefaultHybridTopK)
 }
 
 // EffectiveCandidateK 返回每路候选数；未配置或非正时取 memory 的默认值。
 func (r Retrieval) EffectiveCandidateK() int {
-	return orPositive(r.CandidateK, memory.DefaultCandidateK)
+	return orPositive(r.CandidateK, retrieval.DefaultCandidateK)
 }
 
 // EffectiveEnabled 返回是否启用流式增量发送；未配置时默认关闭。

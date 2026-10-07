@@ -105,7 +105,13 @@ func runSelfTest(cfg *config.Config, target int64, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	auth := transport.NewAuth(stringOr(cfg.Transport.AccessToken, ""), "", cfg.Transport.IPAllowlist)
+	// 与 serve 用同一个构造点：自检必须验证**和线上完全一样**的鉴权配置，
+	// 否则"自检通过"并不代表服务能连上。
+	auth, aerr := buildTransportAuth(cfg)
+	if aerr != nil {
+		_, _ = fmt.Fprintf(stderr, "invalid transport auth config: %v\n", aerr)
+		return 1
+	}
 	ws := transport.NewWSClient(cfg.Transport.URL, auth)
 	defer func() { _ = ws.Close(context.Background()) }()
 

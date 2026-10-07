@@ -38,7 +38,8 @@ type Store struct {
 
 // History 描述对话历史的存储（F-38 的落盘选项）。
 type History struct {
-	// File 是 JSONL 落盘路径；为空表示仅进程内（重启即丢）。
+	// File 是**旧版 JSONL 历史的一次性导入源**；新数据一律落 SQLite（见 store.path）。
+	// 导入由启动时执行，幂等且只在库为空时触发；为空或不存在的文件都不影响运行。
 	File string `yaml:"file"`
 	// Retention 是**存储**保留的条目上限（默认 400），远大于呈现窗口。
 	// 呈现窗口由 llm.history_turns 决定；两者分开，recall_history 才能召回
@@ -64,12 +65,12 @@ type Agent struct {
 	Tools []string `yaml:"tools"`
 	// VirtualActions 为 true 时注册 end_action / save_memory / noop。
 	VirtualActions *bool `yaml:"virtual_actions"`
-	// Memory 为 true 时启用进程内长期记忆（F-48 的完整实现在 M3）。
+	// Memory 为 true 时启用长期记忆（落 SQLite，见 store.path；F-87/F-49）。
 	Memory *bool `yaml:"memory"`
 	// MemoryMax 是记忆条数上限（每个作用域），默认 64。
 	MemoryMax *int `yaml:"memory_max"`
-	// MemoryFile 是记忆落盘的 JSONL 路径；为空表示仅进程内（重启即丢）。
-	// 复用 F-38 的历史存储实现（F-47 的“可选 JSONL 文件落盘”）。
+	// MemoryFile 是**旧版记忆 JSONL 的一次性导入源**（导入进扁平记忆表，幂等）。
+	// 记忆本身一直落 SQLite；为空或文件不存在就不做导入。
 	MemoryFile string `yaml:"memory_file"`
 	// ApprovalTimeout 是人工审批的独立预算，默认 60s。
 	ApprovalTimeout *Duration `yaml:"approval_timeout"`
@@ -339,9 +340,9 @@ type RetrievalTree struct {
 type Retrieval struct {
 	// Enabled 为 true 时启用；未配置时默认关闭。
 	Enabled *bool `yaml:"enabled"`
-	// KeywordWeight 是关键词一路的权重；<=0 时用 1.0，<0 表示关闭该路。
+	// KeywordWeight 是关键词一路的权重；未配置或为 0 时取 1.0，负值表示关闭该路。
 	KeywordWeight *float64 `yaml:"keyword_weight"`
-	// VectorWeight 是向量一路的权重；<=0 时用 1.0，<0 表示关闭该路。
+	// VectorWeight 是向量一路的权重；未配置或为 0 时取 1.0，负值表示关闭该路。
 	VectorWeight *float64 `yaml:"vector_weight"`
 	// TopK 是最终返回条数；<=0 时用 5。调用方给出的 limit 优先。
 	TopK *int `yaml:"top_k"`

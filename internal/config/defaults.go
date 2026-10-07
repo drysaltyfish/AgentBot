@@ -33,6 +33,12 @@ const (
 	defaultBehaviorMaxSegments = 4
 	// defaultHistoryRetention 是历史存储默认保留的条目上限。
 	defaultHistoryRetention = 400
+	// defaultStoreBusyTimeout 与 store.DefaultBusyTimeout 对齐。
+	//
+	// 跨包默认值刻意在这里成对声明（同 defaultAgentStepTimeout 与 agent.DefaultStepTimeout）：
+	// 配置层不 import 持久层，但默认值必须能被 Default() 填进字段——
+	// 否则 --check-config 会打印 null，而运行时用的是 1s。
+	defaultStoreBusyTimeout = time.Second
 
 	// 以下为 F-18 / F-19 / F-60 / F-68 / F-69 的默认值。
 	defaultRateLimitUserPerMinute  = 20
@@ -82,7 +88,9 @@ func Default() *Config {
 	opsTTL := Duration{D: defaultOpsReadyCacheTTL}
 	opsProbe := Duration{D: defaultOpsProbeTimeout}
 	sfNotice := defaultSingleflightNotice
+	busyTimeout := Duration{D: defaultStoreBusyTimeout}
 	return &Config{
+		Store:     Store{BusyTimeout: &busyTimeout},
 		Transport: Transport{Mode: "wsclient", Backoff: &backoff},
 		LLM: LLM{
 			Provider: "openai", BaseURL: "https://api.openai.com/v1", Timeout: &timeout,

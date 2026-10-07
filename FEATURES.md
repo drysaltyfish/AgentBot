@@ -228,6 +228,14 @@
 - `Connect` **必须返回 error**（与"连不上只打日志"的写法不同），由上层决定重试策略。
 - `Listen` 收到 ctx 取消时须**立即返回**并关闭底层连接，不得永久阻塞。
 - 连接失败的重试策略外置：`RetryDriver{next, backoff}` 装饰器，默认 1s 起、最长 30s、带 jitter。
+  **实现位置说明（第 40 轮查清）**：这条要求由**组合根**的 `runWSSession`
+  （`cmd/server/wssession.go`）满足——它做 `Connect → Listen → Disconnect → 再 Connect`，
+  **不设尝试上限**，只用 `retry.Policy.Delay` 的退避与 30s 封顶。
+  仓库内那个 `transport.RetryDriver` 装饰器**不能用于此目的**，两处原因：
+  `Listen` 从不重新 `Connect`（在死连接上重试读毫无意义），
+  且配合 `retry.Default()` 时只有 3 次尝试、之后**永久放弃**——
+  后者正是"进程还活着、探针还 ready、机器人永远收不到消息"的缺陷形态。
+  两条都有测试钉住（`internal/transport/driver_retry_trap_test.go`）。
 - URI 支持 `ws://`、`wss://`、`http://`、`ws+unix://`（unix socket）。
 
 **边界**
@@ -260,6 +268,10 @@
 - `ctx` 超时必须取消底层请求；返回 error 且 Response 为零值。
 - `Params` 为 nil 时按空对象发送，不能 panic。
 - 未知 Action 不预校验（平台可能扩展），但 `RecordingCaller` 需容忍 `Data` 为空。
+- **`RetryCaller` 只重试幂等动作**（`transport.RetryableActions`）。传输层失败带着
+  一个无法消除的歧义：请求可能已被平台处理，只是回包没回来。对 `send_msg` 重试
+  会让用户收到两遍；对 `delete_msg` / `set_group_ban` / 读取类动作重试是安全的。
+  这个判定**不能**靠"错误类型"做——同一类传输错误在不同的动作上代价完全不同。
 
 **验收**
 - 装饰两层后调用仍能正确穿透并返回原始 Response。
@@ -1014,6 +1026,14 @@
 **验收**
 - `JSONSchemaOf[MyStruct]()` 产出可被标准校验器接受的 schema。
 - 模型返回非法 JSON 时触发一次重试。
+
+**接线状态（ADR-0004）**
+- 能力实现完整、provider 侧的 `response_format` 序列化也通，但**当前没有生产消费方**，
+  因此整块处于休眠状态；原因是唯一的自然消费方（F-87 的语义判官）已有安全退化路径，
+  而给一个默认关闭的软功能加 provider 能力依赖方向相反。
+- 为使这个决定可被数据推翻，新增指标 **`memory_judge_verdicts_total{outcome}`**
+  （`same` / `different` / `unparsed` / `error`）：判官解析失败此前是静默退化，
+  没有别的地方记录。接线条件与反转条件见 ADR-0004。
 
 ---
 

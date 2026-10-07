@@ -8,6 +8,14 @@ import (
 	"time"
 )
 
+// 本文件里的 GuardChain / RuleGuard / LLMGuard / VectorGuard 都是**完整实现但当前无消费方**：
+// 组合根构造 moderation.Engine 时没有填 Options.Guards（见 HANDOFF「已知偏离」），
+// 所以它们在生产里一次都不会跑。线上生效的入站审查是黑名单 → 防刷 → 敏感词自动机。
+//
+// 接线的前提是先有配置面：规则表（RuleGuard 的 []Rule）、分类器实现（LLMGuard 需要
+// 一个会花钱的模型调用）、恶意语料索引（VectorGuard 复用 F-50）。那是新特性，不是接线。
+// 改这些实现不会影响线上行为。
+
 // Verdict 是单个 InboundGuard 的判定结果。
 type Verdict struct {
 	// Allow 为 false 表示拒绝。

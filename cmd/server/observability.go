@@ -53,6 +53,9 @@ type observedLLM struct {
 	cost *cost.Tracker
 	// budget 是 F-32 的上下文预算；nil 表示不做预算裁剪。
 	budget *llm.Budget
+	// counter 是与 budget 共用的实测计数器（F-32 的"provider 实测优先"）。
+	// nil 表示预算未启用——没有裁剪需求时不做记录。
+	counter *llm.MeasuredCounter
 	// warn 是降级路径的告警出口（例如 downgrade 动作未能强制）；nil 时静默。
 	warn func(string)
 }
@@ -70,6 +73,15 @@ func (o *observedLLM) Chat(ctx context.Context, req *llm.ChatRequest) (*llm.Chat
 	}
 	start := time.Now()
 	resp, err := o.next.Chat(ctx, req)
+	// F-32：把 provider 实测的 prompt token 喂回去，下次同一份消息序列就按实测值裁剪。
+	// 记的必须是**裁剪后真正发出去的那份**——FitRequest 会返回新请求，
+	// 上面那个 req 已经是它了；记成裁剪前的那份会永远命不中缓存。
+	//
+	// 只覆盖非流式路径：流式的 usage 在 provider 侧的结算里，这个位置拿不到
+	// （见 ChatStream 的说明）。流式默认关闭（F-64），因此影响面有限。
+	if err == nil && o.counter != nil && resp != nil {
+		o.counter.Observe(o.model, req.Messages, resp.Usage)
+	}
 	o.observe(ctx, start, resp, err)
 	return resp, err
 }
@@ -376,7 +388,8 @@ func approvalAuditHook(alog *audit.Logger) func(agent.ApprovalRecord) {
 //
 // 审计与指标注入放在组合根（而不是 engine 的回调里）：决策已经带着 Rule/Reason，
 // 在这里既省一层适配，也让"什么算拦截"只有一个判据。
-func buildModeration(cfg *config.Config, lg *observe.Logger) (*moderation.Engine, error) {
+// buildModeration 构造入站审查引擎；roles 是组合根已解析好的角色表（超管名单从它取）。
+func buildModeration(cfg *config.Config, roles *access.Roles, lg *observe.Logger) (*moderation.Engine, error) {
 	if !cfg.Moderation.EffectiveEnabled() {
 		return nil, nil
 	}
@@ -403,7 +416,7 @@ func buildModeration(cfg *config.Config, lg *observe.Logger) (*moderation.Engine
 		matcher = textguard.NewEngine(m)
 	}
 
-	bans, berr := buildBlacklist(cfg, func(msg string) { mlog.Warn(msg) })
+	bans, berr := buildBlacklist(cfg, roles, func(msg string) { mlog.Warn(msg) })
 	if berr != nil {
 		return nil, berr
 	}
@@ -434,11 +447,12 @@ func buildModeration(cfg *config.Config, lg *observe.Logger) (*moderation.Engine
 }
 
 // buildBlacklist 构造黑名单；文件不可用时退回内存并告警（可用性优先）。
-func buildBlacklist(cfg *config.Config, warn func(string)) (*moderation.Blacklist, error) {
+func buildBlacklist(cfg *config.Config, roles *access.Roles, warn func(string)) (*moderation.Blacklist, error) {
 	opts := moderation.BlacklistOptions{
 		SelfID: cfg.Transport.EffectiveSelfID(),
-		// 永不可封禁名单 = 超管名单（唯一来源：access.roles.superuser）。
-		SuperUsers: access.NewRoles(cfg.Access.Roles).SuperUsers(),
+		// 永不可封禁名单 = 超管名单。用组合根已经解析好的角色表，
+		// 而不是在这里用 cfg 再推导一次（唯一来源：access.roles.superuser）。
+		SuperUsers: roles.SuperUsers(),
 		Warn:       warn,
 	}
 	if path := strings.TrimSpace(cfg.Moderation.BlacklistFile); path != "" {
@@ -602,12 +616,15 @@ func buildCostTracker(cfg *config.Config, lg *observe.Logger, cat *metrics.Catal
 // buildAdminModule 构造管理命令模块（F-71）。
 //
 // 只注册组合根有能力提供数据的命令；/help 由 admin.New 自带。
-// 鉴权统一走 moderation.super_users：仓库里已经有"谁说了算"的配置，
-// 不该再造第二份。
-func buildAdminModule(cfg *config.Config, alog *audit.Logger, lg *observe.Logger, mod *moderation.Engine, costTracker *cost.Tracker, personas *scoped.Manager, promptHash admin.PromptHashFunc) *admin.Module {
+// 鉴权统一走 access.roles.superuser：仓库里已经有"谁说了算"的配置，
+// 不该再造第二份（旧的 moderation.super_users 已移除，出现即启动失败）。
+//
+// roles 由组合根传入，是 buildAccessControls 解析出的**同一份**角色表——
+// 这里不再用 cfg 推导，避免出现第三个推导点。
+func buildAdminModule(cfg *config.Config, roles *access.Roles, alog *audit.Logger, lg *observe.Logger, mod *moderation.Engine, costTracker *cost.Tracker, personas *scoped.Manager, promptHash admin.PromptHashFunc) *admin.Module {
 	// 超管名单只有一处：access.roles.superuser（与组合根同一份）。
 	supers := make(map[int64]bool)
-	for id := range superUsersFrom(access.NewRoles(cfg.Access.Roles)) {
+	for id := range superUsersFrom(roles) {
 		supers[id] = true
 	}
 	mlog := lg.Component("admin")

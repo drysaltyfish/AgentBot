@@ -145,12 +145,13 @@ func Test_F05_RateLimitedCallerRejectsOverBurst(t *testing.T) {
 
 func Test_F05_RetryCallerRetriesTransportErrorsOnly(t *testing.T) {
 	t.Parallel()
+	// 用幂等动作：只有幂等动作才会重试（见 RetryCaller 的说明）。
 	base := &stubCaller{resp: Response{}, failN: 2}
 	rc := NewRetryCaller(base, retry.Policy{
 		MaxAttempts: 3,
 		Sleep:       func(ctx context.Context, d time.Duration) error { return nil },
 	})
-	if _, err := rc.Call(context.Background(), Request{Action: "x"}); err != nil {
+	if _, err := rc.Call(context.Background(), Request{Action: "get_msg"}); err != nil {
 		t.Fatalf("Call: actual=%v expected=nil after retries", err)
 	}
 	if base.calls.Load() != 3 {
@@ -162,12 +163,64 @@ func Test_F05_RetryCallerRetriesTransportErrorsOnly(t *testing.T) {
 		MaxAttempts: 3,
 		Sleep:       func(ctx context.Context, d time.Duration) error { return nil },
 	})
-	resp, err := rc2.Call(context.Background(), Request{Action: "x"})
+	resp, err := rc2.Call(context.Background(), Request{Action: "get_msg"})
 	if err != nil {
 		t.Fatalf("business error must not be retried or wrapped: actual=%v", err)
 	}
 	if resp.RetCode != 100 || business.calls.Load() != 1 {
 		t.Fatalf("business error handling: actual=(retcode=%d calls=%d) expected=(100,1)", resp.RetCode, business.calls.Load())
+	}
+}
+
+// Test_F05_RetryCallerNeverRetriesNonIdempotentActions 钉住"重试不得造成重复投递"。
+//
+// 传输层失败（连接断开、超时）带着一个无法消除的歧义：请求可能已经被平台处理，
+// 只是回包没回来。对 `send_group_msg` 重试，用户就会收到两遍同一句话——
+// 这正是出站重试一直没接线的原因。
+//
+// 这条测试是那个风险的结构性防线：即使将来有人把 RetryCaller 接上发送链路，
+// 非幂等动作也**一次都不会重试**。
+func Test_F05_RetryCallerNeverRetriesNonIdempotentActions(t *testing.T) {
+	t.Parallel()
+	base := &stubCaller{resp: Response{}, failN: 99} // 每次都失败
+	rc := NewRetryCaller(base, retry.Policy{
+		MaxAttempts: 3,
+		Sleep:       func(ctx context.Context, d time.Duration) error { return nil },
+	})
+
+	if _, err := rc.Call(context.Background(), Request{Action: "send_group_msg"}); err == nil {
+		t.Fatal("上游一直失败时应当返回错误")
+	}
+	if n := base.calls.Load(); n != 1 {
+		t.Fatalf("非幂等动作必须只发一次，实际 %d 次——每次重试都可能让用户再收到一遍", n)
+	}
+
+	// 私聊发送同样不幂等。
+	private := &stubCaller{resp: Response{}, failN: 99}
+	rc2 := NewRetryCaller(private, retry.Policy{
+		MaxAttempts: 3,
+		Sleep:       func(ctx context.Context, d time.Duration) error { return nil },
+	})
+	_, _ = rc2.Call(context.Background(), Request{Action: "send_msg"})
+	if n := private.calls.Load(); n != 1 {
+		t.Fatalf("send_msg 必须只发一次，实际 %d 次", n)
+	}
+}
+
+// Test_F05_RetryCallerAllowsExplicitOverride 允许重试非幂等动作必须是**显式**决定。
+func Test_F05_RetryCallerAllowsExplicitOverride(t *testing.T) {
+	t.Parallel()
+	base := &stubCaller{resp: Response{}, failN: 2}
+	rc := NewRetryCallerWithOptions(base, retry.Policy{
+		MaxAttempts: 3,
+		Sleep:       func(ctx context.Context, d time.Duration) error { return nil },
+	}, WithRetryableAction(func(string) bool { return true }))
+
+	if _, err := rc.Call(context.Background(), Request{Action: "send_group_msg"}); err != nil {
+		t.Fatalf("显式开启后应当重试: %v", err)
+	}
+	if n := base.calls.Load(); n != 3 {
+		t.Fatalf("显式开启后应重试到成功，实际 %d 次", n)
 	}
 }
 

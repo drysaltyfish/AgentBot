@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"reflect"
 	"strings"
@@ -8,6 +9,28 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// Test_F79_ExampleConfigHasNoUnknownKeysAnywhere 是上面那条测试的**加强版**。
+//
+// 上面只遍历顶层键，所以嵌套拼错（例如把 ratelimit.user_burst 写成 user_bust）
+// 不会被发现：顶层键 ratelimit 仍然存在，那个测试照样通过。
+// 而运行时用的是 KnownFields(true)（load.go），同一个文件到了线上才会启动失败。
+//
+// 这里用与装载完全相同的解码方式解析示例配置：任何层级出现 schema 里没有的键，
+// 都会在 CI 里失败，而不是等到部署那一刻。
+func Test_F79_ExampleConfigHasNoUnknownKeysAnywhere(t *testing.T) {
+	raw, err := os.ReadFile("../../config.example.yaml")
+	if err != nil {
+		t.Fatalf("read config.example.yaml: %v", err)
+	}
+
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	var cfg Config
+	if err := dec.Decode(&cfg); err != nil {
+		t.Fatalf("config.example.yaml 存在 schema 之外的键（嵌套也算）: %v", err)
+	}
+}
 
 // Test_F79_ExampleConfigKeysExistInSchema 保证文档里写的配置项真的存在（F-79）。
 //

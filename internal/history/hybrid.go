@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/drysaltyfish/agentbot/internal/memory"
+	"github.com/drysaltyfish/agentbot/internal/retrieval"
 	"github.com/drysaltyfish/agentbot/internal/vector"
 )
 
@@ -22,7 +22,7 @@ import (
 type Hybrid struct {
 	History
 	// Config 是 F-51 的融合参数（权重、TopK、候选数、RRF k）。
-	Config memory.HybridConfig
+	Config retrieval.HybridConfig
 	// Tree 非 nil 时再加一条摘要树召回（F-52）。
 	Tree *TreeConfig
 
@@ -32,7 +32,7 @@ type Hybrid struct {
 }
 
 // NewHybrid 构造；base 为 nil 时退化为不可用（Search 返回错误）。
-func NewHybrid(base History, cfg memory.HybridConfig) *Hybrid {
+func NewHybrid(base History, cfg retrieval.HybridConfig) *Hybrid {
 	return &Hybrid{History: base, Config: cfg}
 }
 
@@ -59,10 +59,10 @@ type hybridEntry struct {
 // limit 优先于 Config.TopK：工具侧的限制是硬上限，配置只提供默认值。
 func (h *Hybrid) Search(ctx context.Context, key, query string, limit int) ([]Hit, error) {
 	if h == nil || h.History == nil {
-		return nil, memory.ErrUnavailable
+		return nil, retrieval.ErrUnavailable
 	}
 	if limit <= 0 {
-		limit = memory.DefaultHybridTopK
+		limit = retrieval.DefaultHybridTopK
 	}
 	items, err := h.Messages(ctx, key)
 	if err != nil {
@@ -82,14 +82,14 @@ func (h *Hybrid) Search(ctx context.Context, key, query string, limit int) ([]Hi
 	if cfg.CandidateK < limit {
 		cfg.CandidateK = limit
 	}
-	bm := memory.NewBM25Index()
+	bm := retrieval.NewBM25Index()
 	idx := vector.NewIndex()
 	for i, e := range entries {
 		id := int64(i)
 		bm.Add(id, e.item.Content)
 		idx.Add(id, e.item.Content, vector.TextVector(e.item.Content, vector.TextDim))
 	}
-	retriever := memory.NewHybridRetrieverWithSearchers(bm, memory.VectorIndexSearcher{Index: idx}, cfg)
+	retriever := retrieval.NewHybridRetrieverWithSearchers(bm, retrieval.VectorIndexSearcher{Index: idx}, cfg)
 	fused, _ := retriever.Search(ctx, query, vector.TextVector(query, vector.TextDim), limit)
 
 	out := make([]Hit, 0, len(fused))

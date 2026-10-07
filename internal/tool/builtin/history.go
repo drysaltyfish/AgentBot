@@ -10,17 +10,12 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/tool"
 )
 
-// HistoryReader 是 recall_history 需要的能力；history.History 天然满足。
+// HistoryReader 是 recall_history 需要的最小能力；history.History 天然满足。
+//
+// 刻意只要求 Messages：这是 History 的**真子集**，不是重复声明——
+// 收窄接口让调用方（和测试 fake）只承担真正用到的能力。
 type HistoryReader interface {
 	Messages(ctx context.Context, key string) ([]history.Item, error)
-}
-
-// HistorySearcher 是历史存储的**可选**检索能力（F-84）。
-//
-// 能存不等于能搜：只有支持检索的实现才提供它。有检索时走索引并拿到片段与上下文，
-// 没有时才退化为"读全量再子串过滤"——后者在大历史上是 O(n)，且给不出片段。
-type HistorySearcher interface {
-	Search(ctx context.Context, key, query string, limit int) ([]history.Hit, error)
 }
 
 // DefaultRecallLimit 是一次召回最多返回多少条。
@@ -144,7 +139,9 @@ func (t recallHistory) Execute(ctx context.Context, args json.RawMessage) (tool.
 	needle := strings.ToLower(strings.TrimSpace(in.Query))
 
 	// 有检索能力就走检索：能拿到片段与前后文，且不必把整段历史读进内存。
-	if searcher, ok := t.deps.History.(HistorySearcher); ok {
+	// history.Searcher 是**可选能力**（能存不等于能搜），所以用类型断言探测；
+	// 这里曾经重新声明过一份同签名的 HistorySearcher，已合并到 history.Searcher。
+	if searcher, ok := t.deps.History.(history.Searcher); ok {
 		hits, err := searcher.Search(ctx, key, strings.TrimSpace(in.Query), limit)
 		if err != nil {
 			return tool.Failure(err.Error()), nil

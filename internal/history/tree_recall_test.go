@@ -4,12 +4,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/drysaltyfish/agentbot/internal/memory"
+	"github.com/drysaltyfish/agentbot/internal/retrieval"
 )
 
 // noKeywordNoVector 把 F-51 的两路都关掉，用来证明摘要树确实是一条独立召回源。
-func noKeywordNoVector() memory.HybridConfig {
-	return memory.HybridConfig{KeywordWeight: -1, VectorWeight: -1, TopK: 5, CandidateK: 10}
+func noKeywordNoVector() retrieval.HybridConfig {
+	return retrieval.HybridConfig{KeywordWeight: -1, VectorWeight: -1, TopK: 5, CandidateK: 10}
 }
 
 // Test_F52_TreeIsAnIndependentRecallSource 是 F-52 接线的核心断言：

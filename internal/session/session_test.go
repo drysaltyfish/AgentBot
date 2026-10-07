@@ -161,7 +161,6 @@ func Test_F21_ConcurrentGetOrCreateRespectsMax(t *testing.T) {
 				key := Key{GroupID: int64((g*100 + i) % 200)}
 				s := m.GetOrCreate(key)
 				s.Set("g", g)
-				_ = s.Persona()
 			}
 		}(g)
 	}
@@ -171,14 +170,15 @@ func Test_F21_ConcurrentGetOrCreateRespectsMax(t *testing.T) {
 	}
 }
 
+// Test_F21_SessionStateAccessors 覆盖会话级键值访问。
+//
+// 这里曾经还测过 Session.Persona/SetPersona，但那套状态没有任何生产调用方——
+// 人格真正落在 scoped.Manager（并由 SQLite 持久化）。同一个概念在两个地方安家、
+// 其中一个是影子，比少一个方法更难维护，所以删掉了。
 func Test_F21_SessionStateAccessors(t *testing.T) {
 	t.Parallel()
 	m := New()
 	s := m.GetOrCreate(Key{GroupID: 1})
-	s.SetPersona("default")
-	if s.Persona() != "default" {
-		t.Fatalf("Persona: actual=%q", s.Persona())
-	}
 	s.Set("k", 1)
 	if v, ok := s.Get("k"); !ok || v.(int) != 1 {
 		t.Fatalf("Get: actual=(%v,%v)", v, ok)

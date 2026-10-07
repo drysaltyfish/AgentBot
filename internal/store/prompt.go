@@ -99,8 +99,15 @@ type digestRelation struct {
 	slidBy       int
 }
 
-// compareDigest 判定两次快照的关系。与 conversation.ComparePrefix 同一套语义，
-// 但作用在编码后的字符串上——存储层不该依赖表示层。
+// compareDigest 判定两次快照的关系。它与 llm.ComparePrefix 是**同一套语义的两份实现**，
+// 但作用在编码后的字符串上——存储层不该依赖表示层（llm 在本层之上）。
+//
+// 两份实现的关系词表必须逐字一致：本函数产出的字符串会落进
+// `prompt_snapshots.relation`，而 reply 拿它去比对 llm 的常量（llm.RelationDiverged）。
+// 改这边四个字面量中的任何一个，都会让那边的 case 分支静默失配，
+// 表现为"前缀分叉告警不再出现"。这条耦合由
+// internal/reply 的 Test_PrefixRelationVocabularyIsSharedAcrossPackages 守住。
+//
 // MemoryBlockIndex 是记忆块在消息序列里的位置（ADR-0002：system 之后、历史之前）。
 //
 // 记忆变化会让它**之后**的全部内容失效，因此"分歧点不超过这个位置"

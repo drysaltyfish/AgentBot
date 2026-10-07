@@ -1,25 +1,39 @@
 # 接手文档：FEATURES 剩余工作
 
 > 用途：本会话上下文接近上限时留下的准确状态。**不是完成报告**——
-> 目标"除多账号/多供应商路由外全部完成"尚未达成。
+> FEATURES 范围（除 F-07 多账号 / F-27 多供应商）的功能已收尾，
+> 但**未接线台账（§4.17）与已知偏离（§4）需要持续维护**，且当前工作区**有未提交改动**。
 
 ## 1. 目标与范围
 
 - 目标（goal）：除 **F-07 多账号路由** 与 **F-27 多供应商路由** 外，FEATURES.md 中其余 Feature 全部完成。
+  该目标**已收尾**（见 §2）。
+- **其后的若干轮是质量优化与审计**，目标是「完全优化」：修缺陷、给装配加契约、
+  把"实现了但没接线"的项盘成清单（§4.17）。**这批改动尚未提交**（见 §2）。
 - 规格唯一来源：FEATURES.md（89 条）。
 - 仓库：Go 1.27.1，单二进制 + 内嵌 SQLite（modernc），OneBot v11 QQ 机器人。
 
-## 2. 当前状态（干净、已推送）
+## 2. 当前状态（功能已收尾；优化轮次的改动**尚未提交**）
 
-- HEAD 见 `git log -1`；工作区干净，每轮本地 build/vet/test/gofmt 全绿，CI 走 `gh run watch`。
+- HEAD 见 `git log -1`。**工作区当前有未提交改动**：约 40 个文件修改 + 25 个新文件
+  （质量优化轮次的产物，逐项见 CHANGELOG「未发布」）。
+  每轮本地 `build/vet/test/gofmt/--check-config` 全绿；CI 走 `gh run watch`。
 - **功能实现：87/89**；剩下两条（F-07 多账号、F-27 多供应商）在目标范围之外。
-- **接线：原 §3.2 十项 + 收尾审计新增四项（F-32/F-53/F-54/F-33/F-79 清单）全部完成**。
-  唯一未消费的库是 **F-62**（图片去重），它的消费方需要多模态请求，而没有任何 Feature
-  定义这条上游能力（§4.7）。
-- 收尾审计的方法：扫描"没有任何**非测试**代码 import 的 internal 包"。F-33/F-53/F-62
-  就是这样找出来的——它们从未进过任何待办清单。
-- **目标已收尾**：范围（除 F-07/F-27）内的功能与接线全部完成，唯一例外 F-62 经用户
-  确认按"边界受限"记录（§4.7/§4.8），不作为未完成项。
+  **但这个口径要看清**：87/89 是按 **Feature** 计的，判据是**验收**通过，
+  不是"规格里每个字都做了"。最典型的反例是 F-04——它的验收只要求"内存 mock 传输跑得通"，
+  已通过；而它规格里列的 `wsserver`（反向 WS）与 `http`（HTTP 上报）两个驱动**根本没实现**。
+  所以**不能从 87/89 推断某个配置项可用**。详见下面两条警告。
+- **接线**：原 §3.2 十项，加上收尾审计另外找出的 F-53/F-54 与 F-33，全部完成；
+  F-32、F-79 也在同一轮完成。逐项内容与证明它的测试见下表。
+- **⚠️ "接线全部完成"这个结论方法上偏窄，别再照抄**：当年的收尾审计只扫
+  "`internal/*` 里没有任何**非测试**代码 import 的包"。它能找出**整包**没人用
+  （F-33/F-53/F-62 就是这样找出来的，且从未进过任何待办清单），
+  却**看不见已被 import 的包里那些没人调用的能力**。
+  更细的扫描（找"符号去掉注释后只在定义处出现"）又找出六处，
+  其中入站 guard 链、出站重试、F-32 的实测计数都有实际影响。
+  **未接线台账以 §4.17 为准，不要只看本条。**
+- **目标已收尾**：范围（除 F-07/F-27）内的功能与接线按上述口径完成，唯一例外 F-62
+  经用户确认按"边界受限"记录（§4.10），不作为未完成项。
 
 ### 已完成的接线
 
@@ -74,9 +88,13 @@ F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
 做扫描，找出三处库就绪但无人消费的能力；其中 **F-53/F-54**（权限即提示词 / 硬拦截）
 与 **F-33**（提示词模板引擎）已接入。仅剩一项：
 
+> ⚠️ **这张表只覆盖"整包没人 import"这一类。** 包内"实现了但没有任何生产调用方"的能力
+> 另有一批（入站 guard 链、出站重试/限流、F-32 实测计数、F-31 结构化输出、前缀快照的读路径…），
+> 完整清单与**失效判据**见 **§4.17**。要判断"某项到底生效没有"，以 §4.17 为准。
+
 | # | 项 | 入口 | 前置条件 / 风险 |
 |---|---|---|---|
-| C | F-62 感知哈希图片去重 | 图片入站链路 | 需要多模态请求（图片 → 视觉模型 → 描述），而 `llm.Message` 只有文本；FEATURES 里也没有任何一条定义这条上游能力。属边界受限，见 §4.7；要接就等于新增特性（改 provider 契约与全部 fake） |
+| C | F-62 感知哈希图片去重 | 图片入站链路 | 需要多模态请求（图片 → 视觉模型 → 描述），而 `llm.Message` 只有文本；FEATURES 里也没有任何一条定义这条上游能力。属边界受限，见 §4.10；要接就等于新增特性（改 provider 契约与全部 fake） |
 
 收尾复扫（第 14 轮）结果：零生产引用的包只剩 `imagehash`（即 F-62）、`testutil`（测试专用）、
 `unsafeutil`（白名单辅助）。同时修掉了 F-79 的能力清单过期问题（见 §2 表格）。
@@ -111,6 +129,137 @@ F-07（多账号）与 F-27（多供应商）明确在目标范围之外。
    顺序由 F-41 的注册顺序固定，不在 `/prompt-hash` 的 static 段里。
    另：`DefaultPersona` 不注入半静态正文（内置 default.yml 与 `DefaultSystemPrompt`
    逐字相同，再注入一次等于每个请求发两遍同一段话）。
+12. **角色解析有两套实现，生产只用其中一套**（架构评审发现，尚未处理）：
+   - 线上：`access.roleForEvent` → `policy.WithRole`/`RoleFrom`。角色在事件入口解析一次、
+     放进 ctx，出口只从 ctx 读。数据源是**事件里平台已上报的** `Sender.Role`
+     加上 `access.roles` 的显式指定，不需要额外查询。
+   - 未接线：`policy.RoleResolver`/`policy.MemberLookup` 与
+     `router.GroupAdmin`/`GroupOwner`/`HigherThan`/`router.MemberLookup`。
+     它们要求宿主按 QQ 去平台查群成员角色。全仓库没有非测试调用方。
+   `cmd/server/policy.go:53-54` 明确写了组合根**刻意**不用 `RoleResolver`：
+   "这里不再单独实现一份，避免出现两处判定彼此漂移"。
+   当前处理方式是**在两处声明上加"当前无生产调用方"注释**，并保留代码——
+   与 F-62 同样按"有库无消费方"对待。要删除的话，涉及 policy.go 与 router/rules.go
+   各约 40–60 行加两份测试；要接线的话，先回答"事件里已经有角色，为什么还要多查一次"。
+
+13. **`internal/moderation` 有三个"只实现了库、没接线"的部分**（架构审计发现，尚未处理）：
+    - **guard 链**（`GuardChain` / `RuleGuard` / `LLMGuard` / `VectorGuard`）：
+      组合根 `buildModeration` 构造 `moderation.Options` 时**没有填 `Guards`**，
+      于是 `Engine.chain` 恒为 nil，这四个类型在生产里一次都不会跑。
+      **线上真正生效的入站审查是：黑名单 → 防刷 → 敏感词自动机（F-56）**。
+      接线的前提是先有配置面（规则表 / 会花钱的分类器 / 恶意语料索引），
+      那是新特性而不是接线，所以按 F-62 的先例记为"有库无消费方"。
+    - **`AmbientPolicy`**：`Options.Ambient` 同样无人填，背景消息与正式对话走同一套策略。
+      这不降低安全性（更严格），只是差异化能力没被使用；配置里也没有对应开关。
+    - **`Commander`**（/ban、/unban、/banlist）：线上走 `admin.Module`
+      （`cmd/server/observability.go` 注册），它直接调 `Blacklist`。
+      两套实现留哪一套需要先决定，所以先标注不删除。
+    处理方式与第 12 条一致：**在声明处加"当前无生产调用方"注释**，保留代码。
+
+14. **传输层的重连已经接上，但它走的是组合根而不是 F-04 的 `RetryDriver`**：
+    `cmd/server/wssession.go` 的 `runWSSession` 负责"连接 → 读循环 → 退避重连"，
+    退避复用 `retry.Default().Delay`（F-30）。
+    之所以没直接用 `transport.RetryDriver`：那是 **Driver 级**装饰器，而这里的循环
+    还要在断开时调 `OnDown`（把 readiness 置回 false）、在重连前调 `Disconnect`。
+    两件事 `RetryDriver` 都管不了，硬套只会把状态更新藏进装饰器里。
+    **`RetryDriver`（driver.go）与 `RetryCaller` / `RateLimitedCaller` / `RecordingCaller`
+    （caller.go）目前仍无生产调用方**，与第 12、13 条同样按"有库无消费方"对待。
+    其中 **`RecordingCaller` 的"重试 send_msg 会重复发消息"是真实的取舍**：
+    出站调用目前是 fail-fast，没有重试也没有限流，接线前必须先决定重复投递怎么处理。
+    另外这次修的是一个**真缺陷**：修复前 `ws-session` 里一次 `Connect` 失败就 `return`，
+    进程还活着、`/readyz` 还报 ready（`wsUp` 只被置 true、从不回 false），
+    而机器人永远收不到消息，没有任何自愈路径。
+
+15. **入站传输模式 `wsserver` / `http` 未实现，已改为启动前拒绝**（本轮修复）：
+    全仓库只有 `WSClient`（正向 WS）一个 Driver 实现，组合根也无条件按 wsclient 建连接，
+    但 `validate.go` 过去只校验 `access_token`，于是这两个值能通过校验。
+    实测后果：`--check-config` 返回 **0**，进程打印 `agentbot started`（`transport=wsserver`），
+    然后拿着**空 URL** 无限重连（`dial : failed to WebSocket dial`）——
+    与真正的网络故障无法区分，而且唯一的排障工具给了绿灯。
+    现在 `transport.mode` 直接报错拒绝启动，README 的对应两处也已改正。
+    **恢复这两种模式时要一并加回**「入站必须配 `access_token`」（F-25 / F-80）那条检查。
+    真正的实现工作是两个 Driver（反向 WS 多连接、HTTP 上报 + `AuthorizeHTTP`），
+    属于新特性而不是接线，所以没有在本轮顺手实现。
+
+16. **`httpx.SecureJoin` / `ImageSize` / `CheckImagePixels` 只有测试调用方**（本轮核实）：
+    这不是"漏了路径穿越防护"，而是**根本没有需要保护的路径**——
+    全仓库没有一个内置工具碰文件系统：10 个内置工具都不接路径参数，
+    `internal/tool/builtin` 里没有 `os.Open` / `os.ReadFile` / `filepath.` 的任何调用。
+    这与 README 里「沙箱四个白名单键不生效」是**同一个根因**，
+    两个方向互为佐证：没有接路径的工具，所以既不需要 root 检查，也没有名字可拼。
+    已在 `SecureJoin` 上写明"当前没有生产调用方"，并注明将来接路径类工具时
+    **必须同时**实现 `tool.SandboxDeclarer` 与调用本函数，只做后者没有意义。
+
+17. **未接线清单（汇总）**：第 12–16 条加上本轮审计的结果，统一列在这里，
+    判据是**"它失效时会怎样"**。改代码前请先看这张表。
+
+    **A 类：文档或规格会让人以为它已生效（危险）**——失效是静默的：
+
+    | 能力 | 线上实际生效的是什么 |
+    |---|---|
+    | `moderation` guard 链（`GuardChain` / `RuleGuard` / `LLMGuard` / `VectorGuard`） | 只有**黑名单 → 防刷 → 敏感词自动机**（`Options.Guards` 无人填） |
+    | `moderation.AmbientPolicy` | 背景消息与正式对话走同一套策略（更严格，不降低安全性；`Options.Ambient` 无人填） |
+    | `transport.RetryCaller` / `RateLimitedCaller` / `RetryDriver` | 出站平台调用是 **fail-fast**：无重试、无限流。`RetryCaller` 已改成**只重试幂等动作**（`RetryableActions`，见第 35 轮），将来接线也不会造成重复投递。`RecordingCaller` 同样无生产消费方，且它**只记录消息 ID、拿不到内容**——见第 18 条 |
+    | `llm.JSONSchemaOf` / `ChatStructured` / `ApplyFormatFallback` | **F-31 结构化输出实现完整但没有消费方**（只有 `DecodeStructured` 有 1 处调用，且那处也在 `structured.go` 内部）；工具参数仍靠提示词 + 文本 JSON 解析。**决策已记入 [ADR-0004](docs/adr/0004-structured-output-not-wired.md)**：不接线，先加指标观测 |
+    | `store.CountDivergedSnapshots` / `ListPromptSnapshots` | 前缀快照**只写不读**：没有查询入口也没有对应指标，"前缀从哪一轮开始不稳"这个问题目前答不了 |
+    | `policy.RoleResolver` / `router.GroupAdmin` / `GroupOwner` / `HigherThan` | 角色由 `access.roleForEvent` 从事件解析一次放进 ctx（见第 12 条） |
+    | `transport` 的入站模式 `wsserver` / `http` | 未实现，已在启动前**直接拒绝**（见第 15 条） |
+
+    **B 类：宿主可用的内核 API（没有消费方，但也没有失败模式）**——保留，不必接线：
+    `imagehash`（F-62）、`httpx.SecureJoin` / `ImageSize` / `CheckImagePixels`（第 16 条）、
+    `router` 的规则 DSL（`OnCommand` / `OnPrefix` / `Regex` / `UseRules` / `Ctx.Get*`，只有测试在用）、
+    `moderation.Commander`、`session.Manager.StartReclaimer`、`session.Await`、
+    `llm.ComparePrefix`（由 `store.compareDigest` 承担，见第 31 轮的字面量耦合测试）、
+    `agent.ParamString` / `ParamInt64` / `ParamRaw`。
+    其中 `Commander` 与 `StartReclaimer` 属于**组合根另有实现**：
+    线上分别是 `admin.Module` 与 `cmd/server` 里的 `startSessionReclaimer`。
+
+    接线 A 类之前要先确认那是**新特性**还是真的漏接。例如出站重试会引入
+    "同一句回复发两遍"的取舍，不能顺手加上。
+
+    **已在本轮接线的一项**：`llm.MeasuredCounter`（F-32 的"provider 实测优先"）。
+    `cmd/server/budget.go` 的 `buildBudget` 现在返回 `budgetWiring{Budget, Counter}`，
+    两者共用**同一个**计数器；`observedLLM.Chat` 在每次成功响应后
+    `Observe(o.model, req.Messages, resp.Usage)`。三个容易写错的点都钉在测试里：
+    - 各建一个计数器 → "接上了"与"没接"表现完全一样（预算永远停在启发式）；
+    - 记成裁剪**前**的消息序列 → 缓存键与真实请求对不上，效果为零；
+    - 流式路径**仍未覆盖**：`ChatStream` 这个位置拿不到 usage，
+      所以流式请求不参与校准（流式默认关闭，F-64）。
+
+18. **F-55 的验收点名了一个做不到这件事的仪器**（第 39 轮发现并补齐）：
+    F-55 的第一条验收写"断言所有发送路径都经过过滤链（**用 `RecordingCaller` 校验内容已被处理**）"，
+    但 `transport.RecordingCaller` 记录的是 `event.ID`——**消息 ID，不是消息内容**，
+    因此它无法校验"内容已被处理"。规格在这里指的应该是"一个能记录发往平台的请求的替身"，
+    而不是那个具体的内置类型（它自己的用途是"记录发出的消息 ID"，见 F-05）。
+
+    补齐方式是两条，都做过反证：
+    - **运行时**（`internal/reply/exit_filter_test.go`）：用一个记录**完整请求**的测试替身，
+      断言真正发往平台的文字内容带着过滤链的痕迹（覆盖正常回复与语义缓存命中两条路径）；
+    - **结构性**（`cmd/server/outbound_paths_test.go`）：扫描生产源码，确认除 `internal/outbound`
+      之外没有任何包调用 `transport.SendGroupMsg` / `SendPrivateMessage` 这类发送包装函数。
+      前者只能覆盖它跑到的路径；后者防的是**新增一条绕过唯一出口的路径**——
+      那时旧测试全绿，而用户内容已经绕过过滤。
+    - 只读型平台调用（`get_group_member_info` / `get_stranger_info` / `get_msg` 等）不在检查范围内：
+      它们不产生发给用户的文本，出口过滤与它们无关。这条边界写在测试注释里。
+
+    **同源问题**：`internal/reply` 里旧测试 `Test_F63_CacheHitGoesThroughTheSendChain`
+    把 filter 注册成 `"suffix"`，而 `Chain.Apply` 只按固定的 `Order` 遍历**已知位置**——
+    那个 filter 从未执行过，测试却一直是绿的（它只断言了发送次数）。
+    已改为 `outbound.FilterNormalize` 并写明原因。**注册新名字的 filter 是静默无效的。**
+
+19. **`transport.RetryDriver` 是陷阱，不是可用的重连实现**（第 40 轮查清，已写进代码注释）：
+    F-04 说"连接失败的重试策略外置：`RetryDriver{next, backoff}`"。但把仓库里这个装饰器接上会**更糟**：
+    - **`Listen` 不重新 `Connect`**：连接断开后它只是在同一条死连接上再读一次，
+      徒劳地重复 MaxAttempts 次然后放弃。重连的本质是"把连接重新建起来"。
+    - **尝试次数有上限**：配 `retry.Default()` 只有 **3 次**。F-04 的措辞
+      "默认 1s 起、最长 30s、带 jitter" 描述的是**退避上限**，隐含"一直重试、退避封顶"；
+      而 3 次之后永久放弃正是第 23 轮修掉的那个缺陷形态（进程在、探针 ready、机器人失聪）。
+
+    线上真正在用的是组合根的 `runWSSession`（`cmd/server/wssession.go`）：
+    `Connect → Listen → Disconnect → 再 Connect`，**不设尝试上限**，只复用 `Delay` 的退避与封顶。
+    两条陷阱都有测试钉住（`internal/transport/driver_retry_trap_test.go`），
+    其中一条断言"`Listen` 重试期间 `Connect` 一次都没被调用过"——若那天它变成非 0，
+    说明 `RetryDriver` 学会了重连，该更新这条与代码注释。
 
 ## 5. 工作方式约定（务必遵守）
 

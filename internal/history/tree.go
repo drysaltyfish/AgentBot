@@ -5,13 +5,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/drysaltyfish/agentbot/internal/memory"
+	"github.com/drysaltyfish/agentbot/internal/retrieval"
 	"github.com/drysaltyfish/agentbot/internal/vector"
 )
 
 // TreeConfig 是摘要树召回（F-52）的配置；零值即规格默认值。
 type TreeConfig struct {
-	// MaxLevels/MinCluster/Branching/ClusterThreshold 传给 memory.TreeOptions。
+	// MaxLevels/MinCluster/Branching/ClusterThreshold 传给 retrieval.TreeOptions。
 	MaxLevels        int
 	MinCluster       int
 	Branching        int
@@ -26,7 +26,7 @@ type TreeConfig struct {
 // 至少保证"同文本同向量"，让聚类结果可复现。
 type treeEmbedder struct{}
 
-// Embed 实现 memory.Embedder。
+// Embed 实现 retrieval.Embedder。
 func (treeEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
 	return vector.TextVector(text, vector.TextDim), nil
 }
@@ -35,7 +35,7 @@ func (treeEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
 type treeCache struct {
 	// count 是构建时的条目数；条目数变了就重建（追加式历史只有这一种变化）。
 	count int
-	tree  *memory.SummaryTree
+	tree  *retrieval.SummaryTree
 }
 
 // summaryHits 用摘要树检索当前会话，返回命中的条目下标（按树的名次）。
@@ -82,21 +82,21 @@ func (h *Hybrid) summaryHits(ctx context.Context, key string, items []Item, entr
 }
 
 // ensureTree 返回会话当前的摘要树，必要时重建。
-func (h *Hybrid) ensureTree(ctx context.Context, key string, items []Item, entries []hybridEntry) *memory.SummaryTree {
+func (h *Hybrid) ensureTree(ctx context.Context, key string, items []Item, entries []hybridEntry) *retrieval.SummaryTree {
 	h.treeMu.Lock()
 	defer h.treeMu.Unlock()
 
 	if c, ok := h.trees[key]; ok && c != nil && c.count == len(items) {
 		return c.tree
 	}
-	chunks := make([]memory.Chunk, 0, len(entries))
+	chunks := make([]retrieval.Chunk, 0, len(entries))
 	for i, e := range entries {
-		chunks = append(chunks, memory.Chunk{
+		chunks = append(chunks, retrieval.Chunk{
 			Text: e.item.Content,
 			Refs: []string{strconv.Itoa(i)},
 		})
 	}
-	tree := memory.NewSummaryTree(memory.TreeOptions{
+	tree := retrieval.NewSummaryTree(retrieval.TreeOptions{
 		MaxLevels:        h.Tree.MaxLevels,
 		MinCluster:       h.Tree.MinCluster,
 		Branching:        h.Tree.Branching,
@@ -104,7 +104,7 @@ func (h *Hybrid) ensureTree(ctx context.Context, key string, items []Item, entri
 		ClusterThreshold: h.Tree.ClusterThreshold,
 		// 摘要必须是确定性的：树在检索路径上按需重建，注入模型会让一次
 		// recall_history 变成一次付费调用，而且结果不可复现。
-		Summarizer: memory.JoinSummarizer{},
+		Summarizer: retrieval.JoinSummarizer{},
 		Embedder:   treeEmbedder{},
 		Warn:       h.warn,
 	})

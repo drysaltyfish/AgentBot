@@ -63,7 +63,6 @@ type Session struct {
 	caller transport.Caller
 
 	mu       sync.Mutex
-	persona  string
 	lastSeen time.Time
 	data     map[string]any
 	routes   []RouteRef
@@ -85,20 +84,6 @@ func (s *Session) LastSeen() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lastSeen
-}
-
-// Persona 返回当前人格名（F-82 的作用域键）。
-func (s *Session) Persona() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.persona
-}
-
-// SetPersona 切换人格；切换人格不需要重建会话。
-func (s *Session) SetPersona(name string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.persona = name
 }
 
 // Set 写入会话级数据。

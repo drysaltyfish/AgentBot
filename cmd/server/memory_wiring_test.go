@@ -11,6 +11,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/memory"
+	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/store"
 )
 
@@ -34,7 +35,7 @@ func Test_F49_BuildAgentWiresTieredMemory(t *testing.T) {
 
 	asm := conversation.New(conversation.Options{System: "s"})
 	lg := testLogger(t)
-	_, mem, err := buildAgent(cfg, llm.NewEcho(""), asm, history.NewMemory(10), st, &callerBox{}, lg, nil)
+	_, mem, err := buildAgent(cfg, llm.NewEcho(""), asm, history.NewMemory(10), st, &callerBox{}, lg, nil, metrics.NewCatalog(metrics.CatalogOptions{}))
 	if err != nil {
 		t.Fatalf("buildAgent: %v", err)
 	}

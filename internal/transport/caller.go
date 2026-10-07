@@ -184,22 +184,85 @@ func (b *tokenBucket) allow() bool {
 }
 
 // RetryCaller 对可重试的失败做指数退避。
+//
+// **只有幂等动作才会重试**（见 RetryableActions）：传输层失败（连接断开、超时）
+// 带着一个无法消除的歧义——请求可能已经被平台处理，只是回包没回来。
+// 对发送类动作重试，用户就会收到两遍同一句话。
 type RetryCaller struct {
 	next   Caller
 	policy retry.Policy
+	// retryable 判定某个 action 重试是否安全；nil 时用 RetryableActions。
+	retryable func(action string) bool
+}
+
+// RetryableActions 是"重试安全"的平台动作白名单。
+//
+// 判据是**幂等性**，不是错误类型：这些动作重复执行与执行一次结果相同。
+//   - `delete_msg`：删同一条消息，第二条是 no-op；
+//   - `set_group_ban`：设置同一个人的同一时长，结果相同；
+//   - 读取类动作（`get_msg` / `get_group_member_info` / `get_login_info`）没有副作用。
+//
+// **刻意不包含** `send_msg`：它不幂等，重试即重复投递。
+// 这正是"出站重试"至今没有接线的原因（见 HANDOFF 未接线清单）。
+//
+// 名单与 `internal/policy/actions.yaml` 对齐（外加组合根自用的 `get_login_info`，
+// 它不在权限表里因为模型不能触发它）。白名单宁可窄：漏掉一个只是少一次重试，
+// 多写一个就可能造成重复副作用。
+var RetryableActions = map[string]bool{
+	"delete_msg":            true,
+	"set_group_ban":         true,
+	"get_msg":               true,
+	"get_group_member_info": true,
+	"get_login_info":        true,
 }
 
 // NewRetryCaller 构造重试装饰器。
+//
+// 默认只重试 RetryableActions 里的幂等动作；需要别的判定时用 WithRetryableAction 覆盖。
 func NewRetryCaller(next Caller, p retry.Policy) *RetryCaller {
 	return &RetryCaller{next: next, policy: p}
 }
 
-// Call 按策略重试；平台返回可重试 retcode 时也视作失败。
+// WithRetryableAction 覆盖"这个动作能否重试"的判定。
+//
+// 传 nil 恢复默认（只重试幂等动作）。允许重试非幂等动作是一个**显式的**决定，
+// 不该靠忘记配置来达成。
+func WithRetryableAction(fn func(action string) bool) func(*RetryCaller) {
+	return func(c *RetryCaller) { c.retryable = fn }
+}
+
+// NewRetryCallerWithOptions 构造可定制判定的重试装饰器。
+func NewRetryCallerWithOptions(next Caller, p retry.Policy, opts ...func(*RetryCaller)) *RetryCaller {
+	c := &RetryCaller{next: next, policy: p}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
+}
+
+// Call 按策略重试。
+//
+// 两点必须一起理解：
+//   - **非幂等动作一次都不重试**——不是"少重试"，是直接绕过重试层；
+//   - **平台业务错误不重试**：`Caller.Call` 对 retcode != 0 返回的是
+//     `(Response, nil)`，`retry.Do` 只在 err != nil 时重试，所以业务错误天然只发一次。
+//     语义化封装（`SendGroupMsg` 等）在**装饰层之外**才把 retcode != 0 转成 error，
+//     这个层次顺序是刻意的，不要颠倒。
 func (c *RetryCaller) Call(ctx context.Context, req Request) (Response, error) {
+	if !c.canRetry(req.Action) {
+		return c.next.Call(ctx, req)
+	}
 	return retry.Do(ctx, c.policy, func(ctx context.Context, attempt int) (Response, error) {
-		// 只重试传输层错误；平台业务错误（retcode != 0）不重试，避免重复副作用。
 		return c.next.Call(ctx, req)
 	})
+}
+
+// canRetry 判定某个动作是否允许重试。
+func (c *RetryCaller) canRetry(action string) bool {
+	if c.retryable != nil {
+		return c.retryable(action)
+	}
+	return RetryableActions[action]
 }
 
 // SendGroupMsg 发送群消息并返回消息 ID。

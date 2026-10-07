@@ -214,11 +214,20 @@ func (p *Policy) Check(toolName string, req SandboxRequest) *Denial {
 }
 
 func (p *Policy) networkAllowed(toolName string) bool {
+	if p == nil {
+		return false
+	}
 	if p.AllowNetwork {
 		return true
 	}
 	return containsString(p.NetworkTools, toolName)
 }
+
+// AllowsNetwork 报告某工具是否被允许联网。
+//
+// 导出它是为了让组合根能在**启动时**就告诉运维"这个联网工具将被拒绝"，
+// 而不是等模型调用时才由结构化拒绝暴露——那时代码已经跑在用户面前了。
+func (p *Policy) AllowsNetwork(toolName string) bool { return p.networkAllowed(toolName) }
 
 // withinAny 判断 path 是否落在任一白名单根目录下（含根本身）。
 func withinAny(path string, roots []string) bool {

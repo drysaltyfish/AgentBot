@@ -225,6 +225,14 @@ func (p *Policy) Render(role string) (string, error) {
 }
 
 // MemberLookup 提供群成员角色查询（由调用方实现，必须尊重 ctx 超时）。
+//
+// **注意：当前没有生产调用方。** 它只服务于下面的 RoleResolver，而组合根
+// 刻意没有采用那条路径——角色由 access.roleForEvent 解析（显式 access.roles >
+// 超管名单 > **事件里平台已上报的** Sender.Role > everyone），不需要为每条消息
+// 再查一次平台 API。见 cmd/server/policy.go 的说明与 HANDOFF「已知偏离」。
+//
+// 保留它是为了可复用内核的完整性；改它不会影响线上行为。真要用它接线，
+// 先想清楚"事件里已经有角色了，为什么还要多一次查询"。
 type MemberLookup interface {
 	MemberRole(ctx context.Context, groupID, userID int64) (string, error)
 }
@@ -232,6 +240,10 @@ type MemberLookup interface {
 // RoleResolver 在库内把"谁在说话"推导成角色名。
 //
 // 不接受宿主传入的裸角色字符串：宿主传错即可提权（参考实现踩过的坑）。
+//
+// **注意：当前没有生产调用方**（与 MemberLookup 同理）。线上用的是
+// access.roleForEvent + policy.WithRole/ RoleFrom：角色在事件入口解析一次、
+// 放进 ctx，出口只从 ctx 读——不再经过这里，也不再查平台 API。
 type RoleResolver struct {
 	SuperUsers map[int64]struct{}
 	Lookup     MemberLookup

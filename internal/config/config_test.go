@@ -73,7 +73,15 @@ func Test_F25_ValidateReportsAllProblemsAtOnce(t *testing.T) {
 	}
 }
 
-func Test_F25_InboundAuthIsFailClosed(t *testing.T) {
+// Test_F25_UnimplementedInboundModesAreRejected 钉住"校验不能放行跑不起来的模式"。
+//
+// 过去这两个模式只校验 access_token，于是 mode=wsserver 能通过校验、
+// `--check-config` 返回 0，进程随后带着空 URL 打印 "agentbot started" 并无限重连——
+// 与真正的网络故障无法区分。宁可启动失败也不要带病启动。
+//
+// 注意：F-25/F-80 的"入站必须配 access_token"是**真正实现入站驱动之后**才需要恢复的检查；
+// 现在这两个模式根本没有入站监听，谈 token 没有意义。
+func Test_F25_UnimplementedInboundModesAreRejected(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{"wsserver", "http"} {
 		cfg := Default()
@@ -81,21 +89,22 @@ func Test_F25_InboundAuthIsFailClosed(t *testing.T) {
 		cfg.LLM.Model = "m"
 		err := cfg.Validate()
 		if err == nil {
-			t.Fatalf("mode=%s without access_token: actual=nil expected=error", mode)
+			t.Fatalf("mode=%s 尚未实现，必须被拒绝: actual=nil", mode)
 		}
 		var ve *ValidationError
-		if !errors.As(err, &ve) || !ve.Has("transport.access_token") {
-			t.Fatalf("mode=%s: actual=%v expected problem transport.access_token", mode, err)
+		if !errors.As(err, &ve) || !ve.Has("transport.mode") {
+			t.Fatalf("mode=%s: actual=%v expected problem transport.mode", mode, err)
 		}
 	}
 
+	// 即使配了 token 也要拒绝：问题不在鉴权，而在这个模式跑不起来。
 	cfg := Default()
 	cfg.Transport.Mode = "wsserver"
 	cfg.LLM.Model = "m"
-	empty := ""
-	cfg.Transport.AccessToken = &empty
+	tok := "tok"
+	cfg.Transport.AccessToken = &tok
 	if err := cfg.Validate(); err == nil {
-		t.Fatalf("mode=wsserver with empty token: actual=nil expected=error")
+		t.Fatalf("mode=wsserver 配上 token 仍然必须被拒绝")
 	}
 }
 

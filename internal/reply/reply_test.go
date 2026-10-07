@@ -1,11 +1,15 @@
 package reply
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +19,7 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/cost"
 	"github.com/drysaltyfish/agentbot/internal/history"
 	"github.com/drysaltyfish/agentbot/internal/llm"
+	"github.com/drysaltyfish/agentbot/internal/metrics"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
 	"github.com/drysaltyfish/agentbot/internal/semcache"
@@ -72,6 +77,89 @@ func (c *recordingCaller) count() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.reqs)
+}
+
+// Test_DeliverIsTheSingleSendingPath 钉住"投递只有一份实现"。
+//
+// 正常回复与语义缓存命中此前各写一遍分段+发送+记账，差别只有日志措辞。
+// 这份重复与"所有出站消息经同一出口"直接矛盾：改了分段方式或记账，
+// 很容易只改到其中一处，而另一处只在缓存命中时才被走到。
+func Test_DeliverIsTheSingleSendingPath(t *testing.T) {
+	t.Parallel()
+	caller := &recordingCaller{}
+	cat := metrics.NewCatalog(metrics.CatalogOptions{})
+	p := &Pipeline{deps: Deps{
+		Sender:  outbound.NewSender(caller, outbound.New()),
+		Catalog: cat,
+		Shape:   Shape{SplitOnBlank: true, MaxSegments: 4, Delay: 0},
+	}}
+
+	target := outbound.PrivateTarget(42)
+	segments, ok := p.deliver(context.Background(), target, "第一段\n\n第二段\n\n第三段", testSlog())
+	if !ok {
+		t.Fatal("正常文本应当投递成功")
+	}
+	if segments != 3 {
+		t.Fatalf("按空行应拆成 3 段，实际 %d", segments)
+	}
+	if got := caller.count(); got != 3 {
+		t.Fatalf("应当发出 3 条消息，实际 %d", got)
+	}
+	if got := actionsSentFor(t, cat, "send_msg"); got != 3 {
+		t.Fatalf("ActionsSent 应记 3 次，实际 %v", got)
+	}
+}
+
+// Test_DeliverReportsFailureWithoutCountingSuccess 发送失败时不得记账。
+//
+// "计一次成功"与"真的发出去"必须一致，否则指标会掩盖发送失败。
+func Test_DeliverReportsFailureWithoutCountingSuccess(t *testing.T) {
+	t.Parallel()
+	cat := metrics.NewCatalog(metrics.CatalogOptions{})
+	p := &Pipeline{deps: Deps{
+		Sender:  outbound.NewSender(failingCaller{}, outbound.New()),
+		Catalog: cat,
+		Shape:   Shape{SplitOnBlank: false, MaxSegments: 4},
+	}}
+
+	if _, ok := p.deliver(context.Background(), outbound.PrivateTarget(42), "你好", testSlog()); ok {
+		t.Fatal("发送失败时 deliver 必须返回 false")
+	}
+	if got := actionsSentFor(t, cat, "send_msg"); got != 0 {
+		t.Fatalf("失败的发送不该记成功，实际 %v", got)
+	}
+}
+
+// failingCaller 让每一次平台调用都失败。
+type failingCaller struct{}
+
+func (failingCaller) Call(context.Context, transport.Request) (transport.Response, error) {
+	return transport.Response{}, errors.New("平台不可用")
+}
+
+// testSlog 返回一个丢弃输出的 slog，用于直接驱动需要 *slog.Logger 的步骤。
+func testSlog() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+// actionsSentFor 从 Prometheus 文本里读某个 action 的发送计数。
+func actionsSentFor(t *testing.T, cat *metrics.Catalog, action string) float64 {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := cat.Registry.WritePrometheus(&buf); err != nil {
+		t.Fatalf("write metrics: %v", err)
+	}
+	want := `action="` + action + `"`
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if !strings.HasPrefix(line, "actions_sent_total{") || !strings.Contains(line, want) {
+			continue
+		}
+		fields := strings.Fields(line)
+		v, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			t.Fatalf("解析指标值失败: %q", line)
+		}
+		return v
+	}
+	return 0
 }
 
 func testLogger(t *testing.T) *observe.Logger {
@@ -384,7 +472,10 @@ func Test_F63_CacheHitGoesThroughTheSendChain(t *testing.T) {
 	lg := testLogger(t)
 	mgr := testSessions(t)
 	caller := &recordingCaller{}
-	chain := outbound.New(outbound.WithFilter("suffix", func(s string) string { return s + "-filtered" }))
+	// 注意：filter 名字必须是 `outbound.Order` 里的已知位置。此前这里注册的是 "suffix"，
+	// 而 `Chain.Apply` 只按 Order 遍历已知位置——那个 filter 从未执行过，
+	// 测试却一直是绿的。真正断言"内容被处理过"的是 Test_F55_*（见 exit_filter_test.go）。
+	chain := outbound.New(outbound.WithFilter(outbound.FilterNormalize, func(s string) string { return s + "-filtered" }))
 	sender := outbound.NewSender(caller, chain)
 	brain := &stubBrain{out: &agent.Output{Text: "答案", FinishReason: "stop"}}
 	cache, err := semcache.New(semcache.Options{

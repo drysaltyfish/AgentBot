@@ -110,8 +110,9 @@ func WithIntakeStop(fn func(ctx context.Context) error) Option {
 
 // WithInflightWait 自定义第 2 步"等待在途工作"的实现。
 //
-// 不设置时退化为等待全部 Go() 启动的 goroutine 退出；组合根通常需要更精确的
-// 语义（例如只等未完成的回复任务），此时用它覆盖。
+// 各步各司其职：第 3 步负责取消后台 ctx 并等 goroutine 退出，因此第 2 步只需
+// 表达"还有没有正在处理的事件"。不设置时这一步是空操作；组合根传入的通常是
+// "等未完成的回复任务"这类更精确的语义，而不是"等所有后台 goroutine"。
 func WithInflightWait(fn func(ctx context.Context) error) Option {
 	return func(b *Bot) { b.inflightWait = fn }
 }
@@ -260,11 +261,17 @@ func (b *Bot) componentsIn(ph Phase) []Component {
 	return out
 }
 
+// waitInflight 执行第 2 步"等待在途工作"。
+//
+// 没有自定义实现时**什么都不等**，而不是退化为"等全部后台 goroutine"：
+// 后台 goroutine 挂在 baseCtx 上，而 baseCancel 发生在**第 3 步**——
+// 在第 2 步等它们必然等到超时，而报错会指向"在途事件没处理完"这个无关的相位。
+// 组合根需要精确语义时用 WithInflightWait 覆盖（serve() 就是这么做）。
 func (b *Bot) waitInflight(ctx context.Context) error {
 	if b.inflightWait != nil {
 		return b.inflightWait(ctx)
 	}
-	return b.waitBackground(ctx)
+	return nil
 }
 
 // waitBackground 等待全部 Go() 启动的 goroutine 退出，受 ctx 与超时双重约束。

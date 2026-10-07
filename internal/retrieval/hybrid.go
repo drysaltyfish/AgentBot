@@ -1,82 +1,22 @@
-package memory
+package retrieval
 
 import (
 	"context"
+	"errors"
 	"math"
 	"sort"
 	"strings"
 	"sync"
-	"unicode"
 
+	"github.com/drysaltyfish/agentbot/internal/textsim"
 	"github.com/drysaltyfish/agentbot/internal/vector"
 )
 
-// tokenize 把文本切成检索用 token：
+// ErrUnavailable 表示检索必需的下游（索引 / 存储）尚未配置。
 //
-//   - ASCII/其它字母数字连续段整体小写后作为一个 token（命令、ID、英文词）；
-//   - 中日韩统一表意文字连续段切成"单字 + 相邻二字组"（中文无需分词即可召回）。
-//
-// 同时保留单字与二字组：单字让"猫"这类极短查询也能命中，
-// 二字组提供"北京烤鸭"这类专有名词的区分度；常见字由 BM25 的 IDF 自然降权。
-func tokenize(s string) []string {
-	var out []string
-	var word []rune
-	var han []rune
-
-	flushWord := func() {
-		if len(word) == 0 {
-			return
-		}
-		out = append(out, strings.ToLower(string(word)))
-		word = word[:0]
-	}
-	flushHan := func() {
-		if len(han) == 0 {
-			return
-		}
-		for _, r := range han {
-			out = append(out, string(r))
-		}
-		for i := 0; i+1 < len(han); i++ {
-			out = append(out, string(han[i:i+2]))
-		}
-		han = han[:0]
-	}
-
-	for _, r := range s {
-		switch {
-		case unicode.Is(unicode.Han, r):
-			flushWord()
-			han = append(han, r)
-		case unicode.IsLetter(r) || unicode.IsDigit(r):
-			flushHan()
-			word = append(word, r)
-		default:
-			flushWord()
-			flushHan()
-		}
-	}
-	flushWord()
-	flushHan()
-	return out
-}
-
-// uniqueTokens 返回去重后的 token；保持首次出现顺序，保证确定性。
-func uniqueTokens(tokens []string) []string {
-	if len(tokens) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(tokens))
-	out := make([]string, 0, len(tokens))
-	for _, t := range tokens {
-		if _, ok := seen[t]; ok {
-			continue
-		}
-		seen[t] = struct{}{}
-		out = append(out, t)
-	}
-	return out
-}
+// 与 memory.ErrUnavailable 是同一个语义名，但两者分属不同的包：
+// 这个包只关心"没有索引可查"，不关心记忆存储。
+var ErrUnavailable = errors.New("retrieval index is not configured")
 
 // KeywordHit 是关键词一路的检索结果。
 type KeywordHit struct {
@@ -184,7 +124,7 @@ func (x *BM25Index) Add(id int64, text string) {
 	if _, ok := x.docs[id]; ok {
 		x.removeLocked(id)
 	}
-	tokens := tokenize(text)
+	tokens := textsim.Tokenize(text)
 	tf := make(map[string]int, len(tokens))
 	for _, t := range tokens {
 		tf[t]++
@@ -219,7 +159,7 @@ func (x *BM25Index) Remove(id int64) bool {
 func (x *BM25Index) removeLocked(id int64) {
 	text := x.docs[id]
 	seen := make(map[string]struct{})
-	for _, t := range tokenize(text) {
+	for _, t := range textsim.Tokenize(text) {
 		if _, dup := seen[t]; dup {
 			continue
 		}
@@ -257,7 +197,7 @@ func (x *BM25Index) Search(query string, k int) ([]KeywordHit, error) {
 	if k <= 0 {
 		return nil, nil
 	}
-	tokens := uniqueTokens(tokenize(query))
+	tokens := textsim.UniqueTokens(textsim.Tokenize(query))
 	if len(tokens) == 0 {
 		return nil, nil
 	}

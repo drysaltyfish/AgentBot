@@ -52,6 +52,7 @@ type Engine struct {
 
 	mu       sync.RWMutex
 	pre      []Rule
+	preNames []string
 	mid      []Rule
 	post     []Handler
 	onPanic  func(phase string, recovered any, stack []byte)
@@ -76,6 +77,30 @@ func (e *Engine) UsePre(rules ...Rule) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.pre = append(e.pre, rules...)
+	for range rules {
+		e.preNames = append(e.preNames, "")
+	}
+}
+
+// UsePreNamed 与 UsePre 相同，但给钩子起一个名字。
+//
+// 名字只用于**顺序断言与诊断**，不影响执行。存在的理由：pre 钩子按注册顺序执行，
+// 而顺序是行为的一部分（名单必须先于审查）。只写在注释里的顺序约束没法被检查，
+// 改错了照样编译、照样过测试——所以它需要能被读出来断言。
+func (e *Engine) UsePreNamed(name string, rule Rule) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pre = append(e.pre, rule)
+	e.preNames = append(e.preNames, name)
+}
+
+// PreHookNames 返回已注册 pre 钩子的名字（按执行顺序）；未命名的为空串。
+//
+// 返回值是副本，调用方可以安全保存或改动。
+func (e *Engine) PreHookNames() []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return append([]string(nil), e.preNames...)
 }
 
 // UseMid 注册全局 mid 钩子（限速、单飞、并发闸门）。

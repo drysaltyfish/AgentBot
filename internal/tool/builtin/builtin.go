@@ -5,9 +5,9 @@
 package builtin
 
 import (
-	"context"
 	"time"
 
+	"github.com/drysaltyfish/agentbot/internal/agent"
 	"github.com/drysaltyfish/agentbot/internal/httpx"
 	"github.com/drysaltyfish/agentbot/internal/tool"
 )
@@ -18,19 +18,15 @@ const MaxOutput = 8 * 1024
 // DefaultFetchTimeout 是 http_fetch 的超时。
 const DefaultFetchTimeout = 10 * time.Second
 
-// Memory 是内置记忆工具需要的存储能力。
-//
-// 刻意在这里重新声明（而不是 import agent 包）：Go 的接口是结构化的，
-// agent.MemoryStore 天然满足它，而 builtin 不需要因此依赖 agent。
-type Memory interface {
-	Save(ctx context.Context, text string) error
-	Recall(ctx context.Context) ([]string, error)
-}
-
 // Deps 是内置工具集的依赖。
 type Deps struct {
 	// Memory 为 nil 时 memory_save/memory_recall 会注册但执行时明确报错。
-	Memory Memory
+	//
+	// 直接用 agent.Memory：这里曾经重新声明了一份一模一样的接口，理由写的是
+	// "builtin 不需要因此依赖 agent"——但 memory.go 早就 import 了 agent
+	// （要用 agent.SubjectScopedMemory 做按人召回），理由并不成立，
+	// 只留下两个必须同步维护的声明。
+	Memory agent.Memory
 	// HTTP 是出站抓取配置；零值时使用 httpx.Defaults()。
 	HTTP httpx.Config
 	// History 供 recall_history 读取当前会话的历史；为 nil 时该工具会明确报错。

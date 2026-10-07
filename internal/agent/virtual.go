@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/drysaltyfish/agentbot/internal/llm"
 	"github.com/drysaltyfish/agentbot/internal/tool"
 )
 
@@ -158,4 +159,18 @@ func RenderMemory(items []string) string {
 		b.WriteString(strings.TrimSpace(it))
 	}
 	return b.String()
+}
+
+// MemoryDigestOf 返回记忆块的指纹；没有记忆块时返回空串。
+//
+// 空串表示"这一轮没有记忆"，而不是"记忆没变"——store/prompt.go 的 compareDigest
+// 正是靠这个区分"记忆变更（预期）"与"前缀意外分歧（告警）"。
+//
+// 两个 Agent 范式都必须填它：直连路径漏填过一次，表现是每次写入记忆都触发
+// 一次"前缀意外分歧"告警（告警常响等于没有告警）。
+func MemoryDigestOf(memoryBlock string) string {
+	if memoryBlock == "" {
+		return ""
+	}
+	return llm.Digest([]llm.Message{{Role: llm.RoleSystem, Content: memoryBlock}})[0]
 }

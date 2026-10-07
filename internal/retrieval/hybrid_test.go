@@ -1,4 +1,4 @@
-package memory
+package retrieval
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/drysaltyfish/agentbot/internal/textsim"
 	"github.com/drysaltyfish/agentbot/internal/vector"
 )
 
@@ -58,7 +59,7 @@ func f51Vec(sign float32) []float32 {
 // Test_F51_TokenizeHandlesChineseAndAscii 验证中文单字/二字组与 ASCII 词混合分词。
 func Test_F51_TokenizeHandlesChineseAndAscii(t *testing.T) {
 	t.Parallel()
-	got := tokenize("k8s 集群 v2")
+	got := textsim.Tokenize("k8s 集群 v2")
 	want := map[string]bool{"k8s": false, "v2": false, "集": false, "群": false, "集群": false}
 	for _, tok := range got {
 		if _, ok := want[tok]; ok {
@@ -70,7 +71,7 @@ func Test_F51_TokenizeHandlesChineseAndAscii(t *testing.T) {
 			t.Fatalf("分词缺少 %q，得到 %v", tok, got)
 		}
 	}
-	if uniqueTokens([]string{"a", "a", "b"})[1] != "b" {
+	if textsim.UniqueTokens([]string{"a", "a", "b"})[1] != "b" {
 		t.Fatalf("uniqueTokens 应保序去重")
 	}
 }

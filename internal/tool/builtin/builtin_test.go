@@ -119,6 +119,45 @@ func Test_F44_HTTPFetchRejectsBadArgs(t *testing.T) {
 	}
 }
 
+// Test_F46_HTTPFetchDeclaresNetworkRequirement 钉住沙箱联网闸门的**唯一**依赖。
+//
+// 沙箱只在工具声明 req.Network 时才看 network_tools / allow_network。
+// 内置工具里只有 http_fetch 联网，所以少了这个声明，那两个配置项就永远空转：
+// 启用沙箱也拦不住抓取，"默认不放开联网"只是文档里的一句话。
+//
+// 没有别的内置工具会联网——新增一个就必须同时补上这个声明。
+func Test_F46_HTTPFetchDeclaresNetworkRequirement(t *testing.T) {
+	t.Parallel()
+	r := newRegistry(t, Deps{})
+	tl, ok := r.Get("http_fetch")
+	if !ok {
+		t.Fatal("内置工具里应有 http_fetch")
+	}
+	d, ok := tl.(tool.SandboxDeclarer)
+	if !ok {
+		t.Fatalf("http_fetch 必须实现 tool.SandboxDeclarer，否则 network_tools / allow_network 永远不生效")
+	}
+	if req := d.SandboxRequest(json.RawMessage(`{"url":"https://example.com"}`)); !req.Network {
+		t.Fatalf("http_fetch 必须声明需要联网: %+v", req)
+	}
+
+	// 其余内置工具都不联网；有朝一日新增联网工具，这里会提醒你补声明。
+	for _, name := range r.Names() {
+		if name == "http_fetch" {
+			continue
+		}
+		tl, ok := r.Get(name)
+		if !ok {
+			continue
+		}
+		if dd, ok := tl.(tool.SandboxDeclarer); ok {
+			if req := dd.SandboxRequest(nil); req.Network {
+				t.Fatalf("%s 声明了联网需求——请确认它真的联网，并同步更新本测试的说明", name)
+			}
+		}
+	}
+}
+
 func Test_F44_CurrentTimeAndTimezoneValidation(t *testing.T) {
 	t.Parallel()
 	fixed := time.Date(2026, 10, 3, 5, 0, 0, 0, time.UTC)
@@ -353,7 +392,7 @@ func execWith(t *testing.T, r *tool.Registry, ctx context.Context, name, args st
 	return res
 }
 
-// searchableHistory 额外实现 HistorySearcher，用于验证 recall_history 优先走检索。
+// searchableHistory 额外实现 history.Searcher，用于验证 recall_history 优先走检索。
 type searchableHistory struct {
 	memHistory
 	searched  int

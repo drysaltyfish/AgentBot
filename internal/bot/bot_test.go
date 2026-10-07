@@ -15,6 +15,30 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
+// Test_ShutdownCompletesWhenOnlyBackgroundGoroutinesAreRunning 钉住一处会让关闭
+// **永远超时**的顺序错误。
+//
+// 关闭分三步：停入口 → 等在途 → 取消后台 ctx 并等 goroutine 退出。
+// 第 2 步若在没有自定义 inflightWait 时退化成"等全部后台 goroutine"，
+// 它等的恰恰是**第 3 步才会被取消**的那些 goroutine——于是必然等到超时，
+// 而报错说的是"在途事件没处理完"，与实际原因（顺序颠倒）毫无关系。
+func Test_ShutdownCompletesWhenOnlyBackgroundGoroutinesAreRunning(t *testing.T) {
+	b := New(WithShutdownTimeout(2 * time.Second))
+
+	started := make(chan struct{})
+	b.Go("worker", func(ctx context.Context) {
+		close(started)
+		<-ctx.Done() // 只在 baseCtx 被取消后退出
+	})
+	<-started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := b.Shutdown(ctx); err != nil {
+		t.Fatalf("没有配置 inflightWait 时 Shutdown 也必须能完成: %v", err)
+	}
+}
+
 type recorder struct {
 	name string
 	log  *[]string

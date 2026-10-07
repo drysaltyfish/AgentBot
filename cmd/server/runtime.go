@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/drysaltyfish/agentbot/internal/bot"
+	"github.com/drysaltyfish/agentbot/internal/config"
 	"github.com/drysaltyfish/agentbot/internal/event"
 	"github.com/drysaltyfish/agentbot/internal/observe"
 	"github.com/drysaltyfish/agentbot/internal/outbound"
+	"github.com/drysaltyfish/agentbot/internal/router"
 	"github.com/drysaltyfish/agentbot/internal/session"
 	"github.com/drysaltyfish/agentbot/internal/store"
 	"github.com/drysaltyfish/agentbot/internal/transport"
@@ -23,6 +25,42 @@ var (
 	_ bot.Component        = namedComponent{}
 	_ session.PendingStore = pendingStoreAdapter{}
 )
+
+// buildTransportAuth 按配置构造传输鉴权；这是**唯一**的构造点。
+//
+// serve 与 --selftest 必须用同一份。曾经 --selftest 自己拼了一个：少了签名密钥、
+// 也没跑 Validate()。于是配了签名校验的部署里，"服务连得上、自检连不上"，
+// 而自检恰恰是排障时最该可信的那条路径。
+//
+// 这类"两处各拼一次"的分歧只在特定配置下暴露，平常看起来完全正常。
+func buildTransportAuth(cfg *config.Config) (*transport.Auth, error) {
+	auth := transport.NewAuth(
+		stringOr(cfg.Transport.AccessToken, ""),
+		stringOr(cfg.Transport.SignatureSecret, ""),
+		cfg.Transport.IPAllowlist,
+	)
+	if err := auth.Validate(); err != nil {
+		return nil, err
+	}
+	return auth, nil
+}
+
+// useSingleflight 把单飞的**两半**一起注册：mid 的判定与 post 的释放。
+//
+// 它们是成对的，而且必须成对——只注册 `Rule()` 而漏掉 `Release()` 的后果
+// 不是"单飞失效"，而是**永久失效**：Rule 会为 key 占位，而没有任何地方释放它，
+// 于是该 key 之后**每一条**消息都会撞上 busy 被拒绝。
+// 用户端表现是"机器人每个会话只答一次，之后永远沉默"（或一直回"正在处理中"），
+// 而这里有唯一一处能出错的地方：漏了一行注册。
+//
+// 用一个函数绑住两半，比加一条"记得两处都要注册"的注释可靠。
+func useSingleflight[K comparable](engine *router.Engine, sf *router.Singleflight[K]) {
+	if engine == nil || sf == nil {
+		return
+	}
+	engine.UseMid(sf.Rule())
+	engine.UsePost(sf.Release())
+}
 
 // eventJob 是一次待分发的事件（F-20 背压队列的元素）。
 //

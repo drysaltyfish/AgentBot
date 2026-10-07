@@ -10,14 +10,8 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/store"
 )
 
-// TierStore 是分层记忆（F-49）的持久化接口。
-//
-// 这里只定义 F-49 真正用到的方法：Lead 接线 SQLite 时按报告中的表结构实现即可
-// （tier_working / tier_episodes / tier_episode_items / tier_semantic），
-// 内存实现 MemTierStore 可直接用于测试与单进程部署。
-//
-// 所有方法都必须按 scope 严格隔离：scope 必须参与每一条读写路径（F-47）。
-type TierStore interface {
+// WorkingStore 是分层记忆**过程层**（Working）的持久化能力。
+type WorkingStore interface {
 	// AppendWorking 追加一条 Working 记录并返回带 ID 的副本。
 	AppendWorking(ctx context.Context, scope string, item TierItem) (TierItem, error)
 	// Working 返回该作用域的 Working 记录，按创建时间升序。
@@ -29,7 +23,10 @@ type TierStore interface {
 	// UpdateWorking 就地改写一条 Working 记录的正文与归属人（保留 id 与顺序）。
 	// 返回 false 表示该条目已不存在（可能刚被删除），调用方应退回追加而不是丢弃。
 	UpdateWorking(ctx context.Context, scope string, id int64, item TierItem) (bool, error)
+}
 
+// EpisodeStore 是分层记忆**情节层**（Episodic）的持久化能力。
+type EpisodeStore interface {
 	// AppendEpisode 追加一个会话片段并返回带 ID 的副本。
 	AppendEpisode(ctx context.Context, scope string, ep Episode) (Episode, error)
 	// Episodes 返回片段，按开始时间升序；limit<=0 表示全部。
@@ -40,7 +37,13 @@ type TierStore interface {
 	DeleteEpisode(ctx context.Context, scope string, id int64) (bool, error)
 	// DeleteEpisodeItem 按条目 id 从任意片段中删除该条目；片段清空时一并删除。
 	DeleteEpisodeItem(ctx context.Context, scope string, itemID int64) (bool, error)
+}
 
+// SemanticStore 是分层记忆**长期事实层**（Semantic）的持久化能力。
+//
+// 它同时也是 CompositeTierStore 接受的那个"只做语义"的实现：
+// SemanticTierStore 故意不实现 Working/Episodic，因为它没有那张表。
+type SemanticStore interface {
 	// UpsertSemantic 按文本就地更新或新增一条长期事实；返回是否为新增。
 	UpsertSemantic(ctx context.Context, scope string, item TierItem) (bool, error)
 	// Semantics 返回该作用域的全部长期事实，按写入顺序。
@@ -49,6 +52,20 @@ type TierStore interface {
 	TrimSemantics(ctx context.Context, scope string, keep int) (int, error)
 	// DeleteSemantic 按 id 删除一条长期事实。
 	DeleteSemantic(ctx context.Context, scope string, id int64) (bool, error)
+}
+
+// TierStore 是分层记忆（F-49）的持久化接口，由上面三层组合而成。
+//
+// 拆成三个接口不是为了好看：CompositeTierStore 要把"过程层来自 tier 表、
+// 语义层来自 F-87 扁平记忆表"拼起来，而"嵌一个 14 方法的接口、再覆盖其中 4 个"
+// 只能靠注释保证覆盖集合正确——多覆盖一个会让某层被绕过，少覆盖一个会让写入进错表，
+// 两者都不会编译失败。拆开之后，任何一层新增方法都会让组合实现**编译不过**。
+//
+// 所有方法都必须按 scope 严格隔离：scope 必须参与每一条读写路径（F-47）。
+type TierStore interface {
+	WorkingStore
+	EpisodeStore
+	SemanticStore
 }
 
 // MemTierStore 是 TierStore 的进程内实现，零值可直接使用。

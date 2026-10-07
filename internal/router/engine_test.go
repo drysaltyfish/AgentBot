@@ -10,6 +10,34 @@ import (
 	"github.com/drysaltyfish/agentbot/internal/transport"
 )
 
+func Test_F13_PreHookNamesFollowRegistrationOrder(t *testing.T) {
+	t.Parallel()
+	engine := NewEngine(NewRouter())
+
+	// 未命名的钩子留空占位，不能把后面的名字挤错位。
+	engine.UsePre(func(*Ctx) bool { return true })
+	engine.UsePreNamed("access", func(*Ctx) bool { return true })
+	engine.UsePre(func(*Ctx) bool { return true })
+	engine.UsePreNamed("moderation", func(*Ctx) bool { return true })
+
+	got := engine.PreHookNames()
+	want := []string{"", "access", "", "moderation"}
+	if len(got) != len(want) {
+		t.Fatalf("名字条数应与钩子一致: actual=%v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("第 %d 个名字: actual=%q expected=%q", i, got[i], want[i])
+		}
+	}
+
+	// 返回的是副本：调用方改动不能影响引擎。
+	got[1] = "tampered"
+	if again := engine.PreHookNames(); again[1] != "access" {
+		t.Fatalf("PreHookNames 必须返回副本，实际被改成了 %q", again[1])
+	}
+}
+
 func Test_F13_HookOrderIsPreRulesMidHandlerPost(t *testing.T) {
 	t.Parallel()
 	router := NewRouter()

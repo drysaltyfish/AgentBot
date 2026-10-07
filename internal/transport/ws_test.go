@@ -68,6 +68,88 @@ func newTestClient(t *testing.T, endpoint *pipeEnd) *WSClient {
 	}))
 }
 
+// Test_F04_DisconnectAllowsReconnect 钉住重连所需的那一步。
+//
+// Connect 在 c.conn != nil 时直接返回 nil（幂等），而读循环因读错误返回时
+// c.conn **不会**被清掉。所以想重连就必须先 Disconnect —— 否则 Connect 会
+// 返回 nil 这个"成功"，客户端随后拿着一条已经死掉的连接继续用，
+// 表现为"重连成功但永远收不到消息"。
+//
+// 同时钉住 Disconnect 与 Close 的区别：Close 是终态，之后 Connect 恒返回 ErrClosed。
+func Test_F04_DisconnectAllowsReconnect(t *testing.T) {
+	t.Parallel()
+	dials := 0
+	clientEnd, _ := newPipePair()
+	c := NewWSClient("ws://in-memory", nil, WithDialer(func(context.Context, string) (wsConn, error) {
+		dials++
+		return clientEnd, nil
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := c.Connect(ctx); err != nil {
+		t.Fatalf("首次 Connect: %v", err)
+	}
+	if err := c.Connect(ctx); err != nil {
+		t.Fatalf("重复 Connect: %v", err)
+	}
+	if dials != 1 {
+		t.Fatalf("已连接时 Connect 应幂等（不重新拨号），实际拨号 %d 次", dials)
+	}
+
+	// 断开前：Connect 是空操作，所以"重连"根本不会重新拨号——这正是坑。
+	c.Disconnect()
+	if err := c.Connect(ctx); err != nil {
+		t.Fatalf("Disconnect 之后 Connect: %v", err)
+	}
+	if dials != 2 {
+		t.Fatalf("Disconnect 之后 Connect 必须重新拨号，实际拨号 %d 次", dials)
+	}
+
+	// Close 是终态：之后不允许再连。
+	if err := c.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := c.Connect(ctx); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Close 之后 Connect 应返回 ErrClosed，实际 %v", err)
+	}
+	if err := c.Connect(ctx); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Close 之后 Connect 应持续返回 ErrClosed，实际 %v", err)
+	}
+}
+
+// Test_F04_ConnectIsNoopWhileStaleConnIsSet 把"必须先 Disconnect"这个前提写成断言。
+//
+// 这条断言的是**危险行为本身**：残留连接未清时，Connect 报告成功却不重新拨号。
+// 它存在的意义是：一旦有人把 Connect 改成"按连接存活状态判断"，这条会失败，
+// 提醒他重连路径的顺序依赖已经变了。
+func Test_F04_ConnectIsNoopWhileStaleConnIsSet(t *testing.T) {
+	t.Parallel()
+	dials := 0
+	clientEnd, _ := newPipePair()
+	c := NewWSClient("ws://in-memory", nil, WithDialer(func(context.Context, string) (wsConn, error) {
+		dials++
+		return clientEnd, nil
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := c.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	// 模拟读循环因读错误返回：连接已经不可用，但 c.conn 仍指向它。
+	go func() { _ = c.Listen(ctx, func([]byte, Caller) {}) }()
+	_ = clientEnd.Close()
+
+	if err := c.Connect(ctx); err != nil {
+		t.Fatalf("残留连接存在时 Connect 返回 nil 是既有语义: %v", err)
+	}
+	if dials != 1 {
+		t.Fatalf("残留连接存在时 Connect 不会重新拨号（这正是必须先 Disconnect 的原因），实际 %d 次", dials)
+	}
+}
+
 func Test_F06_ConcurrentCallsAreCorrelatedOutOfOrder(t *testing.T) {
 	t.Parallel()
 	clientEnd, serverEnd := newPipePair()

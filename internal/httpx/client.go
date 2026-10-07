@@ -262,6 +262,16 @@ func (c Config) Get(ctx context.Context, raw string) (*Response, error) {
 // SecureJoin 把 name 安全地拼到 base 下，拒绝任何越出 base 的路径。
 //
 // 禁止用 HasPrefix 判断目录包含关系（前缀可被路径穿越绕过）。
+//
+// **当前没有生产调用方**（测试之外一处都没有）：全仓库没有一个内置工具碰文件系统——
+// calculator / current_time / json_query / http_fetch / memory_* / recall_history /
+// forget_memory / list_memories / get_user_info 都不接路径参数，
+// internal/tool/builtin 里没有任何 os.Open / os.ReadFile / filepath. 调用。
+// 这和沙箱 `read_roots` / `write_roots` 不生效是**同一个原因**（见 README「局限与已知偏离」）。
+//
+// 保留它是给"将来接路径类工具"用的；那种工具必须同时做两件事：
+// 实现 tool.SandboxDeclarer 声明资源需求（沙箱才会真正检查 root），
+// 并用本函数拼接用户可控的名字。只做后者没有意义——没有 root 可比。
 func SecureJoin(base, name string) (string, error) {
 	absBase, err := filepath.Abs(base)
 	if err != nil {

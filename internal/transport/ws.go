@@ -278,6 +278,24 @@ func (c *WSClient) PendingCalls() int {
 	return n
 }
 
+// Disconnect 丢弃当前连接，使客户端可以再次 Connect。
+//
+// 与 Close 的区别是**不进入终态**：Close 之后 Connect 恒返回 ErrClosed，
+// 所以想重连就绝不能用 Close 来清连接。
+//
+// 为什么需要它：Connect 在 c.conn != nil 时直接返回 nil（幂等），而读循环因读错误
+// 返回时 c.conn 并不会被清掉。若重连时只调 Connect，会拿到 nil 这个"成功"，
+// 然后拿着一条已经死掉的连接再去 Listen——表现为"重连成功但永远收不到消息"，
+// 比干脆连不上更难查。没有连接时是空操作。
+func (c *WSClient) Disconnect() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil {
+		_ = c.conn.Close()
+		c.conn = nil
+	}
+}
+
 // Close 关闭底层连接。
 func (c *WSClient) Close(ctx context.Context) error {
 	c.mu.Lock()
