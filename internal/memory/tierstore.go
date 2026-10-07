@@ -26,6 +26,9 @@ type TierStore interface {
 	TrimWorking(ctx context.Context, scope string, keep int) ([]TierItem, error)
 	// DeleteWorking 按 id 删除一条 Working 记录。
 	DeleteWorking(ctx context.Context, scope string, id int64) (bool, error)
+	// UpdateWorking 就地改写一条 Working 记录的正文与归属人（保留 id 与顺序）。
+	// 返回 false 表示该条目已不存在（可能刚被删除），调用方应退回追加而不是丢弃。
+	UpdateWorking(ctx context.Context, scope string, id int64, item TierItem) (bool, error)
 
 	// AppendEpisode 追加一个会话片段并返回带 ID 的副本。
 	AppendEpisode(ctx context.Context, scope string, ep Episode) (Episode, error)
@@ -154,6 +157,27 @@ func (m *MemTierStore) DeleteWorking(_ context.Context, scope string, id int64) 
 			m.working[scope] = slices.Delete(slices.Clone(list), i, i+1)
 			return true, nil
 		}
+	}
+	return false, nil
+}
+
+// UpdateWorking 实现 TierStore：就地改写正文与归属人，保留 id 与切片位置。
+func (m *MemTierStore) UpdateWorking(_ context.Context, scope string, id int64, item TierItem) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureLocked()
+	list := m.working[scope]
+	for i := range list {
+		if list[i].ID != id {
+			continue
+		}
+		list[i].Text = item.Text
+		list[i].SubjectID = item.SubjectID
+		if !item.CreatedAt.IsZero() {
+			list[i].CreatedAt = item.CreatedAt
+		}
+		m.working[scope] = list
+		return true, nil
 	}
 	return false, nil
 }

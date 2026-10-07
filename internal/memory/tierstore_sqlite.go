@@ -31,7 +31,7 @@ type rowQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-const workingColumns = `id, text, title, refs, score, created_at`
+const workingColumns = `id, text, title, refs, score, created_at, subject_id`
 
 func (s *SQLiteTierStore) ready() error {
 	if s == nil || s.st == nil {
@@ -88,7 +88,7 @@ func queryItems(ctx context.Context, q rowQuerier, query string, args ...any) ([
 			refs    string
 			created int64
 		)
-		if err := rows.Scan(&it.ID, &it.Text, &it.Title, &refs, &it.Score, &created); err != nil {
+		if err := rows.Scan(&it.ID, &it.Text, &it.Title, &refs, &it.Score, &created, &it.SubjectID); err != nil {
 			return nil, fmt.Errorf("scan tier item: %w", err)
 		}
 		it.Refs = parseRefs(refs)
@@ -126,10 +126,10 @@ func (s *SQLiteTierStore) AppendWorking(ctx context.Context, scope string, item 
 		}
 		item.ID = id
 		_, xerr := tx.ExecContext(ctx, `INSERT INTO tier_items
-            (id, scope_key, tier, episode_id, text, title, refs, score, created_at, updated_at, fingerprint)
-            VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, '')`,
+            (id, scope_key, tier, episode_id, text, title, refs, score, created_at, updated_at, fingerprint, subject_id)
+            VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, '', ?)`,
 			id, scope, TierWorking.String(), item.Text, item.Title, refsJSON(item.Refs), item.Score,
-			item.CreatedAt.UnixMilli(), now.UnixMilli())
+			item.CreatedAt.UnixMilli(), now.UnixMilli(), item.SubjectID)
 		if xerr != nil {
 			return fmt.Errorf("insert working item: %w", xerr)
 		}
@@ -224,6 +224,33 @@ func (s *SQLiteTierStore) DeleteWorking(ctx context.Context, scope string, id in
 	return deleted, nil
 }
 
+// UpdateWorking 实现 TierStore：就地改写正文与归属人，保留 id 与创建顺序。
+func (s *SQLiteTierStore) UpdateWorking(ctx context.Context, scope string, id int64, item TierItem) (bool, error) {
+	if err := s.ready(); err != nil {
+		return false, err
+	}
+	var updated bool
+	err := s.st.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		res, xerr := tx.ExecContext(ctx,
+			`UPDATE tier_items SET text = ?, subject_id = ?, updated_at = ?
+			 WHERE scope_key = ? AND tier = ? AND id = ?`,
+			item.Text, item.SubjectID, time.Now().UnixMilli(), scope, TierWorking.String(), id)
+		if xerr != nil {
+			return fmt.Errorf("update working item: %w", xerr)
+		}
+		n, rerr := res.RowsAffected()
+		if rerr != nil {
+			return fmt.Errorf("update working rows: %w", rerr)
+		}
+		updated = n > 0
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return updated, nil
+}
+
 // AppendEpisode 实现 TierStore：片段与条目共用全局 id 分配器。
 func (s *SQLiteTierStore) AppendEpisode(ctx context.Context, scope string, ep Episode) (Episode, error) {
 	if err := s.ready(); err != nil {
@@ -262,11 +289,11 @@ func (s *SQLiteTierStore) AppendEpisode(ctx context.Context, scope string, ep Ep
 				ep.Items[i].CreatedAt = now
 			}
 			if _, xerr := tx.ExecContext(ctx, `INSERT INTO tier_items
-                (id, scope_key, tier, episode_id, text, title, refs, score, created_at, updated_at, fingerprint)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')`,
+                (id, scope_key, tier, episode_id, text, title, refs, score, created_at, updated_at, fingerprint, subject_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?)`,
 				ep.Items[i].ID, scope, TierEpisodic.String(), id, ep.Items[i].Text, ep.Items[i].Title,
 				refsJSON(ep.Items[i].Refs), ep.Items[i].Score, ep.Items[i].CreatedAt.UnixMilli(),
-				now.UnixMilli()); xerr != nil {
+				now.UnixMilli(), ep.Items[i].SubjectID); xerr != nil {
 				return fmt.Errorf("insert episode item: %w", xerr)
 			}
 		}
@@ -470,9 +497,9 @@ func (s *SQLiteTierStore) UpsertSemantic(ctx context.Context, scope string, item
 		switch {
 		case qerr == nil:
 			_, uerr := tx.ExecContext(ctx, `UPDATE tier_items
-                SET text = ?, title = ?, refs = ?, score = ?, updated_at = ?
+                SET text = ?, title = ?, refs = ?, score = ?, subject_id = ?, updated_at = ?
                 WHERE id = ?`,
-				item.Text, item.Title, refsJSON(item.Refs), item.Score, now.UnixMilli(), existingID)
+				item.Text, item.Title, refsJSON(item.Refs), item.Score, item.SubjectID, now.UnixMilli(), existingID)
 			if uerr != nil {
 				return fmt.Errorf("update semantic item: %w", uerr)
 			}
@@ -490,10 +517,10 @@ func (s *SQLiteTierStore) UpsertSemantic(ctx context.Context, scope string, item
 			createdAt = now
 		}
 		if _, xerr := tx.ExecContext(ctx, `INSERT INTO tier_items
-            (id, scope_key, tier, episode_id, text, title, refs, score, created_at, updated_at, fingerprint)
-            VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+            (id, scope_key, tier, episode_id, text, title, refs, score, created_at, updated_at, fingerprint, subject_id)
+            VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, scope, TierSemantic.String(), item.Text, item.Title, refsJSON(item.Refs), item.Score,
-			createdAt.UnixMilli(), now.UnixMilli(), key); xerr != nil {
+			createdAt.UnixMilli(), now.UnixMilli(), key, item.SubjectID); xerr != nil {
 			return fmt.Errorf("insert semantic item: %w", xerr)
 		}
 		added = true

@@ -275,11 +275,19 @@ var tables = []tableDef{
 			score       REAL    NOT NULL DEFAULT 0,
 			created_at  INTEGER NOT NULL,
 			updated_at  INTEGER NOT NULL DEFAULT 0,
-			fingerprint TEXT    NOT NULL DEFAULT ''
+			fingerprint TEXT    NOT NULL DEFAULT '',
+			subject_id  INTEGER NOT NULL DEFAULT 0
 		)`,
 		Indexes: []string{
 			`CREATE INDEX IF NOT EXISTS idx_tier_items_scope_tier ON tier_items(scope_key, tier, id)`,
 			`CREATE INDEX IF NOT EXISTS idx_tier_items_episode ON tier_items(episode_id, id)`,
+			`CREATE INDEX IF NOT EXISTS idx_tier_items_scope_subject ON tier_items(scope_key, subject_id, id)`,
+		},
+		Columns: []columnSpec{
+			// subject_id 是这条分层记忆**关于谁**（写入时的发言人 QQ 号）。
+			// 与 memories.subject_id 同一语义：写入判定只在同一归属人之间比较，
+			// 否则「张三很怕辣」会与「李四很怕辣」合并成一条。
+			{Table: "tier_items", Name: "subject_id", DDL: "subject_id INTEGER NOT NULL DEFAULT 0"},
 		},
 	},
 }

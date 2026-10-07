@@ -11,7 +11,7 @@ http_fetch
   desc: 抓取一个 http/https 链接的文本内容；私网地址会被拒绝
   params: {"properties":{"url":{"description":"要抓取的 http/https 链接","type":"string"}},"required":["url"],"type":"object"}
 memory_save
-  desc: 把一条值得长期记住的信息写进记忆，必须是单行文本。先判断这条事实**关于谁**：关于当前说话的人就照写（如「张三很怕辣」）；属于大家共同的事（活动通知、群规、共同决定）就把 shared 设为 true——那种信息不该记成某一个人的。
+  desc: 把一条值得长期记住的信息写进记忆，必须是单行文本。先判断这条事实**关于谁**：关于当前说话的人就照写（如「张三很怕辣」）；属于大家共同的事（活动通知、群规、共同决定）就把 shared 设为 true——那种信息不该记成某一个人的。不要记昵称、称呼、姓名、外号这类信息：那是平台名片的职责，每条消息都带着当前名片，写进记忆只会留下一份会过期的副本。
   params: {"properties":{"shared":{"description":"true 表示这是**公共记忆**（活动安排、群规、大家共同的事），不属于任何个人。默认 false = 关于当前发言人","type":"boolean"},"text":{"description":"要记住的内容，必须单行；写清属于谁，例如「张三很怕辣」","type":"string"}},"required":["text"],"type":"object"}
 memory_recall
   desc: 读取已保存的长期记忆；默认返回本会话（群）的全部记忆。只想了解某个人时，传 subject_qq 只看他的——回答关于某个人的问题前应先这样做，否则会把别人的事当成他的

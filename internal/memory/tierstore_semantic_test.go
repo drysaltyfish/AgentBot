@@ -33,20 +33,19 @@ func newTieredOverSQLite(t *testing.T, workingLimit int) (*TieredMemory, *store.
 // Test_F49_SemanticLayerReusesF87Dedup 是本轮接线的关键断言：
 // 分层记忆的长期事实必须沿用 F-87 的判定（相似度分带），而不是只按文本指纹去重。
 // 否则切换会让"同一件事被说两遍"在召回里出现两条。
+//
+// 直接走 st.UpsertSemantic 而不是 Save：**写入侧的覆盖判定现在发生在 Working 层**
+// （见 Test_F49_SaveSupersedesSimilarWorkingItem），第二遍相似文本在 Save 时就被
+// 吸收，固化因此不会触发。语义层的判定本身仍要单独钉住。
 func Test_F49_SemanticLayerReusesF87Dedup(t *testing.T) {
 	t.Parallel()
 	tiered, _ := newTieredOverSQLite(t, 2)
-	ctx := context.Background()
 	sc := ctxScope("g")
 
-	if err := tiered.Save(sc, "用户喜欢喝橙汁"); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := tiered.Save(sc, "用户喜欢喝橙汁！"); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := tiered.WaitConsolidation(ctx); err != nil {
-		t.Fatalf("WaitConsolidation: %v", err)
+	for _, text := range []string{"用户喜欢喝橙汁", "用户喜欢喝橙汁！"} {
+		if _, err := tiered.st.UpsertSemantic(sc, scope.ScopeFrom(sc), TierItem{Text: text}); err != nil {
+			t.Fatalf("UpsertSemantic(%q): %v", text, err)
+		}
 	}
 
 	facts, err := tiered.Semantics(sc)

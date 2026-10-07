@@ -7,9 +7,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/drysaltyfish/agentbot/internal/scope"
 	"github.com/drysaltyfish/agentbot/internal/store"
+	"github.com/drysaltyfish/agentbot/internal/textsim"
 )
 
 // Tier 是分层记忆（F-49）的层级。
@@ -65,12 +67,16 @@ const (
 
 // TierItem 是分层记忆中的一条记录。
 type TierItem struct {
-	ID        int64
-	Text      string
-	Title     string
-	Refs      []string
-	Tier      Tier
-	Score     float64
+	ID    int64
+	Text  string
+	Title string
+	Refs  []string
+	Tier  Tier
+	Score float64
+	// SubjectID 是这条记录**关于谁**（群聊里就是写入时的发言人 QQ 号，0 表示未指明）。
+	// 作用域决定"谁看得到"，归属人决定"这是谁的事"——两者不同维度（F-47/F-48）。
+	// 写入判定只在**同一归属人**之间比较，否则「张三很怕辣」会与「李四很怕辣」合并。
+	SubjectID int64
 	CreatedAt time.Time
 }
 
@@ -176,6 +182,11 @@ type TieredOptions struct {
 	SemanticLimit int
 	// IdleGap <= 0 时用 DefaultIdleGap。
 	IdleGap time.Duration
+	// Judge 是可选的语义判官，只在写入落进相似度歧义带时使用；
+	// 为 nil 时退回确定性阈值（与 F-87 的 Store 同一套分带口径）。
+	Judge Judge
+	// DeterministicThreshold <= 0 时用 workingMergeThreshold。
+	DeterministicThreshold float64
 	// Consolidator 为 nil 时使用 RuleConsolidator。
 	Consolidator Consolidator
 	// ConsolidateTimeout <= 0 时用 DefaultConsolidateTimeout。
@@ -201,6 +212,8 @@ type TieredMemory struct {
 	episodicLimit      int
 	semanticLimit      int
 	idleGap            time.Duration
+	judge              Judge
+	threshold          float64
 	consolidator       Consolidator
 	consolidateTimeout time.Duration
 	clock              func() time.Time
@@ -221,6 +234,8 @@ func NewTiered(opts TieredOptions) *TieredMemory {
 		episodicLimit:      positiveOr(opts.EpisodicLimit, DefaultEpisodicLimit),
 		semanticLimit:      positiveOr(opts.SemanticLimit, DefaultSemanticLimit),
 		idleGap:            opts.IdleGap,
+		judge:              opts.Judge,
+		threshold:          opts.DeterministicThreshold,
 		consolidator:       opts.Consolidator,
 		consolidateTimeout: opts.ConsolidateTimeout,
 		clock:              opts.Clock,
@@ -232,6 +247,9 @@ func NewTiered(opts TieredOptions) *TieredMemory {
 	}
 	if m.idleGap <= 0 {
 		m.idleGap = DefaultIdleGap
+	}
+	if m.threshold <= 0 {
+		m.threshold = workingMergeThreshold
 	}
 	if m.consolidateTimeout <= 0 {
 		m.consolidateTimeout = DefaultConsolidateTimeout
@@ -261,7 +279,15 @@ func (m *TieredMemory) warnf(msg string) {
 	}
 }
 
-// Save 实现 agent.Memory：写入当前作用域的 Working 层。
+// Save 实现 agent.Memory：把一条事实写入当前作用域的 Working 层。
+//
+// 写入是**覆盖式**的，不是无脑追加：先在同一个作用域、**同一个归属人**的既有
+// Working 条目里找最相似的一条，判为同一件事就地改写（保留 id 与创建顺序），
+// 否则才追加。只追加的实现会让"更正"变成两条并存的旧事实，而旧那条同样会被
+// 召回——真实事故就是"本人改了称呼，机器人还一直叫旧名字"。
+//
+// 称呼类事实直接拒绝（见 LooksLikeIdentityFact）：那是平台名片的职责，
+// 抄进记忆只会得到一份每轮回灌、且推不翻的过期副本。
 //
 // 作用域经 ctx 传递（见 internal/scope），与既有 Store 的约定一致。
 func (m *TieredMemory) Save(ctx context.Context, text string) error {
@@ -272,16 +298,106 @@ func (m *TieredMemory) Save(ctx context.Context, text string) error {
 	if err != nil {
 		return err
 	}
+	if LooksLikeIdentityFact(trimmed) {
+		return ErrIdentityFact
+	}
 	sc := scope.ScopeFrom(ctx)
 	if sc == "" {
 		// 空作用域会把所有会话混在一起，宁可失败也不串。
 		return fmt.Errorf("save tiered memory: %w", ErrUnavailable)
 	}
-	if _, err := m.st.AppendWorking(ctx, sc, TierItem{Text: trimmed, CreatedAt: m.clock()}); err != nil {
+	subject := scope.SubjectFrom(ctx)
+	handled, err := m.supersedeWorking(ctx, sc, subject, trimmed)
+	if err != nil {
+		// 覆盖判定失败不能变成"记忆写不进去"：退回追加，只是留下一次重复。
+		m.warnf("tiered memory supersede failed, appending instead: " + err.Error())
+	} else if handled {
+		return nil
+	}
+	if _, err := m.st.AppendWorking(ctx, sc, TierItem{Text: trimmed, SubjectID: subject, CreatedAt: m.clock()}); err != nil {
 		return err
 	}
 	m.afterWrite(ctx, sc)
 	return nil
+}
+
+// supersedeWorking 在**同作用域 + 同归属人**的 Working 条目里找与新事实最相似的一条；
+// 判为同一件事时就地改写它（保留 id 与创建顺序），并报告这次写入是否已被吸收。
+//
+// 就地改写而不是"删旧插新"：Working 的顺序是召回与固化的依据，换成新 id 会让
+// 整段顺序位移，也会让正在进行的固化拿到两份内容。
+func (m *TieredMemory) supersedeWorking(ctx context.Context, sc string, subject int64, text string) (bool, error) {
+	items, err := m.st.Working(ctx, sc)
+	if err != nil {
+		return false, err
+	}
+	var (
+		bestID   int64
+		bestText string
+		bestSim  float64
+	)
+	for _, it := range items {
+		if it.SubjectID != subject {
+			continue
+		}
+		if it.Text == text {
+			// 完全相同：幂等，忽略这次写入。
+			return true, nil
+		}
+		if sim := textsim.Similarity(text, it.Text); sim > bestSim {
+			bestID, bestText, bestSim = it.ID, it.Text, sim
+		}
+	}
+	if bestID == 0 || !m.sameFact(ctx, text, bestText, bestSim) {
+		return false, nil
+	}
+	updated, err := m.st.UpdateWorking(ctx, sc, bestID, TierItem{Text: text, SubjectID: subject})
+	if err != nil {
+		return false, err
+	}
+	if !updated {
+		// 条目在判定与改写之间被删了（例如用户刚忘了它）：退回追加，别丢这条记忆。
+		return false, nil
+	}
+	return true, nil
+}
+
+// workingMergeThreshold 是 Working 层"就地改写"的确定性门槛。
+//
+// 比 F-87 的 textsim.Threshold(0.50) **更高**，理由是 Working 里同时住着两类东西：
+// 真正的长期事实，以及"消息-3""片段消息-7"这类很短的会话片段。文本越短，
+// 字符二元组 Jaccard 越容易虚高——"片段消息-0"与"片段消息-1"就有 0.67，
+// 但它们是两条不同的片段；用 0.50 会把整个缓冲层合并成一条，固化也就无从触发。
+// 门槛定在 0.75：明显是同一件事的改写（如只差一个标点/称谓）仍会命中，
+// 灰区交给判官，判官不可用时宁可漏合并（多一条重复，用户看得见）。
+const workingMergeThreshold = 0.75
+
+// sameFact 判定新旧两条是否指同一件事。
+//
+// 分带口径与 F-87 的 Store 相同（>=0.90 并入、<0.30 新增），但门槛更保守：
+// 短文本只认"完全相同"或"高度相似"，灰区问判官，判官缺失时按 workingMergeThreshold。
+func (m *TieredMemory) sameFact(ctx context.Context, text, existing string, sim float64) bool {
+	switch {
+	case text == existing:
+		return true
+	case sim >= HighBand:
+		return true
+	case sim < LowBand:
+		return false
+	}
+	// 短文本到这里就结束：字符二元组太少，Jaccard 单独不足以说明是同一件事。
+	if utf8.RuneCountInString(text) < textsim.MinRunesForSimilarity ||
+		utf8.RuneCountInString(existing) < textsim.MinRunesForSimilarity {
+		return false
+	}
+	if m.judge != nil {
+		same, err := m.judge.SameFact(ctx, text, existing)
+		if err == nil {
+			return same
+		}
+		m.warnf("memory judge unavailable; falling back to the deterministic threshold: " + err.Error())
+	}
+	return sim >= m.threshold
 }
 
 // afterWrite 在 Working 达到上限时裁剪并触发异步固化。

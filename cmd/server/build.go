@@ -175,6 +175,8 @@ func buildLongTermMemory(cfg *config.Config, st *store.Store, lg *observe.Logger
 			memory.NewSQLiteTierStore(st),
 			memory.NewSemanticTierStore(flat),
 		),
+		// 写入判定（覆盖 vs 追加）与固化共用同一个判官：只在相似度歧义带才问一次模型。
+		Judge: judge,
 		// 固化产出的事实交给语义层，由 F-87 的判定决定是新增还是并入。
 		Consolidator: memory.RuleConsolidator{MinScore: 0, MaxFacts: maxPerScope},
 		Warn:         func(msg string) { lg.Component("memory").Info(msg) },

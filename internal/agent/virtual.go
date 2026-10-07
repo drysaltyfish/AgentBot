@@ -73,7 +73,8 @@ type saveMemoryTool struct{ mem Memory }
 
 func (saveMemoryTool) Name() string { return ActionSaveMemory }
 func (saveMemoryTool) Description() string {
-	return "把一条值得长期记住的信息写进记忆（单行文本）"
+	return "把一条值得长期记住的信息写进记忆（单行文本）。不要记昵称、称呼、姓名、外号这类信息——" +
+		"那是平台名片的职责，每条消息都带着当前名片，写进记忆只会留下一份会过期的副本"
 }
 func (saveMemoryTool) Parameters() tool.Schema {
 	return tool.Schema{

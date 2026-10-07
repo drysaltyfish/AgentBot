@@ -48,6 +48,11 @@ func (s *SemanticTierStore) UpsertSemantic(ctx context.Context, scopeKey string,
 		return false, err
 	}
 	scoped := scope.WithScope(ctx, scopeKey)
+	// 固化传来的条目带着归属人（Working 写入时记下的发言人 QQ 号）；
+	// 放进 ctx 让 F-87 的判定与落库都按同一个人比较，而不是退化成"无归属"。
+	if item.SubjectID > 0 {
+		scoped = scope.WithSubject(scoped, item.SubjectID)
+	}
 	res, err := s.mem.SaveItem(scoped, item.Text)
 	if err != nil {
 		return false, err
@@ -112,6 +117,7 @@ func tierItemFromMemory(m store.Memory) TierItem {
 		Title:     m.Title,
 		Tier:      TierSemantic,
 		Score:     m.Score,
+		SubjectID: m.SubjectID,
 		CreatedAt: time.UnixMilli(m.CreatedAt),
 	}
 }
